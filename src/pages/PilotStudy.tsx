@@ -20,7 +20,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Tag, SectionHeader } from '../components';
+import { Card, Button, Tag, SectionHeader, useToast } from '../components';
 import {
   buildPilotFactoryTwin,
   buildRetooledPilotTwin,
@@ -40,6 +40,7 @@ import { newScenarioId, type Scenario, type Twin } from '../domain/twin';
 export function PilotStudyPage() {
   const navigate = useNavigate();
   const garments = useGarments();
+  const toast = useToast();
 
   // Preview twin built once — replaced fresh inside `runWizard` so the store
   // gets a new id and timestamp.
@@ -117,7 +118,7 @@ export function PilotStudyPage() {
         navigate('/builder');
       } catch (err) {
         console.error('[pilot] wizard failed', err);
-        alert(`Pilot setup failed: ${err instanceof Error ? err.message : String(err)}`);
+        toast({ kind: 'error', message: `Pilot setup failed: ${err instanceof Error ? err.message : String(err)}` });
       } finally {
         setBusy(false);
       }

@@ -472,7 +472,7 @@ export function commitFloorImport(
   if (!active) throw new Error('No active twin to import into.');
   const gutter = 4;
   let originX = 0;
-  let originY = 0;
+  const originY = 0;
   if (active.departments.length > 0) {
     for (const d of active.departments) {
       const right = d.bounds.x + d.bounds.w;

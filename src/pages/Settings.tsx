@@ -1,9 +1,10 @@
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
-import { Card, Button, SectionHeader, ToggleGroup, Slider, HudSelect, Tag, TimeChip } from '../components';
+import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { Card, Button, SectionHeader, ToggleGroup, Slider, HudSelect, Tag, TimeChip, useConfirm } from '../components';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useProject, downloadProjectJson, pickProjectFile, isFactoryNameTaken } from '../store';
+import { useProject, pickProjectFile, isFactoryNameTaken, downloadSwproj, applySwproj, parseSwproj } from '../store';
 import { useTwin } from '../store/twin';
+import { estimateIdbBytes, isUsingIndexedDb } from '../store/storage/indexedDbStorage';
 import { ALL_GARMENT_TEMPLATES } from '../domain';
 import { formatDate } from '../lib/format';
 import type { UnitsPrefs } from '../store/project';
@@ -12,6 +13,25 @@ import { fmtMinutesAsHHMM, parseHHMM, type ModelTimeUnit } from '../simulation/t
 export function SettingsPage() {
   const navigate = useNavigate();
   const project = useProject();
+  const confirm = useConfirm();
+  // Storage status for the PROJECT card footer — which backend persistence
+  // is using (IndexedDB, or the localStorage fallback) and roughly how much
+  // is stored. Fetched once on mount; IndexedDB reads are async.
+  const [storageInfo, setStorageInfo] = useState<{ backend: string; kb: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    estimateIdbBytes().then((bytes) => {
+      if (alive) {
+        setStorageInfo({
+          backend: isUsingIndexedDb() ? 'IndexedDB' : 'localStorage (fallback)',
+          kb: bytes / 1024,
+        });
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
   // Read the twin universe so we can surface factory composition + the
   // saved scenario forks on the PROJECT card. The PROJECT card is the
   // single landing place where the user inspects + exports the active
@@ -83,15 +103,6 @@ export function SettingsPage() {
     }
     if (!nameUnchanged) project.rename(trimmedPending);
   };
-
-  const [gamification, setGamification] = useState([
-    { k: 'XP & badges',       desc: 'Earn XP, unlock badges', on: true },
-    { k: 'Difficulty events', desc: 'Random crises (sickness, breakdowns, rush orders)', on: true },
-    { k: 'Tutorial hints',    desc: 'Show contextual tips', on: false },
-    { k: 'Sound effects',     desc: 'Sewing machines, alerts, chime', on: false },
-  ]);
-  const toggleGamification = (i: number) =>
-    setGamification((prev) => prev.map((p, idx) => (idx === i ? { ...p, on: !p.on } : p)));
 
   return (
     <div style={{ width: '100%', height: '100%', overflow: 'auto', padding: 32, background: SW_COLORS.paperDeep }}>
@@ -351,7 +362,7 @@ export function SettingsPage() {
           )}
 
           <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
-            <Button variant="secondary" icon="⤓" onClick={() => downloadProjectJson(project)}>
+            <Button variant="secondary" icon="⤓" onClick={downloadSwproj}>
               Export .swproj
             </Button>
             <Button
@@ -366,10 +377,18 @@ export function SettingsPage() {
               icon="⤒"
               onClick={async () => {
                 try {
-                  const data = await pickProjectFile();
-                  const result = project.loadProject(data);
-                  if (result.ok) setImportMsg({ kind: 'ok', text: 'Project imported.' });
-                  else setImportMsg({ kind: 'err', text: result.reason });
+                  const raw = await pickProjectFile();
+                  const result = applySwproj(parseSwproj(raw));
+                  if (result.ok) {
+                    setImportMsg({
+                      kind: 'ok',
+                      text: result.legacy
+                        ? 'Project imported (legacy file — factory layout left unchanged).'
+                        : 'Project + factory imported.',
+                    });
+                  } else {
+                    setImportMsg({ kind: 'err', text: result.reason ?? 'Import failed.' });
+                  }
                 } catch (e) {
                   setImportMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });
                 }
@@ -380,8 +399,8 @@ export function SettingsPage() {
             <Button
               variant="danger"
               icon="↺"
-              onClick={() => {
-                if (confirm('Reset the project? Local changes will be lost.')) {
+              onClick={async () => {
+                if (await confirm({ title: 'Reset project', message: 'Reset the project? Local changes will be lost.', confirmLabel: 'Reset', variant: 'danger' })) {
                   project.resetProject();
                   setImportMsg({ kind: 'ok', text: 'Project reset.' });
                 }
@@ -405,7 +424,7 @@ export function SettingsPage() {
             )}
           </div>
           <div style={{ marginTop: 12, padding: 10, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-            Project state (factory name, default garment, operator names, Yamazumi overrides, skill matrix) auto-saves to <code style={{ fontFamily: SW_FONTS.mono }}>localStorage</code> on every change. Use Export to share or back up; Import restores from a <code style={{ fontFamily: SW_FONTS.mono }}>.swproj</code> JSON file.
+            Project + factory state auto-saves to your browser's local database (<code style={{ fontFamily: SW_FONTS.mono }}>{storageInfo?.backend ?? 'IndexedDB'}</code>{storageInfo ? ` · ~${storageInfo.kb < 1 ? '<1' : Math.round(storageInfo.kb).toLocaleString()} KB used` : ''}) on every change. Use Export to share or back up; Import restores from a <code style={{ fontFamily: SW_FONTS.mono }}>.swproj</code> JSON file.
           </div>
         </Card>
 
@@ -588,29 +607,6 @@ export function SettingsPage() {
                 onChange={(v) => project.setUnit(r.field, v as UnitsPrefs[typeof r.field])}
                 options={r.opts.map((o) => ({ value: o, label: o }))}
               />
-            </div>
-          ))}
-        </Card>
-
-        <Card padding={22}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, marginBottom: 14 }}>GAMIFICATION</div>
-          {gamification.map((r, i) => (
-            <div key={r.k} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 0', borderTop: i ? `1px solid ${SW_COLORS.line}` : 'none' }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 700 }}>{r.k}</div>
-                <div style={{ fontSize: 11, color: SW_COLORS.muted }}>{r.desc}</div>
-              </div>
-              <div
-                role="switch"
-                aria-checked={r.on}
-                aria-label={r.k}
-                tabIndex={0}
-                onClick={() => toggleGamification(i)}
-                onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleGamification(i); } }}
-                style={{ width: 42, height: 24, background: r.on ? SW_COLORS.brand : SW_COLORS.paperEdge, borderRadius: 24, position: 'relative', cursor: 'pointer', transition: 'background 120ms' }}
-              >
-                <div style={{ position: 'absolute', top: 2, left: r.on ? 20 : 2, width: 20, height: 20, background: '#fff', borderRadius: '50%', transition: 'left 100ms', boxShadow: SW_SHADOWS.card }} />
-              </div>
             </div>
           ))}
         </Card>

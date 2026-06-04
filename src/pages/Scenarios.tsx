@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat } from '../components';
+import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat, useConfirm } from '../components';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
@@ -31,6 +31,7 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
   const garments = useGarments();
   const scenarios = project.scenarios;
   const createScenarioFromTwin = useTwin((s) => s.createScenarioFromTwin);
+  const confirm = useConfirm();
 
   const [mode, setMode] = useState<Mode>('list');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -46,12 +47,12 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
     setSelectedIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id].slice(-4)));
   }
 
-  function handleLoad(s: Scenario) {
+  async function handleLoad(s: Scenario) {
     const hasTwin = !!s.config.twin;
-    const prompt = hasTwin
+    const message = hasTwin
       ? `Load "${s.name}"? This swaps in the saved factory layout and restores the garment, operators, skill matrix and Yamazumi assignment captured at save time.`
       : `Load "${s.name}"? This replaces the current factory's garment, operators, skill matrix and Yamazumi assignment. (This scenario was saved before factory snapshots were supported — the floor layout won't change.)`;
-    if (!confirm(prompt)) return;
+    if (!(await confirm({ title: 'Load scenario', message, confirmLabel: 'Load' }))) return;
     project.loadScenario(s.id);
     // Project scenarios saved after the twin-snapshot upgrade carry their
     // own factory layout. Forge a fresh twin-store scenario from it and
@@ -72,8 +73,8 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
     navigate('/builder');
   }
 
-  function handleDelete(s: Scenario) {
-    if (!confirm(`Delete "${s.name}"? This cannot be undone.`)) return;
+  async function handleDelete(s: Scenario) {
+    if (!(await confirm({ title: 'Delete scenario', message: `Delete "${s.name}"? This cannot be undone.`, confirmLabel: 'Delete', variant: 'danger' }))) return;
     project.deleteScenario(s.id);
     setSelectedIds((cur) => cur.filter((x) => x !== s.id));
   }

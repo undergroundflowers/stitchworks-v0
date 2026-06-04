@@ -41,9 +41,9 @@ export function OrdersPage() {
   const project = useProject();
   const garments = useGarments();
   const [order, setOrder] = useState<OrderState>({
-    po: 'PO-4422',
-    client: 'Northwind Apparel Co.',
-    style: 'Polo S/S Classic',
+    po: '',
+    client: '',
+    style: '',
     qty: 1200,
     deadlineDays: 5,
     garmentTemplateId: project.selectedGarmentId,
@@ -241,6 +241,10 @@ export function OrdersPage() {
     return { sys, def: PRODUCTION_SYSTEMS[sys], crew, days, pitch };
   });
 
+  const qtyInvalid = !(order.qty > 0);
+  const deadlineInvalid = !(order.deadlineDays > 0);
+  const orderInvalid = qtyInvalid || deadlineInvalid;
+
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', padding: 32, background: SW_COLORS.paperDeep }}>
       <div style={{ maxWidth: 1180, margin:'0 auto' }}>
@@ -253,11 +257,13 @@ export function OrdersPage() {
           <Card padding={20}>
             <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>ORDER DETAILS</div>
             {[
-              { k:'po', label:'PO Number' }, { k:'client', label:'Client' }, { k:'style', label:'Style' },
+              { k:'po', label:'PO Number', placeholder:'e.g. PO-4422' },
+              { k:'client', label:'Client', placeholder:'Client name' },
+              { k:'style', label:'Style', placeholder:'Style name' },
             ].map(f => (
               <div key={f.k} style={{ marginBottom:12 }}>
                 <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:4 }}>{f.label}</div>
-                <input value={order[f.k as keyof OrderState] as string} onChange={e => setOrder({ ...order, [f.k]: e.target.value })}
+                <input value={order[f.k as keyof OrderState] as string} placeholder={f.placeholder} onChange={e => setOrder({ ...order, [f.k]: e.target.value })}
                   style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize:13, fontWeight:600, color: SW_COLORS.ink, background: SW_COLORS.paper }}/>
               </div>
             ))}
@@ -265,12 +271,16 @@ export function OrdersPage() {
               <div>
                 <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:4 }}>Quantity</div>
                 <input type="number" value={order.qty} onChange={e=>setOrder({...order, qty: +e.target.value})}
-                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize:14, fontWeight:700 }}/>
+                  aria-invalid={qtyInvalid || undefined}
+                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${qtyInvalid ? SW_COLORS.alarm : SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize:14, fontWeight:700 }}/>
+                {qtyInvalid && <div style={{ marginTop:4, fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.alarm }}>Enter a quantity greater than 0.</div>}
               </div>
               <div>
                 <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:4 }}>Deadline (days)</div>
                 <input type="number" value={order.deadlineDays} onChange={e=>setOrder({...order, deadlineDays:+e.target.value})}
-                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize:14, fontWeight:700 }}/>
+                  aria-invalid={deadlineInvalid || undefined}
+                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${deadlineInvalid ? SW_COLORS.alarm : SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize:14, fontWeight:700 }}/>
+                {deadlineInvalid && <div style={{ marginTop:4, fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.alarm }}>Enter a deadline of at least 1 day.</div>}
               </div>
             </div>
 
@@ -611,10 +621,10 @@ export function OrdersPage() {
 
         <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
           <Button variant="secondary" onClick={()=>navigate('/builder')}>Save draft</Button>
-          <Button variant="dark" size="lg" icon="✎" onClick={commitToBuilder}>
+          <Button variant="dark" size="lg" icon="✎" onClick={commitToBuilder} disabled={orderInvalid}>
             Build in Builder
           </Button>
-          <Button variant="primary" size="lg" onClick={() => commit('/sim')}>Run simulation →</Button>
+          <Button variant="primary" size="lg" onClick={() => commit('/sim')} disabled={orderInvalid}>Run simulation →</Button>
         </div>
       </div>
 

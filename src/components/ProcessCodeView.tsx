@@ -311,7 +311,7 @@ const TYPES = new Set([
   'Simulation',
 ]);
 
-const TOKEN_REGEX = /('[^']*')|(\/\/[^\n]*)|(\b\d+(?:\.\d+)?\b)|(\b[A-Za-z_][A-Za-z0-9_]*\b)|([^'\/\d\w])/g;
+const TOKEN_REGEX = /('[^']*')|(\/\/[^\n]*)|(\b\d+(?:\.\d+)?\b)|(\b[A-Za-z_][A-Za-z0-9_]*\b)|([^'/\d\w])/g;
 
 /** Tokenize one line and wrap each token in a coloured span. */
 function highlightLine(line: string, lineIdx: number): ReactNode {
@@ -341,7 +341,7 @@ function highlightLine(line: string, lineIdx: number): ReactNode {
     last = match.index + tok.length;
   }
   if (last < line.length) {
-    pieces.push(<span key={`t${lineIdx}-${key++}`}>{line.slice(last)}</span>);
+    pieces.push(<span key={`t${lineIdx}-${key}`}>{line.slice(last)}</span>);
   }
   return pieces.length > 0 ? <>{pieces}</> : <span>{' '}</span>;
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Tag, Logo, TimeChip } from '../components';
+import { Card, Button, Tag, Logo, TimeChip, useConfirm, useToast } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import {
@@ -28,6 +28,8 @@ import {
  */
 export function MenuPage() {
   const navigate = useNavigate();
+  const confirm = useConfirm();
+  const toast = useToast();
   const projectTime = useProject((s) => s.time);
   const dateFormat = useProject((s) => s.units.dateFormat);
   const factoryName = useProject((s) => s.meta.name);
@@ -79,13 +81,15 @@ export function MenuPage() {
   const handleOpenScenariosForSaved = (id: string) => {
     if (loadFactory(id)) navigate('/scenarios');
   };
-  const handleDeleteSaved = (id: string, label: string) => {
-    // Plain confirm is enough here — slot deletion is destructive and the
-    // user has nowhere else to undo from. Skip if running in a sandbox
-    // that suppresses confirm() (treat suppression as cancellation).
-    const ok = typeof window === 'undefined'
-      ? true
-      : window.confirm(`Delete saved factory "${label}"? This cannot be undone.`);
+  const handleDeleteSaved = async (id: string, label: string) => {
+    // Slot deletion is destructive and the user has nowhere else to undo
+    // from, so confirm first via the styled dialog.
+    const ok = await confirm({
+      title: 'Delete saved factory',
+      message: `Delete saved factory "${label}"? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    });
     if (ok) deleteFactory(id);
   };
 
@@ -111,20 +115,19 @@ export function MenuPage() {
     // disambiguator added by uniquifyFactoryName on a prior load).
     const currentName = useProject.getState().meta.name ?? '';
     const isAlreadyModelama = /^Modelama · Garment Factory/i.test(currentName.trim());
-    const proceed =
-      typeof window === 'undefined'
-        ? true
-        : window.confirm(
-            isAlreadyModelama
-              ? 'Re-seed the Modelama factory? The active canonical + scenarios will be replaced with a fresh bundle, but the library is left alone (no archive copy).'
-              : 'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
-          );
+    const proceed = await confirm({
+      title: isAlreadyModelama ? 'Re-seed Modelama factory' : 'Load Modelama factory',
+      message: isAlreadyModelama
+        ? 'Re-seed the Modelama factory? The active canonical + scenarios will be replaced with a fresh bundle, but the library is left alone (no archive copy).'
+        : 'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
+      confirmLabel: isAlreadyModelama ? 'Re-seed' : 'Load',
+    });
     if (!proceed) return;
     setModelamaLoading(true);
     try {
       const parsed = await fetchModelamaBundle(import.meta.env.BASE_URL ?? '');
       if (parsed.length === 0) {
-        window.alert('Could not load Modelama bundle — the bundled xlsx files were not reachable.');
+        toast({ kind: 'error', message: 'Could not load Modelama bundle — the bundled xlsx files were not reachable.' });
         return;
       }
       if (isAlreadyModelama) {
@@ -144,7 +147,7 @@ export function MenuPage() {
       for (const g of garments) setGarmentEdit(g.id, g);
       const r = useTwin.getState().loadCanonical(twin);
       if (!r.ok) {
-        window.alert(`Could not load Modelama factory: ${r.reason}`);
+        toast({ kind: 'error', message: `Could not load Modelama factory: ${r.reason}` });
         return;
       }
       // Seed line-swap scenarios so the Scenarios tab has something to
@@ -186,26 +189,25 @@ export function MenuPage() {
       navigate('/builder');
     } catch (err) {
       console.error('Modelama load failed', err);
-      window.alert(`Modelama load failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast({ kind: 'error', message: `Modelama load failed: ${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setModelamaLoading(false);
     }
   };
 
-  const handleLoadReferenceFactory = () => {
+  const handleLoadReferenceFactory = async () => {
     if (atCap) return;
-    const proceed =
-      typeof window === 'undefined'
-        ? true
-        : window.confirm(
-            'Load the multi-line reference factory? Your current factory will be archived to the SAVED FACTORIES library first.',
-          );
+    const proceed = await confirm({
+      title: 'Load reference factory',
+      message: 'Load the multi-line reference factory? Your current factory will be archived to the SAVED FACTORIES library first.',
+      confirmLabel: 'Load',
+    });
     if (!proceed) return;
     archiveAndStartFresh('Reference Factory · All Lines');
     const refTwin = buildReferenceFactoryTwin({ name: 'Reference Factory · All Lines' });
     const r = useTwin.getState().loadCanonical(refTwin);
     if (!r.ok) {
-      window.alert(`Could not load reference factory: ${r.reason}`);
+      toast({ kind: 'error', message: `Could not load reference factory: ${r.reason}` });
       return;
     }
     navigate('/builder');

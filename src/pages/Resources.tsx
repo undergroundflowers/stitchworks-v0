@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip } from '../components';
+import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip, useConfirm } from '../components';
 import { Fragment, useRef, useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -361,6 +361,7 @@ interface OperationsPanelProps {
  */
 function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const project = useProject();
+  const confirm = useConfirm();
   const [garmentId, setGarmentId] = useState<string>(
     initialGarmentId && garments.byId[initialGarmentId]
       ? initialGarmentId
@@ -592,8 +593,8 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => {
-                if (confirm(`Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`)) {
+              onClick={async () => {
+                if (await confirm({ title: 'Reset garment', message: `Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`, confirmLabel: 'Reset' })) {
                   project.resetGarment(garmentId);
                 }
               }}
@@ -606,8 +607,8 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
           <Button
             variant="danger"
             size="sm"
-            onClick={() => {
-              if (!confirm(`Delete ${garment.name}?`)) return;
+            onClick={async () => {
+              if (!(await confirm({ title: 'Delete garment', message: `Delete ${garment.name}?`, confirmLabel: 'Delete', variant: 'danger' }))) return;
               const remaining = garments.all.filter((g) => g.id !== garmentId);
               const nextId = remaining[0]?.id ?? 'tshirt';
               if (isBuiltIn) {
@@ -770,8 +771,8 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
                   />
                 </td>
                 <td style={{ padding: '6px 10px', textAlign: 'right' }}>
-                  <button onClick={() => {
-                    if (confirm(`Delete ${op.code ?? op.name}?`)) project.removeOperation(garmentId, builtIn, op.id);
+                  <button onClick={async () => {
+                    if (await confirm({ title: 'Delete operation', message: `Delete ${op.code ?? op.name}?`, confirmLabel: 'Delete', variant: 'danger' })) project.removeOperation(garmentId, builtIn, op.id);
                   }} style={{ ...miniBtn(false), background: 'transparent', color: SW_COLORS.alarm, fontSize: 13 }}>×</button>
                 </td>
               </tr>
@@ -1339,6 +1340,7 @@ interface SkillMatrixPanelProps {
 function SkillMatrixPanel({
   operators, garmentId, setGarmentId, skillMatrix, setSkill, resetSkillMatrix, garments,
 }: SkillMatrixPanelProps) {
+  const confirm = useConfirm();
   const garment = garments.byId[garmentId] ?? garments.all[0];
   const ops = garment.operations;
 
@@ -1375,8 +1377,8 @@ function SkillMatrixPanel({
           <LegendChip color={SW_COLORS.alarm} label="<60"/>
           <LegendChip color={SW_COLORS.paperEdge} label="—"/>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => {
-          if (confirm('Reset every skill cell to the role defaults?')) resetSkillMatrix();
+        <Button variant="ghost" size="sm" onClick={async () => {
+          if (await confirm({ title: 'Reset skill matrix', message: 'Reset every skill cell to the role defaults?', confirmLabel: 'Reset' })) resetSkillMatrix();
         }}>Reset to defaults</Button>
       </div>
 

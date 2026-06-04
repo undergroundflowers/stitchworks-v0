@@ -23,7 +23,7 @@ import {
 } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import type { Twin, Scenario as TwinScenario } from '../domain/twin';
-import { quotaAwareLocalStorage } from './persist-storage';
+import { indexedDbStorage } from './storage/indexedDbStorage';
 
 export const LIBRARY_SCHEMA_VERSION = 1 as const;
 
@@ -253,7 +253,7 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
       // in archiveCurrent for the case where the budget is exhausted by
       // sibling stores (twin / project) rather than library growth.
       storage: createJSONStorage(() =>
-        quotaAwareLocalStorage({
+        indexedDbStorage({
           onQuotaError: () => {
             const s = useFactoryLibrary.getState();
             if (s.savedFactories.length <= 1) return false;

@@ -2775,7 +2775,7 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
         .sort((a, b) => a.gx + a.gy - (b.gx + b.gy))
         .map((c, i) => (
           <IsoSewingStation
-            key={c.cellKey ?? c.s.opId}
+            key={c.cellKey ?? `${c.s.opId}-${i}`}
             layout={c}
             index={i}
             isHot={c.s.opId === bottleneckOpId && c.s.queueLen > 0}
@@ -3384,7 +3384,7 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMet
         const isHot = i === bottleneckOpIndex && s.queueLen > 0;
         const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
         return (
-          <g key={s.opId} transform={`translate(${x}, ${y})`}>
+          <g key={`${s.opId}-${i}`} transform={`translate(${x}, ${y})`}>
             <rect
               x={-36}
               y={-50}
@@ -3512,7 +3512,7 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
             : Math.min(1, 0.2 + (s.serversTotal > 0 ? s.busy / s.serversTotal : 0) * 0.7 + Math.min(0.5, s.queueLen / 10));
           const col = isHot ? SW_COLORS.alarm : intensity > 0.7 ? SW_COLORS.warn : SW_COLORS.ok;
           return (
-            <radialGradient key={`hg-${s.opId}`} id={`sim-heat-${s.opId}`} cx="50%" cy="50%" r="50%">
+            <radialGradient key={`hg-${s.opId}-${i}`} id={`sim-heat-${s.opId}-${i}`} cx="50%" cy="50%" r="50%">
               <stop offset="0%" stopColor={col} stopOpacity={intensity} />
               <stop offset="100%" stopColor={col} stopOpacity={0} />
             </radialGradient>
@@ -3544,11 +3544,11 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
       {/* Heat blobs */}
       {stations.map((s, i) => (
         <circle
-          key={`blob-${s.opId}`}
+          key={`blob-${s.opId}-${i}`}
           cx={positions[i].x}
           cy={positions[i].y}
           r={120}
-          fill={`url(#sim-heat-${s.opId})`}
+          fill={`url(#sim-heat-${s.opId}-${i})`}
           style={{ mixBlendMode: 'screen' }}
         />
       ))}
@@ -3557,7 +3557,7 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
       {stations.map((s, i) => {
         const isHot = i === bottleneckOpIndex && s.queueLen > 0;
         return (
-          <g key={`mk-${s.opId}`} transform={`translate(${positions[i].x}, ${positions[i].y})`}>
+          <g key={`mk-${s.opId}-${i}`} transform={`translate(${positions[i].x}, ${positions[i].y})`}>
             <circle r={5} fill={isHot ? SW_COLORS.alarm : '#fff'} opacity={0.9} />
             <text
               y={-14}
@@ -3814,7 +3814,7 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
         const queueOver = s.queueLen > 8;
 
         return (
-          <g key={s.opId} transform={`translate(${p.x}, ${p.y})`}>
+          <g key={`${s.opId}-${i}`} transform={`translate(${p.x}, ${p.y})`}>
             <rect
               x={0}
               y={0}

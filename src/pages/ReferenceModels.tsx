@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Tag, Button, SectionHeader, HudSelect } from '../components';
+import { Card, Tag, Button, SectionHeader, HudSelect, useToast } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import {
   REFERENCE_MODELS,
@@ -451,6 +451,7 @@ function ModelDetail({
 }) {
   const total = model.garmentTemplate.totalSmv;
   const sumOps = model.garmentTemplate.operations.length;
+  const toast = useToast();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -616,9 +617,9 @@ function ModelDetail({
                 navigator.clipboard?.writeText(
                   JSON.stringify(model.garmentTemplate, null, 2),
                 );
-                alert('Garment template JSON copied — paste into garments.ts to register it.');
+                toast({ kind: 'success', message: 'Garment template JSON copied — paste into garments.ts to register it.' });
               } catch {
-                alert('Open the model.md / operations.json files in the Literature folder.');
+                toast({ kind: 'info', message: 'Could not copy automatically. Open the model.md / operations.json files in the Literature folder.' });
               }
             }}
           >

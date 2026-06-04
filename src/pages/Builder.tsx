@@ -27,7 +27,7 @@ import {
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
-import { HudSelect, StageOverlay } from '../components';
+import { HudSelect, StageOverlay, useConfirm } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { InspectorQueuePanel } from '../components/InspectorQueuePanel';
 import {
@@ -361,6 +361,7 @@ function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
 
 export function BuilderPage() {
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const [searchParams, setSearchParams] = useSearchParams();
   const twin = useTwin(selectActiveTwin);
   const activeScenarioId = useTwin((s) => s.activeScenarioId);
@@ -1430,10 +1431,10 @@ export function BuilderPage() {
             ✦ SAVE AS…
           </button>
           <button
-            onClick={() => {
+            onClick={async () => {
               if (activeScenarioId === null) return;
               const name = twin.name || 'this scenario';
-              if (window.confirm(`Delete scenario "${name}"? This cannot be undone.`)) {
+              if (await confirm({ title: 'Delete scenario', message: `Delete scenario "${name}"? This cannot be undone.`, confirmLabel: 'Delete', variant: 'danger' })) {
                 deleteScenario(activeScenarioId);
                 setSelected(null);
               }
@@ -3131,7 +3132,7 @@ function RotationCellsOverlay({
     arr.push({ wsId: a.wsId, rotationOrder: a.rotationOrder ?? arr.length });
     byOp.set(a.operatorId, arr);
   }
-  for (const [_, members] of byOp) {
+  for (const members of byOp.values()) {
     if (members.length < 2) continue;
     members.sort((a, b) => a.rotationOrder - b.rotationOrder);
     const wsIds = members.map((m) => m.wsId);
@@ -3433,6 +3434,9 @@ function WorkstationSprite({
   onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
+  // Declared before the early return below so hook order stays stable across
+  // renders (react-hooks/rules-of-hooks).
+  const [hovered, setHovered] = useState(false);
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
   if (!fixture) return null;
 
@@ -3462,7 +3466,6 @@ function WorkstationSprite({
   // dense floor, painting both for every sprite at once buries the iso
   // geometry under text — the lens header pill and operator chip become
   // an inspect-on-demand affordance instead.
-  const [hovered, setHovered] = useState(false);
   const detailsOpen = hovered || selected;
 
   return (
@@ -3912,6 +3915,7 @@ function ConnectorLayer({
   focusActive: boolean;
   focusedWsIds: Set<string>;
 }) {
+  const confirm = useConfirm();
   const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
   const dim = connect.on ? 0.35 : 1; // de-emphasise existing arrows while connecting
 
@@ -3971,9 +3975,9 @@ function ConnectorLayer({
               y2={pb.sy}
               stroke="transparent"
               strokeWidth={14}
-              onClick={(e) => {
+              onClick={async (e) => {
                 e.stopPropagation();
-                if (window.confirm(`Delete ${CONNECTOR_LABEL[c.kind]} connector?`)) {
+                if (await confirm({ title: 'Delete connector', message: `Delete ${CONNECTOR_LABEL[c.kind]} connector?`, confirmLabel: 'Delete', variant: 'danger' })) {
                   onRemove(c.id);
                 }
               }}
@@ -6207,6 +6211,7 @@ interface InspectorProps {
 }
 
 function Inspector(props: InspectorProps) {
+  const confirm = useConfirm();
   const wrapper: CSSProperties = {
     gridColumn: '5',
     gridRow: '2',
@@ -6330,8 +6335,8 @@ function Inspector(props: InspectorProps) {
                     style={{ ...inputBase, flex: 1, padding: '4px 6px', fontSize: 12 }}
                   />
                   <button
-                    onClick={() => {
-                      if (memberCount > 0 && !confirm(`Remove ${line.name}? ${memberCount} workstation${memberCount === 1 ? '' : 's'} will become unassigned but stay placed.`)) return;
+                    onClick={async () => {
+                      if (memberCount > 0 && !(await confirm({ title: 'Remove line', message: `Remove ${line.name}? ${memberCount} workstation${memberCount === 1 ? '' : 's'} will become unassigned but stay placed.`, confirmLabel: 'Remove', variant: 'danger' }))) return;
                       props.onRemoveLine(line.id);
                     }}
                     style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 7px', fontSize: 10 }}

@@ -2752,7 +2752,7 @@ function QueueParetoChart({
         const bh = padT + innerH - by;
         const label = s.opCode ?? s.opName.slice(0, 4).toUpperCase();
         return (
-          <g key={`${s.lineName ?? ''}::${s.opId}`}>
+          <g key={`${s.lineName ?? ''}::${s.opId}::${i}`}>
             <rect x={bx} y={by} width={bw} height={bh} fill={i === 0 ? SW_COLORS.alarm : SW_COLORS.thread} rx={2} />
             <text x={bx + bw / 2} y={by - 4} textAnchor="middle" fill={SW_COLORS.ink} fontSize="9" fontWeight={800} fontFamily={SW_FONTS.mono}>
               {Math.round(s.queueLen)}

@@ -37,3 +37,13 @@ export {
   type EffectiveWorker,
   type EffectiveProduct,
 } from './catalog';
+export {
+  downloadSwproj,
+  applySwproj,
+  parseSwproj,
+  buildSwproj,
+  type SwprojEnvelope,
+  type ParsedSwproj,
+  type ApplySwprojResult,
+  type TwinExport,
+} from './swproj';

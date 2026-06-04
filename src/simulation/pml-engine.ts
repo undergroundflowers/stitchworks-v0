@@ -175,7 +175,7 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   for (const ws of blockByKind.get('Source') ?? []) {
     const r = getBlockParams(ws);
     let estimatedAgents = (r.sourceRatePerHr * SHIFT_MIN) / 60;
-    let multiplier = r.piecesPerAgent;
+    const multiplier = r.piecesPerAgent;
     // Walk a few hops looking for Unbatch / Split that would expand.
     const visited = new Set<string>([ws.id]);
     const stack: { id: string; depth: number; mult: number }[] = [
@@ -651,7 +651,7 @@ function buildRotationCells(twin: Twin): {
   }
   const cells: RotationCell[] = [];
   const byWsId = new Map<string, RotationCell>();
-  for (const [_, { wsIds, opIds }] of opsByCellKey) {
+  for (const { wsIds, opIds } of opsByCellKey.values()) {
     const n = wsIds.length;
     const opCount = opIds.length;
     // Distribute opCount operators across n station slots — stagger so

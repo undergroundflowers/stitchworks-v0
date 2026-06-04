@@ -25,7 +25,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
-import { quotaAwareLocalStorage } from './persist-storage';
+import { indexedDbStorage } from './storage/indexedDbStorage';
 
 import {
   type Twin,
@@ -1155,7 +1155,7 @@ export const useTwin = create<TwinState>()(
       // write (the biggest of the three persisted stores — canonical +
       // every scenario's full twin) becomes a visible console.error +
       // window event instead of an empty Builder dropdown after refresh.
-      storage: createJSONStorage(() => quotaAwareLocalStorage()),
+      storage: createJSONStorage(() => indexedDbStorage()),
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         canonical: state.canonical,

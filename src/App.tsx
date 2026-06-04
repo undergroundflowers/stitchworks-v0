@@ -1,9 +1,13 @@
 import { useEffect, useReducer, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { SideBar } from './shell/SideBar';
-import { SW_COLORS } from './design/tokens';
+import { SW_COLORS, SW_FONTS } from './design/tokens';
 import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
 import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
+import { ErrorBoundary, useToast } from './components';
+import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
+import { getFlag, setFlag } from './lib/safeStorage';
+import { useStoresHydrated } from './store/storage/useHydrated';
 
 import { useTwin } from './store/twin';
 import { buildDemoTwin } from './domain/twin';
@@ -34,6 +38,8 @@ import { PilotStudyPage } from './pages/PilotStudy';
 export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
+  const toast = useToast();
+  const hydrated = useStoresHydrated();
   const [t, setTweak] = useTweaks(SW_TWEAK_DEFAULTS);
   // Vibe mutates SW_COLORS/SW_FONTS/SW_RADIUS in place. Force a re-render so
   // every component re-reads them on next paint.
@@ -48,6 +54,7 @@ export default function App() {
   // boots into an empty workspace. Existing edits are preserved — we only
   // replace when departments + workstations + scenarios are all empty.
   useEffect(() => {
+    if (!hydrated) return;
     const s = useTwin.getState();
     if (
       s.canonical.departments.length === 0 &&
@@ -56,17 +63,36 @@ export default function App() {
     ) {
       s.loadCanonical(buildDemoTwin());
     }
-  }, []);
+  }, [hydrated]);
 
   // Boot-time sweep of leftover scratch garments (dvss / asdf / test / etc.).
   // Idempotent — no-op when there's nothing to remove. Logs in dev so it's
   // easy to spot the migration firing.
   useEffect(() => {
+    if (!hydrated) return;
     const removed = useProject.getState().purgeTestGarments();
     if (removed > 0 && import.meta.env.DEV) {
       console.info(`[stitchworks] purged ${removed} scratch garment${removed === 1 ? '' : 's'} on boot`);
     }
-  }, []);
+  }, [hydrated]);
+
+  // Surface localStorage quota failures (dispatched by the persist wrapper)
+  // as a visible toast instead of a console-only error.
+  useEffect(() => {
+    const onQuota = (e: Event) => {
+      const detail = (e as CustomEvent<QuotaEventDetail>).detail;
+      void detail;
+      toast({
+        kind: 'error',
+        message:
+          'Storage is full — your most recent changes could not be saved. '
+          + 'Export and remove an old factory to free up space.',
+        duration: 8000,
+      });
+    };
+    window.addEventListener(QUOTA_EVENT, onQuota);
+    return () => window.removeEventListener(QUOTA_EVENT, onQuota);
+  }, [toast]);
 
   useEffect(() => {
     const speed = 0.4 + ((t.intensity as number) / 100) * 1.8;
@@ -80,19 +106,11 @@ export default function App() {
 
   // Onboarding shows once per browser; a tiny localStorage flag remembers
   // the dismissal so refreshes don't re-prompt.
-  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('sw_onboarded') !== '1';
-    } catch {
-      return true;
-    }
-  });
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(
+    () => getFlag('sw_onboarded') !== '1',
+  );
   const finishOnboarding = (skipped: boolean) => {
-    try {
-      localStorage.setItem('sw_onboarded', '1');
-    } catch {
-      /* ignore */
-    }
+    setFlag('sw_onboarded', '1');
     setShowOnboarding(false);
     if (!skipped) {
       // Completing onboarding lands you on the live floor; skipping leaves
@@ -104,6 +122,30 @@ export default function App() {
 
   const showSideBar = location.pathname !== '/';
   const intensityFilter = `saturate(${0.7 + ((t.intensity as number) / 100) * 0.9}) contrast(${0.95 + ((t.intensity as number) / 100) * 0.15})`;
+
+  // Gate the first render until the IndexedDB-backed stores have rehydrated,
+  // so the UI never flashes an empty factory while persistence loads.
+  if (!hydrated) {
+    return (
+      <div
+        style={{
+          height: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 12,
+          background: SW_COLORS.paperDeep,
+          fontFamily: SW_FONTS.body,
+        }}
+      >
+        <div style={{ fontFamily: SW_FONTS.display, fontSize: 22, color: SW_COLORS.brand, letterSpacing: 1 }}>
+          STITCHWORKS
+        </div>
+        <div style={{ fontSize: 12, color: SW_COLORS.muted }}>Loading your factory…</div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -119,6 +161,7 @@ export default function App() {
       {showOnboarding && <Onboarding onFinish={finishOnboarding} />}
       {showSideBar && <SideBar />}
       <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+        <ErrorBoundary key={location.pathname} scope="page">
         <Routes>
           <Route path="/" element={<MenuPage />} />
           <Route path="/orders" element={<OrdersPage />} />
@@ -152,6 +195,7 @@ export default function App() {
           {/* Pilot Factory 1.0 · line replacement study */}
           <Route path="/pilot" element={<PilotStudyPage />} />
         </Routes>
+        </ErrorBoundary>
       </div>
 
       {/* Arcade scanline overlay — only at high intensity */}
