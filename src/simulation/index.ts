@@ -49,6 +49,8 @@ export {
   type PmlSimSample,
   type BlockObserved,
   type PmlIssue,
+  type FlowEvent,
+  type FlowEventKind,
 } from './pml-engine';
 export { runPmlOnTwin, type RunReport } from './pml-runner';
 export {

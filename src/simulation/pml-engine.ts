@@ -267,6 +267,16 @@ export interface PmlSimOpts {
    *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
    *  Missing / 1.0 ⇒ engine runs at nominal speed (today's behaviour). */
   opEfficiency?: Record<string, number>;
+  /** P2 — record an entity-level flow-event stream (`result.flow`). Off by
+   *  default: recording is purely additive (it never touches sim state) but
+   *  can be large, so callers opt in. Drives real bundle animation (replaces
+   *  the synthetic `simTime × const` movement) and is the substrate the
+   *  finite-buffer blocking work reads to attribute wait vs. block time. */
+  recordFlow?: boolean;
+  /** Hard cap on recorded flow events. Once hit, recording stops and a
+   *  warning is emitted — the sim itself still runs to completion. Ignored
+   *  unless `recordFlow` is set. Defaults to `MAX_FLOW_EVENTS_DEFAULT`. */
+  maxFlowEvents?: number;
 }
 
 /**
@@ -342,6 +352,32 @@ export interface BlockObserved {
   bottleneck: boolean;
 }
 
+/** One entity-level transition in the recorded flow stream. Coarse enough
+ *  to stay cheap, rich enough to (a) animate a bundle moving station→station
+ *  and (b) reconstruct per-agent wait / service / block spans downstream.
+ *
+ *   • `spawn`        — a Source created the agent (`wsId` = Source).
+ *   • `move`         — the agent traversed an edge; `fromWsId` → `wsId`.
+ *   • `startService` — the agent seized a server at `wsId` (service begins).
+ *   • `endService`   — the agent released a server at `wsId` (service ends).
+ *   • `sink`         — the agent reached a Sink (`wsId` = Sink).
+ */
+export type FlowEventKind = 'spawn' | 'move' | 'startService' | 'endService' | 'sink';
+
+export interface FlowEvent {
+  /** Sim time in MINUTES. Events are pushed in non-decreasing `t` order. */
+  t: number;
+  kind: FlowEventKind;
+  /** The flowing agent's id. Stable across its whole lifetime. */
+  agentId: number;
+  /** Block where the event occurred. For `move` this is the DESTINATION. */
+  wsId: string;
+  /** `move` only — the source block the agent left. */
+  fromWsId?: string;
+  /** Pieces carried by the agent at this moment (bundles collapse/expand). */
+  pieces: number;
+}
+
 export interface PmlSimResult {
   /** Run duration in minutes (mirrors opts). */
   durationMin: number;
@@ -380,6 +416,9 @@ export interface PmlSimResult {
    *  plus a final sample at `durationMin`. Empty when sampling is
    *  disabled. LiveSim plays these back to animate the run. */
   samples: PmlSimSample[];
+  /** P2 — entity-level flow stream. Empty unless `opts.recordFlow` was set.
+   *  Non-decreasing in `t`. Truncated (with a warning) at `maxFlowEvents`. */
+  flow: FlowEvent[];
 }
 
 // ============================================================================
@@ -745,6 +784,12 @@ const UNBATCH_MAX_PIECES = 5000;
  *  freeze the browser. */
 const MAX_AGENTS_PER_RUN = 2_000_000;
 
+/** Default ceiling for the recorded flow stream. A busy multi-line shift can
+ *  emit a handful of events per agent; 500k keeps a full run's animation data
+ *  bounded to a few MB. Past this we stop recording and warn — the sim's KPIs
+ *  are unaffected. */
+const MAX_FLOW_EVENTS_DEFAULT = 500_000;
+
 export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   const { twin, durationMin, seed } = opts;
   const samplePeriodMin = opts.samplePeriodMin ?? 1;
@@ -753,6 +798,34 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   const samples: PmlSimSample[] = [];
   let hitUnbatchCap = false;
   let hitAgentCap = false;
+
+  // ── P2 flow-event recording (opt-in, purely additive) ─────────────────────
+  // `emitFlow` is a no-op unless the caller passed `recordFlow`. It never
+  // reads or mutates sim state, so a run with recording on is byte-identical
+  // in KPIs to the same run with it off. Bounded by `maxFlow`; on overflow we
+  // stop recording and warn once, leaving the sim to finish normally.
+  const recordFlow = opts.recordFlow ?? false;
+  const maxFlow = Math.max(0, opts.maxFlowEvents ?? MAX_FLOW_EVENTS_DEFAULT);
+  const flowEvents: FlowEvent[] = [];
+  let hitFlowCap = false;
+  function emitFlow(
+    kind: FlowEventKind,
+    agent: Agent,
+    wsId: string,
+    fromWsId?: string,
+  ): void {
+    if (!recordFlow) return;
+    if (flowEvents.length >= maxFlow) {
+      if (!hitFlowCap) {
+        warnings.push(
+          `Flow recording hit ${maxFlow.toLocaleString()} events — animation stream truncated. KPIs are unaffected; raise maxFlowEvents or shorten the run for a complete stream.`,
+        );
+        hitFlowCap = true;
+      }
+      return;
+    }
+    flowEvents.push({ t: now, kind, agentId: agent.id, wsId, fromWsId, pieces: agent.pieces });
+  }
 
   // ── Build block states ─────────────────────────────────────────────────────
   // shareFactorMap captures the engine-visible slowdown for each shared
@@ -1127,6 +1200,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // agent into a side-table keyed by id; for v1 we just keep its bornAt
     // on the agent record itself which we still have here.
     inFlightAgents.set(a.id, a);
+    emitFlow('startService', a, b.ws.id);
     return true;
   }
 
@@ -1149,6 +1223,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     b.inflowPieces += agent.pieces;
     switch (b.kind) {
       case 'Sink':
+        emitFlow('sink', agent, b.ws.id);
         totalProduced += agent.pieces;
         if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
@@ -1449,7 +1524,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     b.outflowPieces += agent.pieces;
     const targets = routing.get(b.ws.id)?.outputs.get(portId) ?? [];
     if (targets.length === 0) return; // dangling output — silently drop
-    for (const t of targets) accept(t.targetWsId, t.targetInPort, agent, now);
+    for (const t of targets) {
+      // One edge traversal per target. Emitted BEFORE accept so a fan-out
+      // (Split) or a merge (Combine) shows each constituent hop; the arriving
+      // agent's id is the one that just left `b` — new ids minted inside
+      // accept get their own moves when they in turn emit.
+      emitFlow('move', agent, t.targetWsId, b.ws.id);
+      accept(t.targetWsId, t.targetInPort, agent, now);
+    }
   }
 
   // ── Event loop ─────────────────────────────────────────────────────────────
@@ -1522,6 +1604,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           pieces,
           orderId,
         };
+        emitFlow('spawn', agent, src.ws.id);
         emitOnPort(src, 'out', agent, now);
         src.orderEmittedSoFar += pieces;
 
@@ -1565,6 +1648,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // ── Legacy infinite-source path ───────────────────────────────────
       const pieces = src.piecesPerAgent;
       const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
+      emitFlow('spawn', agent, src.ws.id);
       emitOnPort(src, 'out', agent, now);
       pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
       continue;
@@ -1588,6 +1672,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           pool.busy = Math.max(0, pool.busy - 1);
         }
         if (a) {
+          emitFlow('endService', a, b.ws.id);
           // P2 rework: a fraction (op.reworkRate) of completed pieces gets
           // routed back upstream instead of forwarded. maybeRework consumes
           // the agent in that case; only forward when it returns false.
@@ -1773,5 +1858,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     bottleneckWsId,
     warnings,
     samples,
+    flow: flowEvents,
   };
 }
