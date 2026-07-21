@@ -122,3 +122,35 @@ describe('PML finite buffers + blocking-after-service', () => {
     expect(uncapped.piecesLost).toBe(0);
   });
 });
+
+describe('authored op.queueCapacity reaches the DES (bake wiring)', () => {
+  // An authored buffer lives on the operation (what ServiceQueueParams edits
+  // and the analytical model reads). buildGarmentTwin must bake it into
+  // block.params so the DES honours the SAME value with no block-param poke.
+  const template = Object.values(GARMENT_TEMPLATES).find((g) => g.operations.length > 0)!;
+  const authored = {
+    ...template,
+    operations: template.operations.map((o) => ({ ...o, queueCapacity: 2 })),
+  };
+  const operators = Math.max(2, Math.min(12, authored.operations.length));
+  const twin = buildGarmentTwin(authored, operators)!;
+  for (const ws of twin.workstations) {
+    if (getBlockKind(ws) === 'Source') patchParams(ws, { sourceRatePerHr: 100_000 });
+  }
+
+  it('bakes op.queueCapacity into every Service block.params', () => {
+    const services = twin.workstations.filter((w) => getBlockKind(w) === 'Service');
+    expect(services.length).toBeGreaterThan(0);
+    for (const ws of services) {
+      expect(ws.block?.params?.queueCapacity).toBe(2);
+    }
+  });
+
+  it('honours the baked capacity in the engine (blocks without a block-param poke)', () => {
+    const r = runPmlSim({ twin, durationMin: DURATION, seed: SEED, samplePeriodMin: 1 });
+    expect(r.totalProduced).toBeGreaterThan(0);
+    const totalBlocked = [...r.blocks.values()].reduce((s, b) => s + b.blockedMin, 0);
+    expect(totalBlocked).toBeGreaterThan(0);
+    expect(r.piecesLost).toBe(0);
+  });
+});

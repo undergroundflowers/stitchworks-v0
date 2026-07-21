@@ -371,6 +371,9 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
       params: {
         cycleS: Math.max(1, Math.round(op.smv * 60)),
         servers: 1,
+        // Bake the authored system capacity so the DES back-pressures on the
+        // same finite buffer the analytical model reads. 0 ⇒ unbounded.
+        queueCapacity: op.queueCapacity ?? 0,
       },
     };
     ws.kpiTargets = {

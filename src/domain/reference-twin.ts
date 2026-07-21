@@ -331,6 +331,10 @@ export function buildReferenceTwin(
         cycleS: Math.max(1, Math.round(op.smv * 60)),
         servers: stationServers,
         cycleDist,
+        // Bake the authored system capacity into the twin so the DES honours
+        // the SAME finite buffer the analytical M/M/c/K model reads off the
+        // operation. 0 ⇒ unbounded (the default). See systemCapacityFor.
+        queueCapacity: op.queueCapacity ?? 0,
       },
     };
     ws.operation = {
@@ -533,6 +537,9 @@ export function buildGarmentTwin(
       params: {
         cycleS: Math.max(1, Math.round(op.smv * 60)),
         servers: Math.max(1, Math.round(op.servers ?? 1)),
+        // Bake the authored system capacity so the DES honours the same finite
+        // buffer as the analytical model. 0 ⇒ unbounded. See systemCapacityFor.
+        queueCapacity: op.queueCapacity ?? 0,
       },
     };
     ws.operation = {

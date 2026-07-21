@@ -832,15 +832,20 @@ function resolveOpQueueCapacity(ws: Workstation): number | null {
   return op.queueCapacity;
 }
 
-/** Resolve a block's system capacity K. Precedence: op-level `queueCapacity`
- *  (matches the analytical model) → block-param `queueCapacity` (0 ⇒ unbounded
- *  by the existing param convention) → `Infinity` (unbounded — the default,
- *  preserving the pre-P2 push-semantics behaviour exactly). */
+/** Resolve a block's system capacity K. Precedence: block-param `queueCapacity`
+ *  (0 ⇒ unbounded) → op-level `queueCapacity` → `Infinity` (unbounded default,
+ *  preserving pre-P2 push-semantics exactly).
+ *
+ *  Block-param wins because the twin builders BAKE the live authored
+ *  `op.queueCapacity` into `block.params` (like `cycleS`/`servers`), so the
+ *  DES reads the same value the analytical M/M/c/K model reads off the live
+ *  operation. The op-level lookup is a fallback for twins built without baking
+ *  (imports, hand-built) and reads the static garment seed. */
 function systemCapacityFor(ws: Workstation): number {
-  const opCap = resolveOpQueueCapacity(ws);
-  if (opCap != null) return opCap;
   const blockCap = getBlockParams(ws).queueCapacity; // 0 = unbounded
   if (blockCap > 0) return blockCap;
+  const opCap = resolveOpQueueCapacity(ws);
+  if (opCap != null) return opCap;
   return Infinity;
 }
 
