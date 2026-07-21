@@ -26,11 +26,13 @@ import {
   mergePmlTwinMetas,
   scopedTwinForLine,
   EMPTY_TWIN,
+  buildFlowPlayback,
   type BuildFromTwinMeta,
   type SimState,
   type LineBuild,
   type StationView,
   type PmlLineInput,
+  type BundleFrame,
 } from '../simulation';
 import {
   fmtModelTime,
@@ -399,7 +401,7 @@ export function LiveSimPage() {
     }
   }, [activeOrder]);
 
-  const baseSim = usePmlSim(simSourceTwin, { garment });
+  const baseSim = usePmlSim(simSourceTwin, { garment, recordFlow: true });
 
   // ── Multi-line scope ────────────────────────────────────────────────────
   // When no specific line is selected and the twin has more than one wired
@@ -430,7 +432,7 @@ export function LiveSimPage() {
         : [],
     [inMultiLineScope, wiredLineBuilds, activeTwin],
   );
-  const multiSim = useMultiPmlSim(multiInputs);
+  const multiSim = useMultiPmlSim(multiInputs, { recordFlow: true });
   const multiLineIds = useMemo(
     () => wiredLineBuilds.map((lb) => lb.line.id),
     [wiredLineBuilds],
@@ -458,6 +460,22 @@ export function LiveSimPage() {
   const setSpeed = inMultiLineScope ? multiSim.setSpeed : baseSim.setSpeed;
   const reset = inMultiLineScope ? multiSim.reset : baseSim.reset;
   const step = inMultiLineScope ? multiSim.step : baseSim.step;
+
+  // ── Real bundle playback (Phase 3) ────────────────────────────────────────
+  // Index the recorded entity-flow stream so the views can place each bundle
+  // at its actual station (waiting / in service / blocked) at the current
+  // playback minute — replacing the old synthetic `simTime × const` motion.
+  // Station ids are unique across lines, so multi-line flows concatenate.
+  const flowPlayback = useMemo(() => {
+    const flow = inMultiLineScope
+      ? multiSim.results.flatMap((r) => r?.flow ?? [])
+      : (baseSim.result?.flow ?? []);
+    return buildFlowPlayback(flow);
+  }, [inMultiLineScope, multiSim.results, baseSim.result]);
+  const liveBundles = useMemo(
+    () => flowPlayback.bundlesAt(state.time),
+    [flowPlayback, state.time],
+  );
 
   // Effective twin meta passed to the view components — merged across lines
   // in multi-line scope so iso/top/heat/logic see every authored Builder
@@ -808,6 +826,7 @@ export function LiveSimPage() {
               ambientWorkstations={ambientWorkstations}
               selectedOpId={selectedOpId}
               onSelectStation={setSelectedOpId}
+              bundles={liveBundles}
             />
           </PanZoomViewport>
         )}
@@ -2713,9 +2732,12 @@ interface SimViewProps {
   selectedOpId?: string | null;
   /** Click a station to open its sim-vs-theory drawer. Omit for read-only views. */
   onSelectStation?: (opId: string) => void;
+  /** Live bundles from the recorded flow stream at the current playback minute,
+   *  keyed to stations by wsId. Empty when the run hasn't recorded flow. */
+  bundles?: BundleFrame[];
 }
 
-function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations, selectedOpId, onSelectStation }: SimViewProps) {
+function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations, selectedOpId, onSelectStation, bundles = [] }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
 
   const { cells, ambientCells, gridW, gridH } = layoutStations(stations, system, twinMeta, ambientWorkstations);
@@ -2832,24 +2854,92 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
               isSelected={c.s.opId === selectedOpId}
               simTime={simTime}
             />
+            {/* Blocked-after-service marker — this station finished a bundle it
+                can't hand off because the downstream buffer is full. */}
+            {c.s.blocked > 0 && (() => {
+              const bp = isoProj(c.gx + c.w / 2, c.gy + c.d / 2, 1.6);
+              return (
+                <g pointerEvents="none">
+                  <circle cx={bp.sx} cy={bp.sy} r={8} fill="#0F1419CC" stroke={SW_COLORS.alarm} strokeWidth={2} />
+                  <text x={bp.sx} y={bp.sy + 3.5} textAnchor="middle" fontSize={10} fontWeight={800} fill={SW_COLORS.alarm}>!</text>
+                </g>
+              );
+            })()}
           </g>
         ))}
 
-      {/* Travelling WIP bundles between adjacent stations — same caveat as
-          the conveyor; only honest in op-ordered single-row mode. We render
-          MULTIPLE bundles per segment so the flow reads as continuous WIP
-          rather than a single dot, and we phase by the downstream station's
-          queue length so a backed-up cell visibly accumulates material. */}
-      {oneCellPerOp && cells.length > 1 &&
+      {/* Real WIP bundles from the recorded entity-flow stream — each is
+          anchored to its ACTUAL station and coloured by state: waiting in the
+          input buffer (fabric), in service (thread), or blocked-after-service
+          on the output side (alarm). Replaces the old synthetic simTime-phased
+          motion, and works in any layout because each bundle joins to its
+          station by wsId. Sprites are keyed by agentId so React reuses them
+          frame-to-frame as they move between stations. */}
+      {bundles.length > 0 && (() => {
+        const cellByWsId = new Map(cells.map((c) => [c.cellKey, c] as const));
+        // Cap sprites per (station, state) group — the numeric queue badge on
+        // the station already carries the exact count; this just keeps a deep
+        // queue legible instead of spilling across the floor.
+        const MAX_PER_GROUP = 8;
+        return bundles.map((bnd) => {
+          const cell = cellByWsId.get(bnd.wsId);
+          if (!cell || bnd.rank >= MAX_PER_GROUP) return null;
+          const cx = cell.gx + cell.w / 2;
+          const cy = cell.gy + cell.d / 2;
+          let wx = cx;
+          const wy = cy;
+          let z = 0.35;
+          let fill: string = SW_COLORS.fabric;
+          if (bnd.state === 'waiting') {
+            // Conga line into the front (−x) of the station.
+            wx = cx - 0.5 - bnd.rank * 0.28;
+          } else if (bnd.state === 'service') {
+            wx = cx;
+            z = 0.6;
+            fill = SW_COLORS.thread;
+          } else {
+            // blocked — piled on the output side (+x), can't advance.
+            wx = cx + 0.5 + bnd.rank * 0.28;
+            fill = SW_COLORS.alarm;
+          }
+          const p = isoProj(wx, wy, z);
+          return (
+            <g key={`bnd-${bnd.agentId}`} pointerEvents="none">
+              <ellipse cx={p.sx} cy={p.sy + 4} rx={5} ry={1.6} fill="#0F141944" />
+              <rect
+                x={p.sx - 4}
+                y={p.sy - 4}
+                width={8}
+                height={8}
+                fill={fill}
+                stroke="#0F1419"
+                strokeWidth={0.6}
+                opacity={0.92}
+              />
+              <line
+                x1={p.sx - 3}
+                y1={p.sy - 4}
+                x2={p.sx + 3}
+                y2={p.sy - 4}
+                stroke="#0F1419"
+                strokeWidth={0.5}
+                opacity={0.7}
+              />
+            </g>
+          );
+        });
+      })()}
+
+      {/* Fallback: when the run recorded no flow (e.g. a factory whose process
+          graph isn't wired with connectors, so the DES can't route), fall back
+          to the legacy synthetic conveyor motion so the floor still reads as
+          active. Real bundles above take over the moment the twin actually
+          flows. */}
+      {bundles.length === 0 && oneCellPerOp && cells.length > 1 &&
         cells.slice(0, -1).flatMap((c, i) => {
           const next = cells[i + 1];
-          // Same-line guard — skip cross-line segments (otherwise bundles
-          // would visibly hop from the end of Line A to the start of Line B).
           if (c.lineId && next.lineId && c.lineId !== next.lineId) return [];
           const colors = [SW_COLORS.thread, SW_COLORS.fabric, SW_COLORS.bobbin, SW_COLORS.trim];
-          // Bundle density tied to the downstream station's queue: 1 bundle
-          // when idle, up to 4 when the queue is deep. Caps at 4 so the
-          // flow stays legible in heavy-WIP conditions.
           const qLen = next.s?.queueLen ?? 0;
           const count = Math.max(1, Math.min(4, 1 + Math.floor(qLen / 3)));
           return Array.from({ length: count }, (_, k) => {
@@ -2860,7 +2950,6 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
             const p = isoProj(x, y, 0.3);
             return (
               <g key={`wip-${i}-${k}`} pointerEvents="none">
-                {/* Bundle shadow on the floor — sells the height. */}
                 <ellipse cx={p.sx} cy={p.sy + 4} rx={5} ry={1.6} fill="#0F141944" />
                 <rect
                   x={p.sx - 4}
@@ -2872,16 +2961,7 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
                   strokeWidth={0.6}
                   opacity={0.92}
                 />
-                {/* Tie-string on top of the bundle so it reads as fabric. */}
-                <line
-                  x1={p.sx - 3}
-                  y1={p.sy - 4}
-                  x2={p.sx + 3}
-                  y2={p.sy - 4}
-                  stroke="#0F1419"
-                  strokeWidth={0.5}
-                  opacity={0.7}
-                />
+                <line x1={p.sx - 3} y1={p.sy - 4} x2={p.sx + 3} y2={p.sy - 4} stroke="#0F1419" strokeWidth={0.5} opacity={0.7} />
               </g>
             );
           });
