@@ -27,10 +27,10 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_SHADOWS } from '../design/tokens';
 import { useTwin, selectActiveTwin, type DepartmentColorKey } from '../store/twin';
 import { useProject } from '../store';
-import { TimeDisplay, StageOverlay } from '../components';
+import { TimeDisplay, StageOverlay, ViewTitle, EmptyState } from '../components';
 import {
   fmtModelTime,
   fmtCalendar,
@@ -209,6 +209,8 @@ export function LiveFloorPage() {
           flexWrap: 'wrap',
         }}
       >
+        <ViewTitle kicker="Monitor" title="Live Floor" />
+        <div style={{ width: 1, height: 22, background: '#0F141925' }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div
             style={{
@@ -387,7 +389,7 @@ export function LiveFloorPage() {
           }}
         >
           {empty ? (
-            <EmptyState onBuild={() => navigate('/builder')} />
+            <FloorEmptyCard onBuild={() => navigate('/builder')} />
           ) : (
             <>
               {view === 'iso' && (
@@ -498,6 +500,7 @@ export function LiveFloorPage() {
           onClear={() => setSelectedWs(null)}
           events={events.slice(-8).reverse()}
           t={t}
+          onPlay={() => setPlaying(true)}
         />
       </div>
 
@@ -652,7 +655,7 @@ function TwinPicker({ activeTwin }: { activeTwin: ReturnType<typeof selectActive
             background: SW_COLORS.paper,
             border: '1px solid #0F141925',
             borderRadius: 6,
-            boxShadow: '0 8px 24px rgba(15,20,25,0.12)',
+            boxShadow: SW_SHADOWS.float,
             padding: 4,
             zIndex: 50,
           }}
@@ -767,7 +770,7 @@ function TwinPickerRow({
 // EMPTY STATE
 // ============================================================================
 
-function EmptyState({ onBuild }: { onBuild: () => void }) {
+function FloorEmptyCard({ onBuild }: { onBuild: () => void }) {
   return (
     <div
       style={{
@@ -1855,9 +1858,11 @@ interface InspectorProps {
   onClear: () => void;
   events: { id: number; ws: string; kind: 'breakdown' | 'milestone'; label: string }[];
   t: number;
+  /** Starts the floor animation — the event feed's empty-state CTA. */
+  onPlay: () => void;
 }
 
-function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
+function Inspector({ twin, selectedWs, onClear, events, t, onPlay }: InspectorProps) {
   const ws = selectedWs ? twin.workstations.find((w) => w.id === selectedWs) : null;
   const dept = ws ? twin.departments.find((d) => d.id === ws.deptId) : null;
   const fix = ws ? resolveFixture(ws.catalogId) : null;
@@ -1953,9 +1958,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
           )}
         </div>
         {!ws ? (
-          <div style={{ fontSize: 12, color: '#0F141999', fontStyle: 'italic' }}>
-            Click a workstation to inspect.
-          </div>
+          <EmptyState size="sm" icon="▣" title="Nothing selected" body="Click a workstation to inspect." />
         ) : (
           <>
             <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>
@@ -2012,7 +2015,13 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
         </div>
         <div style={{ flex: 1, overflow: 'auto', fontFamily: SW_FONTS.mono, fontSize: 11, lineHeight: 1.6 }}>
           {events.length === 0 && (
-            <div style={{ color: '#0F141970', fontStyle: 'italic' }}>No events yet — press PLAY.</div>
+            <EmptyState
+              size="sm"
+              icon="▶"
+              title="No events yet"
+              body="Press PLAY to start the floor."
+              action={{ label: '▶ Play', onClick: onPlay }}
+            />
           )}
           {events.map((e) => {
             const wsName = twin.workstations.find((w) => w.id === e.ws)?.name?.slice(0, 16) ?? '—';

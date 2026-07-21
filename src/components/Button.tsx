@@ -1,5 +1,5 @@
 import { useState, type CSSProperties, type ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 
 export type ButtonVariant =
   | 'primary'
@@ -22,17 +22,29 @@ interface ButtonProps {
   style?: CSSProperties;
 }
 
-const VARIANTS: Record<
-  ButtonVariant,
-  { bg: string; fg: string; bgHov: string; border: string }
-> = {
-  primary:   { bg: SW_COLORS.brand, fg: '#fff',          bgHov: SW_COLORS.brandDeep, border: 'transparent' },
-  secondary: { bg: SW_COLORS.paper, fg: SW_COLORS.ink,   bgHov: SW_COLORS.paperDeep, border: SW_COLORS.line },
-  ghost:     { bg: 'transparent',   fg: SW_COLORS.ink,   bgHov: SW_COLORS.paperDeep, border: 'transparent' },
-  dark:      { bg: SW_COLORS.ink,   fg: SW_COLORS.paper, bgHov: SW_COLORS.steel,     border: 'transparent' },
-  success:   { bg: SW_COLORS.ok,    fg: '#fff',          bgHov: '#199A5C',           border: 'transparent' },
-  danger:    { bg: SW_COLORS.alarm, fg: '#fff',          bgHov: '#C0392B',           border: 'transparent' },
-};
+/**
+ * Built fresh on every call so SW_COLORS is read at render time — the vibe
+ * system mutates SW_COLORS in place, and a module-level const would capture
+ * the pre-vibe values forever (the stale-capture bug this replaced).
+ */
+function variantColors(
+  variant: ButtonVariant,
+): { bg: string; fg: string; bgHov: string; border: string } {
+  switch (variant) {
+    case 'primary':
+      return { bg: SW_COLORS.brand, fg: '#fff', bgHov: SW_COLORS.brandDeep, border: 'transparent' };
+    case 'secondary':
+      return { bg: SW_COLORS.paper, fg: SW_COLORS.ink, bgHov: SW_COLORS.paperDeep, border: SW_COLORS.line };
+    case 'ghost':
+      return { bg: 'transparent', fg: SW_COLORS.ink, bgHov: SW_COLORS.paperDeep, border: 'transparent' };
+    case 'dark':
+      return { bg: SW_COLORS.ink, fg: SW_COLORS.paper, bgHov: SW_COLORS.steel, border: 'transparent' };
+    case 'success':
+      return { bg: SW_COLORS.ok, fg: '#fff', bgHov: SW_COLORS.okDeep, border: 'transparent' };
+    case 'danger':
+      return { bg: SW_COLORS.alarm, fg: '#fff', bgHov: SW_COLORS.alarmDeep, border: 'transparent' };
+  }
+}
 
 const SIZES: Record<ButtonSize, { p: string; f: number }> = {
   sm: { p: '6px 10px', f: 12 },
@@ -51,7 +63,7 @@ export function Button({
   style,
 }: ButtonProps) {
   const [hov, setHov] = useState(false);
-  const v = VARIANTS[variant];
+  const v = variantColors(variant);
   const sz = SIZES[size];
   return (
     <button
@@ -65,9 +77,8 @@ export function Button({
         border: v.border === 'transparent' ? 'none' : `1px solid ${v.border}`,
         borderRadius: SW_RADIUS.sm,
         padding: sz.p,
+        ...SW_TYPE.label,
         fontSize: sz.f,
-        fontWeight: 600,
-        fontFamily: SW_FONTS.body,
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
         display: 'inline-flex',

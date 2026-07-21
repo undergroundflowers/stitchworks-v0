@@ -13,6 +13,7 @@
 import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { SectionHeader, Tag, ToggleGroup, Button, HudSelect } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { alpha } from '../design/color-utils';
 import {
   WorkstationSprite,
   WorkerSprite,
@@ -657,7 +658,7 @@ function EditorDrawer({ target, onClose }: { target: EditorTarget; onClose: () =
         onClick={onClose}
         style={{
           position: 'absolute', inset: 0,
-          background: 'rgba(15,20,25,0.18)',
+          background: alpha(SW_COLORS.ink, 0.18),
           zIndex: 10,
         }}
       />

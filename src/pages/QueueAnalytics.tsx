@@ -114,7 +114,7 @@ export function QueueAnalyticsPage() {
               reset();
               step(WARMUP_MINUTES);
             }}
-            style={navBtn}
+            style={navBtn()}
             title="Re-run the 8-hour warm-up"
           >
             ⟲ Re-run sim
@@ -122,7 +122,7 @@ export function QueueAnalyticsPage() {
           <button
             type="button"
             onClick={() => step(60)}
-            style={{ ...navBtn, background: SW_COLORS.brand, color: SW_COLORS.paper, border: 'none' }}
+            style={{ ...navBtn(), background: SW_COLORS.brand, color: SW_COLORS.paper, border: 'none' }}
             title="Advance the sim by 1 hour"
           >
             +1 hr
@@ -130,7 +130,7 @@ export function QueueAnalyticsPage() {
           <button
             type="button"
             onClick={() => navigate('/queues')}
-            style={navBtn}
+            style={navBtn()}
             title="Back to the snapshot table"
           >
             ← Queue table
@@ -410,7 +410,9 @@ function disciplineToFloorLabel(d: QueueDiscipline): string {
   }
 }
 
-const navBtn: React.CSSProperties = {
+// Function (not a const) so tokens are read at render time — the vibe system
+// mutates SW_COLORS/SW_FONTS in place.
+const navBtn = (): React.CSSProperties => ({
   background: SW_COLORS.paper,
   border: `1px solid ${SW_COLORS.line}`,
   borderRadius: SW_RADIUS.sm,
@@ -420,4 +422,4 @@ const navBtn: React.CSSProperties = {
   cursor: 'pointer',
   fontFamily: SW_FONTS.body,
   color: SW_COLORS.ink,
-};
+});

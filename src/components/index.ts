@@ -4,6 +4,8 @@ export { Button } from './Button';
 export { Stat } from './Stat';
 export { Tag } from './Tag';
 export { SectionHeader } from './SectionHeader';
+export { ViewTitle } from './ViewTitle';
+export { EmptyState } from './EmptyState';
 export { Logo } from './Logo';
 export { Progress } from './Progress';
 export { ToggleGroup } from './ToggleGroup';

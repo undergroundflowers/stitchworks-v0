@@ -53,6 +53,9 @@ export function applyVibe(vibeKey: keyof typeof SW_VIBES): void {
   Object.assign(SW_COLORS, {
     brand: v.brand, brandDeep: v.brandDeep, brandLite: v.brandLite,
     ink: v.ink, paper: v.paper, paperDeep: v.paperDeep, paperEdge: v.paperEdge,
+    // UI grays are ink-alpha; recompute them from the vibe's ink so they
+    // retheme along with it (hex8 concat keeps the token format stable).
+    line: `${v.ink}30`, muted: `${v.ink}99`, faint: `${v.ink}50`, overlay: `${v.ink}73`,
   });
   (SW_FONTS as { display: string }).display = v.display;
   const radius = SW_RADIUS as { sm: number; md: number; lg: number; xl: number };

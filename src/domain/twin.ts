@@ -1102,6 +1102,9 @@ export function forkTwin(
             inputs: w.block.inputs ? w.block.inputs.map((p) => ({ ...p })) : undefined,
             outputs: w.block.outputs ? w.block.outputs.map((p) => ({ ...p })) : undefined,
             params: w.block.params ? { ...w.block.params } : undefined,
+            // Freeform PROCESS-canvas position travels with the fork so a
+            // forked scenario opens with the same logic-graph layout.
+            processPos: w.block.processPos ? { ...w.block.processPos } : undefined,
           }
         : undefined,
     };

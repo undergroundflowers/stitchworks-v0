@@ -1,4 +1,4 @@
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { Card, Button, Stat, SectionHeader, ProductionSystemDiagram, HudSelect } from '../components';
 import { useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -255,7 +255,7 @@ export function OrdersPage() {
 
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:18 }}>
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>ORDER DETAILS</div>
+            <div style={{ ...SW_TYPE.heading, marginBottom:14 }}>ORDER DETAILS</div>
             {[
               { k:'po', label:'PO Number', placeholder:'e.g. PO-4422' },
               { k:'client', label:'Client', placeholder:'Client name' },
@@ -264,7 +264,7 @@ export function OrdersPage() {
               <div key={f.k} style={{ marginBottom:12 }}>
                 <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:4 }}>{f.label}</div>
                 <input value={order[f.k as keyof OrderState] as string} placeholder={f.placeholder} onChange={e => setOrder({ ...order, [f.k]: e.target.value })}
-                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize:13, fontWeight:600, color: SW_COLORS.ink, background: SW_COLORS.paper }}/>
+                  style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, ...SW_TYPE.body, fontWeight:600, color: SW_COLORS.ink, background: SW_COLORS.paper }}/>
               </div>
             ))}
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
@@ -358,10 +358,9 @@ export function OrdersPage() {
                     }}
                     href={`/resources?tab=operations&garment=${encodeURIComponent(template.id)}`}
                     style={{
+                      ...SW_TYPE.kicker,
                       color: SW_COLORS.brand,
                       fontWeight: 800,
-                      fontFamily: SW_FONTS.mono,
-                      fontSize: 10,
                       letterSpacing: 0.5,
                       cursor: 'pointer',
                       textDecoration: 'none',
@@ -376,7 +375,7 @@ export function OrdersPage() {
           </Card>
 
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>SYSTEM RECOMMENDATION</div>
+            <div style={{ ...SW_TYPE.heading, marginBottom:14 }}>SYSTEM RECOMMENDATION</div>
             <div style={{ background: SW_COLORS.brandLite, padding:14, borderRadius: SW_RADIUS.sm, marginBottom:14, border: `1px solid ${SW_COLORS.brand}40` }}>
               <div style={{ fontSize:11, color: SW_COLORS.brandDeep, fontWeight:700, fontFamily: SW_FONTS.mono, letterSpacing:'1px', marginBottom:4 }}>RECOMMENDED FOR THIS ORDER</div>
               <div style={{ fontFamily: SW_FONTS.display, fontSize:18, fontWeight:900, color: SW_COLORS.ink }}>
@@ -435,7 +434,7 @@ export function OrdersPage() {
                     {previewSystem.label}
                   </strong>
                   {isPreviewing && (
-                    <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: 1.5 }}>
+                    <span style={{ ...SW_TYPE.overline, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: 1.5 }}>
                       PREVIEW
                     </span>
                   )}
@@ -480,8 +479,7 @@ export function OrdersPage() {
               >
                 <span
                   style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 10,
+                    ...SW_TYPE.kicker,
                     fontWeight: 800,
                     color: feasibility.severity === 'error' ? SW_COLORS.alarm : SW_COLORS.thread,
                     letterSpacing: '1px',
@@ -511,8 +509,7 @@ export function OrdersPage() {
               >
                 <span
                   style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 10,
+                    ...SW_TYPE.kicker,
                     fontWeight: 800,
                     color: SW_COLORS.alarm,
                     letterSpacing: '1px',
@@ -548,8 +545,7 @@ export function OrdersPage() {
                 style={{
                   padding: '6px 10px',
                   background: SW_COLORS.paperDeep,
-                  fontFamily: SW_FONTS.mono,
-                  fontSize: 9,
+                  ...SW_TYPE.overline,
                   fontWeight: 800,
                   color: SW_COLORS.muted,
                   letterSpacing: '1.5px',
@@ -815,7 +811,7 @@ function NewGarmentTemplateModal({ onCancel, onCreate }: NewGarmentTemplateModal
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(15, 20, 25, 0.45)',
+        background: SW_COLORS.overlay,
         zIndex: 50,
         display: 'flex',
         alignItems: 'center',
@@ -846,7 +842,7 @@ function NewGarmentTemplateModal({ onCancel, onCreate }: NewGarmentTemplateModal
             gap: 10,
           }}
         >
-          <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, letterSpacing: '0.1em' }}>
+          <div style={{ ...SW_TYPE.heading, letterSpacing: '0.1em' }}>
             ✦ NEW GARMENT TEMPLATE
           </div>
           <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>

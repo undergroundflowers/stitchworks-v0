@@ -84,7 +84,7 @@ export function WorkstationDetailPage() {
         <button
           type="button"
           onClick={() => navigate('/factory')}
-          style={navBtn}
+          style={navBtn()}
         >
           Back to factory
         </button>
@@ -155,7 +155,7 @@ export function WorkstationDetailPage() {
               reset();
               step(WARMUP_MINUTES);
             }}
-            style={navBtn}
+            style={navBtn()}
             title="Re-run the 8-hour warm-up"
           >
             ⟲ Re-run sim
@@ -164,7 +164,7 @@ export function WorkstationDetailPage() {
             type="button"
             onClick={() => step(60)}
             style={{
-              ...navBtn,
+              ...navBtn(),
               background: SW_COLORS.brand,
               color: SW_COLORS.paper,
               border: 'none',
@@ -238,7 +238,9 @@ export function WorkstationDetailPage() {
   );
 }
 
-const navBtn: React.CSSProperties = {
+// Function (not a const) so tokens are read at render time — the vibe system
+// mutates SW_COLORS/SW_FONTS in place.
+const navBtn = (): React.CSSProperties => ({
   background: SW_COLORS.paper,
   border: `1px solid ${SW_COLORS.line}`,
   borderRadius: SW_RADIUS.sm,
@@ -248,7 +250,7 @@ const navBtn: React.CSSProperties = {
   cursor: 'pointer',
   fontFamily: SW_FONTS.body,
   color: SW_COLORS.ink,
-};
+});
 
 /**
  * One-line header above the time-series grid. Translates the technical layer

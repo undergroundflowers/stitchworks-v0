@@ -27,8 +27,18 @@ import { indexedDbStorage } from './storage/indexedDbStorage';
 
 export const LIBRARY_SCHEMA_VERSION = 1 as const;
 
-/** Slot cap surfaced in the menu UI ("SAVED FACTORIES · n / MAX"). */
-export const FACTORY_LIBRARY_MAX = 5;
+/**
+ * Max number of SAVED factories retained in the library (surfaced in the menu
+ * as "FACTORY LIBRARY · n / MAX"). The active factory lives in the project +
+ * twin stores and is NOT one of these slots.
+ *
+ * This is generous because the backend is IndexedDB (orders of magnitude more
+ * room than the old ~5 MB localStorage cap). Even so, the list is bounded so
+ * repeated example-loads can't grow it without limit. Pinned factories are
+ * never auto-dropped (see `enforceCap`), so a favorite survives even when the
+ * recency list churns past the cap.
+ */
+export const FACTORY_LIBRARY_MAX = 20;
 
 interface TwinSnapshot {
   schemaVersion: typeof TWIN_STORE_SCHEMA_VERSION;
@@ -44,6 +54,13 @@ export interface SavedFactory {
   savedAt: string;
   /** Cached for the slot tile so we don't have to deep-walk on render. */
   stationCount: number;
+  /**
+   * Pinned factories are protected from automatic eviction — neither the
+   * recency cap (`enforceCap`) nor the quota-recovery sweep will drop them.
+   * Optional so entries persisted before pinning existed rehydrate as
+   * unpinned (undefined === false).
+   */
+  pinned?: boolean;
   project: ProjectState;
   twin: TwinSnapshot;
 }
@@ -62,6 +79,9 @@ export interface FactoryLibraryState {
   deleteFactory: (id: string) => void;
   /** Rename a saved factory in place. */
   renameFactory: (id: string, name: string) => void;
+  /** Toggle the pinned flag on a saved factory. Pinned factories survive the
+   *  recency cap and the quota-recovery sweep. */
+  togglePin: (id: string) => void;
   /** Sweep saved factories and suffix any whose names collide with the
    *  active project or an earlier entry. Idempotent — safe to call on
    *  every rehydrate. Returns the number of entries that were renamed. */
@@ -116,6 +136,28 @@ function uniquifyFactoryName(
   }
   // Pathological fallback — append a short random suffix.
   return `${base} (${Math.random().toString(36).slice(2, 6)})`;
+}
+
+/**
+ * Trim a saved-factory list to at most `max` entries, dropping the OLDEST
+ * UNPINNED entries first. The list is newest-first (archiveCurrent prepends),
+ * so "oldest" means walking from the tail. Pinned factories are never dropped
+ * — if every entry is pinned the list is returned untouched even when it
+ * exceeds `max`: an explicit pin beats the soft cap, since silently destroying
+ * a favorite is worse than briefly exceeding an arbitrary ceiling.
+ */
+function enforceCap(list: SavedFactory[], max: number): SavedFactory[] {
+  if (list.length <= max) return list;
+  const next = [...list];
+  // Walk from the tail (oldest) toward the head. Iterating backward means a
+  // splice at index i never shifts the indices of entries we haven't examined
+  // yet (0…i-1), so dropping is safe mid-loop. We stop as soon as we're within
+  // cap; if every remaining entry is pinned the loop runs out (i < 0) and the
+  // list is returned still over cap — a pin beats the soft ceiling.
+  for (let i = next.length - 1; i >= 0 && next.length > max; i--) {
+    if (!next[i].pinned) next.splice(i, 1);
+  }
+  return next;
 }
 
 function captureProject(): ProjectState {
@@ -174,16 +216,15 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
         // Enforce FACTORY_LIBRARY_MAX so repeated Load-Bundle clicks can't
         // grow the library unbounded. Each entry holds a full project+twin
         // snapshot (~hundreds of KB), and zustand/persist silently swallows
-        // QuotaExceededError when the combined localStorage budget blows —
-        // so without this cap the twin-store persist (the biggest write)
-        // is the one that gets dropped on the next click, leaving the
-        // Builder's FACTORY dropdown empty while Reports still shows the
-        // project-store scenarios. Drop oldest first so the most recent
-        // factories stay closest to hand.
-        set((s) => {
-          const next = [entry, ...s.savedFactories];
-          return { savedFactories: next.slice(0, FACTORY_LIBRARY_MAX) };
-        });
+        // QuotaExceededError when the combined budget blows — so without this
+        // cap the twin-store persist (the biggest write) is the one that gets
+        // dropped on the next click, leaving the Builder's FACTORY dropdown
+        // empty while Reports still shows the project-store scenarios.
+        // enforceCap drops the OLDEST UNPINNED entries first, so the most
+        // recent factories stay closest to hand and pinned favorites survive.
+        set((s) => ({
+          savedFactories: enforceCap([entry, ...s.savedFactories], FACTORY_LIBRARY_MAX),
+        }));
         return entry;
       },
 
@@ -212,6 +253,13 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
           savedFactories: s.savedFactories.map((f) => (f.id === id ? { ...f, name: safe } : f)),
         }));
       },
+
+      togglePin: (id) =>
+        set((s) => ({
+          savedFactories: s.savedFactories.map((f) =>
+            f.id === id ? { ...f, pinned: !f.pinned } : f,
+          ),
+        })),
 
       dedupeSavedFactories: () => {
         // Walk the saved list in its current order (newest-first as kept
@@ -256,15 +304,27 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
         indexedDbStorage({
           onQuotaError: () => {
             const s = useFactoryLibrary.getState();
-            if (s.savedFactories.length <= 1) return false;
-            // Drop the oldest entry (savedFactories is newest-first).
-            useFactoryLibrary.setState({
-              savedFactories: s.savedFactories.slice(0, s.savedFactories.length - 1),
-            });
-            // eslint-disable-next-line no-console
+            // Drop the oldest UNPINNED entry (savedFactories is newest-first,
+            // so walk from the tail). Pinned favorites are never sacrificed to
+            // free space — if nothing is droppable (empty or all-pinned) we
+            // can't recover here, so the write routes to the localStorage
+            // fallback instead.
+            let dropIdx = -1;
+            for (let i = s.savedFactories.length - 1; i >= 0; i--) {
+              if (!s.savedFactories[i].pinned) { dropIdx = i; break; }
+            }
+            // Contract (see persist-storage.ts): return true only after we've
+            // actually freed space so the storage layer retries the write;
+            // return false when nothing is droppable so it falls back to
+            // localStorage instead of retrying a write that can't fit.
+            if (dropIdx === -1) return false;
+            const dropped = s.savedFactories[dropIdx];
+            const next = s.savedFactories.slice();
+            next.splice(dropIdx, 1);
+            useFactoryLibrary.setState({ savedFactories: next });
             console.warn(
-              `[factoryLibrary] quota hit — dropped oldest saved factory to make room. ` +
-                `Library now holds ${s.savedFactories.length - 1} entries.`,
+              `[factoryLibrary] quota hit — dropped oldest unpinned factory ` +
+                `"${dropped.name}" to make room. Library now holds ${next.length} entries.`,
             );
             return true;
           },

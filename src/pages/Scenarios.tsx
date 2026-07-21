@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat, useConfirm } from '../components';
+import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat, EmptyState, useConfirm } from '../components';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
@@ -132,19 +132,19 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
         )}
 
         {scenarios.length === 0 && (
-          <Card padding={32} style={{ textAlign: 'center', marginTop: 24 }}>
-            <div style={{ fontSize: 56, lineHeight: 1, marginBottom: 12, color: SW_COLORS.brand }}>✦</div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, marginBottom: 8 }}>
-              Capture your first scenario
-            </div>
-            <div style={{ fontSize: 13, color: SW_COLORS.muted, maxWidth: 540, margin: '0 auto', lineHeight: 1.6 }}>
-              Open <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, configure the garment / operator count / skill matrix / Yamazumi
-              assignment you want to evaluate, then click <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong>. The current
-              KPIs and configuration are stored together so you can compare runs apples-to-apples later.
-            </div>
-            <div style={{ marginTop: 18 }}>
-              <Button variant="primary" onClick={() => navigate('/sim')}>Open Simulation →</Button>
-            </div>
+          <Card padding={32} style={{ marginTop: 24 }}>
+            <EmptyState
+              icon="✦"
+              title="Capture your first scenario"
+              body={
+                <>
+                  Open <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, configure the garment / operator count / skill matrix / Yamazumi
+                  assignment you want to evaluate, then click <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong>. The current
+                  KPIs and configuration are stored together so you can compare runs apples-to-apples later.
+                </>
+              }
+              action={{ label: 'Open Simulation →', onClick: () => navigate('/sim') }}
+            />
           </Card>
         )}
 

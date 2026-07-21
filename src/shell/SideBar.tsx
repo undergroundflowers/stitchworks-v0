@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { alpha } from '../design/color-utils';
 import { ROUTES, type RouteDef } from '../lib/routes';
 import { useTabPrefs, type TabPref } from '../lib/tabPrefs';
 import { useProject } from '../store';
@@ -61,7 +62,7 @@ export function SideBar() {
         color: SW_COLORS.paper,
         display: 'flex',
         flexDirection: 'column',
-        borderRight: `1px solid #ffffff15`,
+        borderRight: `1px solid ${alpha(SW_COLORS.paper, 0.08)}`,
         flexShrink: 0,
         height: '100%',
       }}
@@ -113,7 +114,7 @@ export function SideBar() {
           alignItems: 'center',
           gap: 2,
           borderRadius: SW_RADIUS.sm,
-          background: '#ffffff08',
+          background: alpha(SW_COLORS.paper, 0.03),
         }}
       >
         <div
@@ -136,12 +137,12 @@ export function SideBar() {
             width: 6,
             height: 6,
             borderRadius: 999,
-            background: activeScenarioId === null ? '#ffffff33' : SW_COLORS.brand,
+            background: activeScenarioId === null ? alpha(SW_COLORS.paper, 0.2) : SW_COLORS.brand,
           }}
         />
       </div>
 
-      <div style={{ height: 1, background: '#ffffff15', margin: '4px 10px 6px' }} />
+      <div style={{ height: 1, background: alpha(SW_COLORS.paper, 0.08), margin: '4px 10px 6px' }} />
 
       {/* Nav stack — scrolls vertically if the route list grows. */}
       <div
@@ -174,15 +175,15 @@ export function SideBar() {
               onClick={() => setOverflowOpen((v) => !v)}
               aria-label={`Hidden tabs (${hiddenRoutes.length})`}
               title={`Hidden tabs (${hiddenRoutes.length})`}
-              onMouseEnter={(e) => { e.currentTarget.style.background = '#ffffff0d'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = overflowOpen ? '#ffffff15' : 'transparent'; }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = alpha(SW_COLORS.paper, 0.05); }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = overflowOpen ? alpha(SW_COLORS.paper, 0.08) : 'transparent'; }}
               style={{
                 width: '100%',
-                background: overflowOpen ? '#ffffff15' : 'transparent',
+                background: overflowOpen ? alpha(SW_COLORS.paper, 0.08) : 'transparent',
                 border: 'none',
                 cursor: 'pointer',
                 padding: '8px 0',
-                color: '#ffffffcc',
+                color: alpha(SW_COLORS.paper, 0.8),
                 fontFamily: SW_FONTS.body,
                 fontSize: 11,
                 fontWeight: 600,
@@ -225,7 +226,7 @@ export function SideBar() {
                   display: 'flex',
                   flexDirection: 'column',
                   gap: 2,
-                  background: '#ffffff08',
+                  background: alpha(SW_COLORS.paper, 0.03),
                   borderRadius: SW_RADIUS.sm,
                   padding: 4,
                 }}
@@ -247,25 +248,25 @@ export function SideBar() {
       </div>
 
       {/* Settings — pinned to the bottom. */}
-      <div style={{ borderTop: '1px solid #ffffff15', padding: '8px 6px 10px' }}>
+      <div style={{ borderTop: `1px solid ${alpha(SW_COLORS.paper, 0.08)}`, padding: '8px 6px 10px' }}>
         <button
           type="button"
           onClick={() => navigate('/settings')}
           aria-label="Settings"
           title="Settings"
           onMouseEnter={(e) => {
-            if (currentRoute !== 'settings') e.currentTarget.style.background = '#ffffff0d';
+            if (currentRoute !== 'settings') e.currentTarget.style.background = alpha(SW_COLORS.paper, 0.05);
           }}
           onMouseLeave={(e) => {
             if (currentRoute !== 'settings') e.currentTarget.style.background = 'transparent';
           }}
           style={{
             width: '100%',
-            background: currentRoute === 'settings' ? '#ffffff18' : 'transparent',
+            background: currentRoute === 'settings' ? alpha(SW_COLORS.paper, 0.09) : 'transparent',
             border: 'none',
             cursor: 'pointer',
             padding: '8px 0 6px',
-            color: currentRoute === 'settings' ? SW_COLORS.brand : '#ffffffcc',
+            color: currentRoute === 'settings' ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.8),
             fontFamily: SW_FONTS.body,
             fontSize: 10,
             fontWeight: 600,
@@ -318,14 +319,14 @@ function NavTile({ route, active, pref, onNavigate, onToggleHidden, onToggleLock
         }
       }}
       style={{
-        background: active ? '#ffffff15' : hovered && !locked ? '#ffffff08' : 'transparent',
+        background: active ? alpha(SW_COLORS.paper, 0.08) : hovered && !locked ? alpha(SW_COLORS.paper, 0.03) : 'transparent',
         cursor: locked ? 'not-allowed' : 'pointer',
         padding: '8px 0 6px',
         color: locked
-          ? '#ffffff55'
+          ? alpha(SW_COLORS.paper, 0.33)
           : active
             ? SW_COLORS.brand
-            : '#ffffffcc',
+            : alpha(SW_COLORS.paper, 0.8),
         fontFamily: SW_FONTS.body,
         fontSize: 10,
         fontWeight: 600,
@@ -405,11 +406,11 @@ function HiddenTile({ route, onShow }: HiddenTileProps) {
       aria-label={`Show ${route.label}`}
       title={`Show ${route.label}`}
       style={{
-        background: hovered ? '#ffffff15' : 'transparent',
+        background: hovered ? alpha(SW_COLORS.paper, 0.08) : 'transparent',
         border: 'none',
         cursor: 'pointer',
         padding: '6px 0 5px',
-        color: '#ffffffaa',
+        color: alpha(SW_COLORS.paper, 0.67),
         fontFamily: SW_FONTS.body,
         fontSize: 9.5,
         fontWeight: 600,
@@ -452,9 +453,9 @@ function MicroToggle({ onClick, label, tone, children }: MicroToggleProps) {
       title={label}
       style={{
         background: tone === 'active'
-          ? '#ffffff22'
+          ? alpha(SW_COLORS.paper, 0.13)
           : hovered
-            ? '#ffffff18'
+            ? alpha(SW_COLORS.paper, 0.09)
             : 'transparent',
         border: 'none',
         cursor: 'pointer',
@@ -464,7 +465,7 @@ function MicroToggle({ onClick, label, tone, children }: MicroToggleProps) {
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        color: tone === 'active' ? SW_COLORS.brand : '#ffffffaa',
+        color: tone === 'active' ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.67),
         borderRadius: 3,
         transition: 'background 100ms, color 100ms',
       }}

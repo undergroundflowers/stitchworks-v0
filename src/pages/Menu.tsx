@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Tag, Logo, TimeChip, useConfirm, useToast } from '../components';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { Card, Button, Tag, Logo, TimeChip, useConfirm } from '../components';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import {
   useProject,
@@ -10,26 +10,21 @@ import {
   isFactoryNameTaken,
   FACTORY_LIBRARY_MAX,
 } from '../store';
-import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { fmtCalendar } from '../simulation/timeUnit';
-import {
-  fetchModelamaBundle,
-  buildModelamaTwin,
-  buildModelamaScenarioVariants,
-} from '../lib/modelama-bundle';
+import { getFlag, setFlag } from '../lib/safeStorage';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
- *   LEFT: brand mark, hero copy, primary CTAs, save slots, footer links
- *   RIGHT: live mini-factory illustration, today's events, recent badges
+ *   LEFT:  brand mark, hero copy, the "new" CTA, and the FACTORY LIBRARY list
+ *   RIGHT: today's calendar/status panel
  *
- * Ported from SWMainMenu in STITCHWORKS.html (lines 1032–1199) plus the
- * MiniIsoFactory illustration (lines 1202–1251) which lives inline below.
+ * Ported from SWMainMenu in STITCHWORKS.html (lines 1032–1199). The original
+ * mock isometric "live factory" illustration was removed — the splash has no
+ * live floor, so invented telemetry was replaced with an honest panel.
  */
 export function MenuPage() {
   const navigate = useNavigate();
   const confirm = useConfirm();
-  const toast = useToast();
   const projectTime = useProject((s) => s.time);
   const dateFormat = useProject((s) => s.units.dateFormat);
   const factoryName = useProject((s) => s.meta.name);
@@ -38,6 +33,27 @@ export function MenuPage() {
   const savedFactories = useFactoryLibrary((s) => s.savedFactories);
   const loadFactory = useFactoryLibrary((s) => s.loadFactory);
   const deleteFactory = useFactoryLibrary((s) => s.deleteFactory);
+  const togglePin = useFactoryLibrary((s) => s.togglePin);
+  // Pinned factories float to the top of the flat list (favorites stay closest
+  // to hand). The underlying store array keeps its recency order — eviction
+  // depends on it — so we sort a copy here for display only. Array.sort is
+  // stable, so same-pinned entries keep their newest-first order.
+  const sortedSaved = useMemo(
+    () => [...savedFactories].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned)),
+    [savedFactories],
+  );
+
+  // Factory Library is a collapsible disclosure — its header toggles the card
+  // grid open/closed. Defaults open (so the active factory is visible on first
+  // load); the choice is remembered across sessions ('0' = collapsed).
+  const [libraryOpen, setLibraryOpen] = useState<boolean>(() => getFlag('sw_lib_open') !== '0');
+  const toggleLibrary = () => {
+    setLibraryOpen((open) => {
+      const next = !open;
+      setFlag('sw_lib_open', next ? '1' : '0');
+      return next;
+    });
+  };
   // No sim run has happened yet on the menu, so "today" anchors to t=0
   // (i.e. the project's start date). MODEL-time vs CAL is irrelevant here.
   const todayCal = fmtCalendar(0, projectTime.modelTimeUnit, projectTime.startDate, dateFormat);
@@ -48,8 +64,9 @@ export function MenuPage() {
   const [newFactoryOpen, setNewFactoryOpen] = useState(false);
   const [newFactoryName, setNewFactoryName] = useState('New Factory');
 
-  const slotsUsed = savedFactories.length + 1; // active counts toward the cap
-  const atCap = slotsUsed >= FACTORY_LIBRARY_MAX;
+  // The cap counts SAVED factories only — the active factory lives in the
+  // project/twin stores, not the library, so it isn't a slot.
+  const savedCount = savedFactories.length;
 
   const openNewFactoryDialog = () => {
     // Pick a starting name that doesn't already collide.
@@ -66,7 +83,6 @@ export function MenuPage() {
   const confirmNewFactory = () => {
     const name = newFactoryName.trim();
     if (!name) return;
-    if (atCap) return; // belt + braces; button is disabled in this state
     if (isFactoryNameTaken(name)) return; // belt + braces; button is disabled
     archiveAndStartFresh(name);
     setNewFactoryOpen(false);
@@ -91,126 +107,6 @@ export function MenuPage() {
       variant: 'danger',
     });
     if (ok) deleteFactory(id);
-  };
-
-  // Multi-line reference factory preset — used to live as a "📚 LOAD REF
-  // FACTORY" button on the Builder toolbar. Promoted here so the home
-  // page is the single landing place for picking which factory to open.
-  // Behaviour: archive whatever the user has open, reset, then swap the
-  // fresh canonical with the multi-line reference twin (Hossain ·
-  // Elnaggar · Morshed · Kursun · Koç stacked on one floor). Lands the
-  // user in Builder so they can browse the seeded lines immediately.
-  // One-click Modelama factory: fetches the four bundled .xlsx files,
-  // parses them into garments + layouts, assembles a 4-line twin and
-  // lands the user in Builder. The IndExc files live under public/modelama
-  // so they ship with the build.
-  const setGarmentEdit = useProject((s) => s.setGarmentEdit);
-  const saveScenario = useProject((s) => s.saveScenario);
-  const [modelamaLoading, setModelamaLoading] = useState(false);
-  const handleLoadModelamaFactory = async () => {
-    if (atCap || modelamaLoading) return;
-    // Idempotent reload: if the active factory is already a Modelama bundle,
-    // refresh it in place instead of archiving a "(2)", "(3)", … copy each
-    // click. Match the canonical prefix (the suffix may be a (N) collision
-    // disambiguator added by uniquifyFactoryName on a prior load).
-    const currentName = useProject.getState().meta.name ?? '';
-    const isAlreadyModelama = /^Modelama · Garment Factory/i.test(currentName.trim());
-    const proceed = await confirm({
-      title: isAlreadyModelama ? 'Re-seed Modelama factory' : 'Load Modelama factory',
-      message: isAlreadyModelama
-        ? 'Re-seed the Modelama factory? The active canonical + scenarios will be replaced with a fresh bundle, but the library is left alone (no archive copy).'
-        : 'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
-      confirmLabel: isAlreadyModelama ? 'Re-seed' : 'Load',
-    });
-    if (!proceed) return;
-    setModelamaLoading(true);
-    try {
-      const parsed = await fetchModelamaBundle(import.meta.env.BASE_URL ?? '');
-      if (parsed.length === 0) {
-        toast({ kind: 'error', message: 'Could not load Modelama bundle — the bundled xlsx files were not reachable.' });
-        return;
-      }
-      if (isAlreadyModelama) {
-        // In-place reseed — drop project + twin state without snapshotting
-        // the (stale) active factory into the library. resetProject also
-        // wipes project.scenarios so the upcoming saveScenario loop seeds
-        // fresh entries instead of stacking duplicates.
-        useProject.getState().resetProject();
-        useTwin.getState().resetTwin();
-        useProject.getState().rename('Modelama · Garment Factory');
-      } else {
-        archiveAndStartFresh('Modelama · Garment Factory');
-      }
-      const { twin, garments } = buildModelamaTwin(parsed, 'Modelama · Garment Factory');
-      // Register imported garments so workstations can resolve their opIds
-      // through `useGarments()` downstream.
-      for (const g of garments) setGarmentEdit(g.id, g);
-      const r = useTwin.getState().loadCanonical(twin);
-      if (!r.ok) {
-        toast({ kind: 'error', message: `Could not load Modelama factory: ${r.reason}` });
-        return;
-      }
-      // Seed line-swap scenarios so the Scenarios tab has something to
-      // compare from the moment the bundle finishes loading. Each variant
-      // ships with analytical KPIs (planned-efficiency throughput from the
-      // OB SMVs) so the comparison view shows real numbers immediately;
-      // the user can still click Load → Sim to overwrite with simulated
-      // values.
-      const variants = buildModelamaScenarioVariants(parsed);
-      const twinStore = useTwin.getState();
-      for (const v of variants) {
-        saveScenario({
-          name: v.name,
-          notes: v.notes,
-          twin: v.twin,
-          garmentTemplateId: v.garmentTemplateId,
-          operators: v.operators,
-          kpis: {
-            producedPieces: v.kpis.producedPieces,
-            throughputPerHr: v.kpis.throughputPerHr,
-            efficiencyPct: v.kpis.efficiencyPct,
-            meanLeadTime: v.kpis.meanLeadTime,
-            utilization: v.kpis.utilization,
-            wipBundles: v.kpis.wipBundles,
-            bottleneckOpName: v.kpis.bottleneckOpName,
-            bottleneckQueue: v.kpis.bottleneckQueue,
-          },
-        });
-        // Also register the variant in the twin store so the Builder's
-        // scenario picker shows it from the start — without this the
-        // dropdown only sees the canonical until the user clicks Load.
-        twinStore.createScenarioFromTwin({
-          name: v.name,
-          notes: v.notes,
-          twin: v.twin,
-          activate: false,
-        });
-      }
-      navigate('/builder');
-    } catch (err) {
-      console.error('Modelama load failed', err);
-      toast({ kind: 'error', message: `Modelama load failed: ${err instanceof Error ? err.message : String(err)}` });
-    } finally {
-      setModelamaLoading(false);
-    }
-  };
-
-  const handleLoadReferenceFactory = async () => {
-    if (atCap) return;
-    const proceed = await confirm({
-      title: 'Load reference factory',
-      message: 'Load the multi-line reference factory? Your current factory will be archived to the SAVED FACTORIES library first.',
-      confirmLabel: 'Load',
-    });
-    if (!proceed) return;
-    archiveAndStartFresh('Reference Factory · All Lines');
-    const refTwin = buildReferenceFactoryTwin({ name: 'Reference Factory · All Lines' });
-    const r = useTwin.getState().loadCanonical(refTwin);
-    if (!r.ok) {
-      toast({ kind: 'error', message: `Could not load reference factory: ${r.reason}` });
-      return;
-    }
-    navigate('/builder');
   };
 
   return (
@@ -244,99 +140,93 @@ export function MenuPage() {
           </p>
         </div>
 
-        {/* Continue / New */}
+        {/* NEW — the single "create" action. Your saved factories live in the
+            FACTORY LIBRARY list below, so the menu reads like any file-based
+            app: one NEW button + an Open/Recents list. */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <Button
             variant="primary"
             size="lg"
             onClick={openNewFactoryDialog}
             icon="+"
-            disabled={atCap}
           >
-            CREATE NEW DIGITAL FACTORY
-          </Button>
-          <Button
-            variant="secondary"
-            size="lg"
-            onClick={handleLoadModelamaFactory}
-            icon={modelamaLoading ? '…' : '🧵'}
-            disabled={atCap || modelamaLoading}
-          >
-            {modelamaLoading ? 'LOADING…' : 'LOAD MODELAMA FACTORY'}
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => navigate('/reference')} icon="📖">
-            REFERENCE MODELS
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => navigate('/pilot')} icon="⚗">
-            PILOT STUDY
+            CREATE NEW FACTORY
           </Button>
         </div>
 
-        {/* Save slots */}
+        {/* FACTORY LIBRARY — the one place you open things from. Reads like a
+            file app's Open / Recents panel: the active factory first, then your
+            saved factories (pinned float to the top, the rest newest-first). */}
         <div style={{ marginTop: 8 }}>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.5px', marginBottom: 8 }}>
-            SAVED FACTORIES · {slotsUsed} / {FACTORY_LIBRARY_MAX}
-          </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <FactorySlot
-              label={factoryName || 'Untitled Factory'}
+          <button
+            type="button"
+            onClick={toggleLibrary}
+            aria-expanded={libraryOpen}
+            aria-controls="factory-library-list"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              width: '100%', marginBottom: 8, gap: 12, flexWrap: 'wrap',
+              background: 'transparent', border: 'none', padding: '2px 0',
+              cursor: 'pointer', textAlign: 'left',
+            }}
+          >
+            <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted }}>
+              FACTORY LIBRARY · {savedCount} / {FACTORY_LIBRARY_MAX} SAVED
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...SW_TYPE.kicker, fontWeight: 600, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
+              STORED ON THIS DEVICE
+              <span
+                aria-hidden="true"
+                style={{ display: 'inline-block', transition: 'transform 160ms', transform: libraryOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+              >
+                ▾
+              </span>
+            </span>
+          </button>
+          {libraryOpen && (
+          <div id="factory-library-list" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {/* ACTIVE — your current factory */}
+            <LibraryCard
+              icon="◆"
+              title={factoryName || 'Untitled Factory'}
               caption={`${activeStationCount} STATIONS`}
-              badge="ACTIVE"
-              badgeColor={SW_COLORS.ok}
+              tag="ACTIVE"
+              tagColor={SW_COLORS.ok}
               scenarioCount={activeScenarioCount}
               onClick={() => navigate('/builder')}
               onOpenScenarios={handleOpenScenariosForActive}
             />
-            {/* Multi-line reference factory preset. Same look as a saved
-                factory tile so it reads as "another factory you can open"
-                — distinguished by the dashed border + PRESET badge. */}
-            <ReferenceFactoryPresetSlot
-              onClick={handleLoadReferenceFactory}
-              disabled={atCap}
-            />
-            {savedFactories.map((slot) => (
-              <FactorySlot
+
+            {/* RECENTS + PINNED — your saved factories. Pinned float to the
+                top (sortedSaved); the rest follow newest-first. */}
+            {sortedSaved.map((slot) => (
+              <LibraryCard
                 key={slot.id}
-                label={slot.name}
+                icon="▤"
+                title={slot.name}
                 caption={`${slot.stationCount} STATIONS · ${fmtSavedAt(slot.savedAt)}`}
+                tag={slot.pinned ? 'PINNED' : 'SAVED'}
+                tagColor={slot.pinned ? SW_COLORS.thread : SW_COLORS.muted}
+                pinned={slot.pinned}
                 scenarioCount={slot.project.scenarios?.length ?? 0}
                 onClick={() => handleLoadSaved(slot.id)}
                 onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
+                onTogglePin={() => togglePin(slot.id)}
                 onDelete={() => handleDeleteSaved(slot.id, slot.name)}
               />
             ))}
           </div>
+          )}
         </div>
 
       </div>
 
-      {/* RIGHT: live status + achievements + isometric thumbnail */}
+      {/* RIGHT: today's status. The mock "live factory" illustration card
+          (fake isometric floor + fabricated "14 operators · 2 machines down ·
+          184 pcs/hr · 2 ALERTS" telemetry) was removed — the splash menu has no
+          live floor to report, so an honest, data-free panel beats invented
+          numbers. */}
       <div style={{ padding: '64px 56px 64px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {/* Mini factory illustration */}
-        <Card padding={0} style={{ overflow: 'hidden' }}>
-          <div style={{
-            height: 240, position: 'relative',
-            background: `linear-gradient(135deg, ${SW_COLORS.steel}, ${SW_COLORS.steelLite})`,
-            overflow: 'hidden',
-          }}>
-            <MiniIsoFactory/>
-            <div style={{
-              position: 'absolute', left: 16, bottom: 12,
-              color: '#fff', fontFamily: SW_FONTS.body,
-            }}>
-              <div style={{ fontSize: 10, fontFamily: SW_FONTS.mono, color: '#ffffffaa', letterSpacing: '1px', fontWeight: 700 }}>LIVE NOW</div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize: 18, fontWeight: 900 }}>Floor 1 · Sewing</div>
-              <div style={{ fontSize: 11, color: '#ffffffcc' }}>14 operators · 2 machines down · 184 pcs/hr</div>
-            </div>
-            <div style={{
-              position: 'absolute', right: 14, top: 12,
-              display: 'flex', gap: 6,
-            }}>
-              <Tag color={SW_COLORS.alarm}>● 2 ALERTS</Tag>
-            </div>
-          </div>
-        </Card>
-
         {/*
           Today's tasks / events — model time is anchored to t = 0 here
           (the project's start date), so the "TODAY" label honestly shows
@@ -386,190 +276,140 @@ export function MenuPage() {
   );
 }
 
-interface FactorySlotProps {
-  label: string;
+/**
+ * One entry in the FACTORY LIBRARY list. Renders your own factories as a flat
+ * list:
+ *
+ *   • ACTIVE — the factory you currently have open. Clicking opens the Builder;
+ *     it carries a scenarios sub-button but no delete/pin controls.
+ *   • SAVED  — a factory in the library. Clicking loads it; it gets a delete ×,
+ *     a pin toggle, and the same scenarios sub-button.
+ */
+interface LibraryCardProps {
+  icon: string;
+  title: string;
   caption: string;
-  badge?: string;
-  badgeColor?: string;
+  tag: string;
+  tagColor: string;
+  /** Scenarios sub-button count. */
   scenarioCount?: number;
+  /** Pinned state (saved factories only) — drives the ★ glyph + amber accent. */
+  pinned?: boolean;
   onClick: () => void;
-  onOpenScenarios?: () => void;
   onDelete?: () => void;
+  onOpenScenarios: () => void;
+  /** Pin/unpin toggle (saved factories only). */
+  onTogglePin?: () => void;
 }
 
-function FactorySlot({ label, caption, badge, badgeColor, scenarioCount, onClick, onOpenScenarios, onDelete }: FactorySlotProps) {
+function LibraryCard({
+  icon,
+  title,
+  caption,
+  tag,
+  tagColor,
+  scenarioCount,
+  pinned,
+  onClick,
+  onDelete,
+  onOpenScenarios,
+  onTogglePin,
+}: LibraryCardProps) {
   const count = scenarioCount ?? 0;
   return (
     <Card
       hover
       padding={14}
-      style={{ flex: '1 1 180px', minWidth: 160, position: 'relative', display: 'flex', flexDirection: 'column' }}
       onClick={onClick}
+      accent={pinned ? SW_COLORS.thread : undefined}
+      style={{
+        flex: '1 1 180px',
+        minWidth: 160,
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 6, minHeight: 16 }}>
-        {badge ? (
-          <Tag soft color={badgeColor ?? SW_COLORS.brand}>{badge}</Tag>
-        ) : <span />}
-        {onDelete && (
-          <button
-            type="button"
-            aria-label={`Delete saved factory ${label}`}
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: SW_COLORS.muted,
-              fontFamily: SW_FONTS.mono,
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: 'pointer',
-              padding: '0 4px',
-              lineHeight: 1,
-            }}
-          >
-            ×
-          </button>
-        )}
+        <Tag soft color={tagColor}>{tag}</Tag>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {onTogglePin && (
+            <button
+              type="button"
+              aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}
+              title={pinned
+                ? 'Unpin — allow auto-cleanup to drop this when the library is full'
+                : 'Pin — protect this factory from auto-cleanup'}
+              onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: pinned ? SW_COLORS.thread : SW_COLORS.muted,
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: 'pointer',
+                padding: '0 2px',
+                lineHeight: 1,
+              }}
+            >
+              {pinned ? '★' : '☆'}
+            </button>
+          )}
+          {onDelete ? (
+            <button
+              type="button"
+              aria-label={`Delete saved factory ${title}`}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: SW_COLORS.muted,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: 'pointer',
+                padding: '0 4px',
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
+          ) : (
+            !onTogglePin && <span aria-hidden="true" style={{ fontSize: 16, lineHeight: 1 }}>{icon}</span>
+          )}
+        </div>
       </div>
-      <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {label}
+      <div style={{ ...SW_TYPE.heading, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {title}
       </div>
       <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {caption}
       </div>
-      {onOpenScenarios && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
-          title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
-          style={{
-            marginTop: 10,
-            padding: '6px 8px',
-            background: count > 0 ? SW_COLORS.brandLite : 'transparent',
-            border: `1px solid ${count > 0 ? `${SW_COLORS.brand}40` : SW_COLORS.line}`,
-            borderRadius: 4,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 6,
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: '0.5px',
-            color: count > 0 ? SW_COLORS.brand : SW_COLORS.muted,
-          }}
-        >
-          <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
-          <span>→</span>
-        </button>
-      )}
-    </Card>
-  );
-}
 
-/**
- * Reference-factory preset tile. Same footprint as `FactorySlot` so it
- * sits cleanly in the SAVED FACTORIES row, but with a dashed border +
- * brand-coloured PRESET badge so the user understands it's a starter
- * pack, not their own saved factory. Click → archive the current
- * factory + load the multi-line reference twin as the new active one.
- */
-function ReferenceFactoryPresetSlot({
-  onClick,
-  disabled,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={
-        disabled
-          ? 'Factory library is at capacity — delete a saved factory first.'
-          : 'Load the multi-line reference factory (Hossain · Elnaggar · Morshed · Kursun · Koç stacked on one floor). Your current factory will be archived to SAVED FACTORIES first.'
-      }
-      style={{
-        all: 'unset',
-        boxSizing: 'border-box',
-        flex: '1 1 180px',
-        minWidth: 160,
-        padding: 14,
-        background: SW_COLORS.paper,
-        border: `1.5px dashed ${SW_COLORS.brand}80`,
-        borderRadius: SW_RADIUS.md,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'background 120ms, border-color 120ms',
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.background = `${SW_COLORS.brand}08`;
-        e.currentTarget.style.borderColor = SW_COLORS.brand;
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = SW_COLORS.paper;
-        e.currentTarget.style.borderColor = `${SW_COLORS.brand}80`;
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 6, minHeight: 16 }}>
-        <Tag soft color={SW_COLORS.brand}>PRESET</Tag>
-        <span aria-hidden="true" style={{ fontSize: 16, lineHeight: 1 }}>📚</span>
-      </div>
-      <div
-        style={{
-          fontFamily: SW_FONTS.display,
-          fontSize: 14,
-          fontWeight: 800,
-          color: SW_COLORS.ink,
-          marginBottom: 4,
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        Reference Factory
-      </div>
-      <div
-        style={{
-          fontFamily: SW_FONTS.mono,
-          fontSize: 10,
-          color: SW_COLORS.muted,
-          fontWeight: 600,
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        5 LITERATURE LINES
-      </div>
-      <div
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
+        title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
         style={{
           marginTop: 10,
           padding: '6px 8px',
-          background: 'transparent',
-          border: `1px solid ${SW_COLORS.brand}40`,
+          background: count > 0 ? SW_COLORS.brandLite : 'transparent',
+          border: `1px solid ${count > 0 ? `${SW_COLORS.brand}40` : SW_COLORS.line}`,
           borderRadius: 4,
+          cursor: 'pointer',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: 6,
-          fontFamily: SW_FONTS.mono,
-          fontSize: 10,
-          fontWeight: 700,
+          ...SW_TYPE.kicker,
           letterSpacing: '0.5px',
-          color: SW_COLORS.brand,
+          color: count > 0 ? SW_COLORS.brand : SW_COLORS.muted,
         }}
       >
-        <span>✦ LOAD INTO ACTIVE</span>
+        <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
         <span>→</span>
-      </div>
-    </button>
+      </button>
+    </Card>
   );
 }
 
@@ -617,7 +457,7 @@ function NewFactoryModal({
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(15, 20, 25, 0.45)',
+        background: SW_COLORS.overlay,
         zIndex: 100,
         display: 'flex',
         alignItems: 'center',
@@ -641,9 +481,7 @@ function NewFactoryModal({
           style={{
             padding: '14px 18px',
             borderBottom: `1px solid ${SW_COLORS.line}`,
-            fontFamily: SW_FONTS.display,
-            fontSize: 14,
-            fontWeight: 900,
+            ...SW_TYPE.heading,
             letterSpacing: '0.1em',
           }}
         >
@@ -652,7 +490,7 @@ function NewFactoryModal({
 
         <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
+            <span style={{ ...SW_TYPE.kicker, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
               FACTORY NAME
             </span>
             <input
@@ -713,57 +551,5 @@ function NewFactoryModal({
         </div>
       </div>
     </div>
-  );
-}
-
-// ---------------- Mini Isometric Factory illustration ----------------
-function MiniIsoFactory() {
-  // Pull the live workstation count from the active twin so the splash
-  // caption agrees with what /floor will actually show. The 4×5=20 tiles
-  // below are decorative — the count below is what users compare against.
-  const stationCount = useTwin((s) => selectActiveTwin(s).workstations.length);
-  return (
-    <svg viewBox="0 0 600 240" style={{ width: '100%', height: '100%', display: 'block' }}>
-      <defs>
-        <linearGradient id="iso-floor" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#ffffff10"/>
-          <stop offset="1" stopColor="#ffffff02"/>
-        </linearGradient>
-      </defs>
-
-      {/* floor diamond */}
-      <polygon points="300,40 540,140 300,220 60,140" fill="url(#iso-floor)" stroke="#ffffff20" strokeWidth="1"/>
-
-      {/* sewing rows */}
-      {[0, 1, 2, 3].flatMap((row) => {
-        const y = 100 + row * 22;
-        return [0, 1, 2, 3, 4].map((col) => {
-          const x = 180 + col * 40 + row * 8;
-          const isAct = (row + col) % 3 !== 0;
-          return (
-            <g key={`${row}-${col}`} transform={`translate(${x}, ${y})`}>
-              <polygon points="0,0 18,9 18,22 0,13" fill={isAct ? SW_COLORS.brand : '#ffffff30'} stroke="#000" strokeOpacity="0.2"/>
-              <polygon points="18,9 26,5 26,18 18,22" fill={isAct ? SW_COLORS.brandDeep : '#ffffff20'} stroke="#000" strokeOpacity="0.2"/>
-              <polygon points="0,0 18,9 26,5 8,-4" fill={isAct ? '#FFD2B5' : '#ffffff20'} stroke="#000" strokeOpacity="0.2"/>
-              {isAct && <circle cx="9" cy="-2" r="2.5" fill="#FFE4D6"/>}
-            </g>
-          );
-        });
-      })}
-
-      {/* moving bundle dots */}
-      <g>
-        <circle cx="200" cy="105" r="3" fill={SW_COLORS.thread}>
-          <animate attributeName="cx" from="120" to="440" dur="6s" repeatCount="indefinite"/>
-          <animate attributeName="cy" from="120" to="180" dur="6s" repeatCount="indefinite"/>
-        </circle>
-        <circle cx="220" cy="120" r="3" fill={SW_COLORS.fabric}>
-          <animate attributeName="cx" from="120" to="440" dur="8s" begin="2s" repeatCount="indefinite"/>
-          <animate attributeName="cy" from="120" to="180" dur="8s" begin="2s" repeatCount="indefinite"/>
-        </circle>
-      </g>
-
-      <text x="300" y="232" textAnchor="middle" fill="#ffffff60" fontFamily={SW_FONTS.mono} fontSize="9">FLOOR 01 · SEWING · {stationCount} STATIONS</text>
-    </svg>
   );
 }

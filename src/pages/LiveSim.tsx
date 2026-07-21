@@ -14,7 +14,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Button, ToggleGroup, HudSelect, TimeDisplay, type HudSelectOption } from '../components';
+import { Button, ToggleGroup, HudSelect, TimeDisplay, ViewTitle, EmptyState, type HudSelectOption } from '../components';
+import { SimStationDetail } from '../components/SimStationDetail';
 import {
   buildSimConfigFromTwin,
   buildLinesFromTwin,
@@ -169,6 +170,11 @@ export function LiveSimPage() {
   // User-edited bundle override; null means "follow the seed (twin or system)".
   const [bundleOverride, setBundleOverride] = useState<number | null>(null);
   const [view, setView] = useState<SimView>('iso');
+  // Per-station "sim vs theory" drawer — selected by clicking a station in the
+  // ISO/TOP views. Keyed by opId (what maps to a StationView); clicking a
+  // second machine that runs the same op shows that op's queue, which is the
+  // right granularity for the queueing analysis.
+  const [selectedOpId, setSelectedOpId] = useState<string | null>(null);
 
   // ── Reference-model picker state ────────────────────────────────────────
   // Reference context — set by the Reference Models page (LOAD & SIMULATE
@@ -602,6 +608,8 @@ export function LiveSimPage() {
           flexWrap: 'wrap',
         }}
       >
+        <ViewTitle kicker="Simulation" title="Live Sim" surface="dark" />
+        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div
             style={{
@@ -798,6 +806,8 @@ export function LiveSimPage() {
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
               ambientWorkstations={ambientWorkstations}
+              selectedOpId={selectedOpId}
+              onSelectStation={setSelectedOpId}
             />
           </PanZoomViewport>
         )}
@@ -811,6 +821,8 @@ export function LiveSimPage() {
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
               ambientWorkstations={ambientWorkstations}
+              selectedOpId={selectedOpId}
+              onSelectStation={setSelectedOpId}
             />
           </PanZoomViewport>
         )}
@@ -1218,7 +1230,14 @@ export function LiveSimPage() {
             </div>
             <div style={{ fontSize: 11, fontFamily: SW_FONTS.mono, lineHeight: 1.6, overflow: 'auto', flex: 1 }}>
               {state.events.length === 0 && (
-                <div style={{ color: '#ffffff60', fontStyle: 'italic' }}>No events yet — press PLAY.</div>
+                <EmptyState
+                  size="sm"
+                  surface="dark"
+                  icon="▶"
+                  title="No events yet"
+                  body="Press PLAY to start the run."
+                  action={{ label: '▶ Play', onClick: () => setPlaying(true) }}
+                />
               )}
               {state.events.map((e, i) => {
                 const col =
@@ -1246,6 +1265,19 @@ export function LiveSimPage() {
           )}
         </div>
         )}
+
+        {/* Per-station sim-vs-theory drawer — fed by the REAL run on this page. */}
+        {view !== 'pml' && (() => {
+          const idx = selectedOpId ? state.stations.findIndex((s) => s.opId === selectedOpId) : -1;
+          if (idx < 0) return null;
+          return (
+            <SimStationDetail
+              station={state.stations[idx]}
+              history={state.stationHistory[idx] ?? []}
+              onClose={() => setSelectedOpId(null)}
+            />
+          );
+        })()}
       </div>
 
       {/* TRANSPORT BAR */}
@@ -1859,6 +1891,16 @@ function PanZoomViewport({ viewKey, children }: { viewKey: string; children: Rea
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // Pinch (ctrlKey) or a mouse wheel zooms toward the cursor; a plain
+      // trackpad two-finger swipe pans. tf.x/tf.y are screen-space (same as the
+      // mouse-drag pan below), so subtract the raw deltas for 1:1 tracking.
+      const isPinch = e.ctrlKey || e.metaKey;
+      const isMouseWheel =
+        e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50);
+      if (!(isPinch || isMouseWheel)) {
+        setTf((t) => ({ ...t, x: t.x - e.deltaX, y: t.y - e.deltaY }));
+        return;
+      }
       const rect = el.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
@@ -2667,9 +2709,13 @@ interface SimViewProps {
    *  cutters, QC tables, presses, fabric racks, buffers, operators. Rendered
    *  as static floor context so the simulation reads as the full factory. */
   ambientWorkstations?: AmbientWorkstationInput[];
+  /** opId of the station whose detail drawer is open (highlights it). */
+  selectedOpId?: string | null;
+  /** Click a station to open its sim-vs-theory drawer. Omit for read-only views. */
+  onSelectStation?: (opId: string) => void;
 }
 
-function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations }: SimViewProps) {
+function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations, selectedOpId, onSelectStation }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
 
   const { cells, ambientCells, gridW, gridH } = layoutStations(stations, system, twinMeta, ambientWorkstations);
@@ -2774,13 +2820,19 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
       {[...cells]
         .sort((a, b) => a.gx + a.gy - (b.gx + b.gy))
         .map((c, i) => (
-          <IsoSewingStation
+          <g
             key={c.cellKey ?? `${c.s.opId}-${i}`}
-            layout={c}
-            index={i}
-            isHot={c.s.opId === bottleneckOpId && c.s.queueLen > 0}
-            simTime={simTime}
-          />
+            onClick={onSelectStation ? (e) => { e.stopPropagation(); onSelectStation(c.s.opId); } : undefined}
+            style={onSelectStation ? { cursor: 'pointer' } : undefined}
+          >
+            <IsoSewingStation
+              layout={c}
+              index={i}
+              isHot={c.s.opId === bottleneckOpId && c.s.queueLen > 0}
+              isSelected={c.s.opId === selectedOpId}
+              simTime={simTime}
+            />
+          </g>
         ))}
 
       {/* Travelling WIP bundles between adjacent stations — same caveat as
@@ -2844,11 +2896,13 @@ function IsoSewingStation({
   layout,
   index,
   isHot,
+  isSelected,
   simTime,
 }: {
   layout: StationLayout;
   index: number;
   isHot: boolean;
+  isSelected?: boolean;
   simTime: number;
 }) {
   const { s, gx, gy, w, d } = layout;
@@ -2886,6 +2940,25 @@ function IsoSewingStation({
           >
             <animate attributeName="opacity" values="0.85;0.35;0.85" dur="0.9s" repeatCount="indefinite" />
           </ellipse>
+        );
+      })()}
+      {/* Selection ring — drawn when this station's detail drawer is open. */}
+      {isSelected && (() => {
+        const c = isoProj(w / 2, d / 2, 0.02);
+        const o = isoProj(0, 0, 0);
+        const rx = (w + 1.1) * 16;
+        const ry = (d + 1.1) * 8;
+        return (
+          <ellipse
+            cx={c.sx - o.sx}
+            cy={c.sy - o.sy}
+            rx={rx}
+            ry={ry}
+            fill={`${SW_COLORS.brand}18`}
+            stroke={SW_COLORS.brand}
+            strokeWidth={2.5}
+            pointerEvents="none"
+          />
         );
       })()}
       {/* Sewing-machine table */}
@@ -3308,7 +3381,7 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
 // TOP 2D VIEW
 // ============================================================================
 
-function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta }: SimViewProps) {
+function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta, selectedOpId, onSelectStation }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
   const VIEWBOX_W = 1200;
   const VIEWBOX_H = 600;
@@ -3382,9 +3455,18 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMet
       {stations.map((s, i) => {
         const { x, y } = positions[i];
         const isHot = i === bottleneckOpIndex && s.queueLen > 0;
+        const isSelected = s.opId === selectedOpId;
         const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
         return (
-          <g key={`${s.opId}-${i}`} transform={`translate(${x}, ${y})`}>
+          <g
+            key={`${s.opId}-${i}`}
+            transform={`translate(${x}, ${y})`}
+            onClick={onSelectStation ? (e) => { e.stopPropagation(); onSelectStation(s.opId); } : undefined}
+            style={onSelectStation ? { cursor: 'pointer' } : undefined}
+          >
+            {isSelected && (
+              <rect x={-42} y={-56} width={84} height={112} rx={8} fill="none" stroke={SW_COLORS.brand} strokeWidth={3} />
+            )}
             <rect
               x={-36}
               y={-50}

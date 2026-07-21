@@ -96,7 +96,7 @@ export function QueueIndexPage() {
               reset();
               step(WARMUP_MINUTES);
             }}
-            style={navBtn}
+            style={navBtn()}
             title="Re-run 8-hour warm-up"
           >
             ⟲ Re-run sim
@@ -104,7 +104,7 @@ export function QueueIndexPage() {
           <button
             type="button"
             onClick={() => step(60)}
-            style={{ ...navBtn, background: SW_COLORS.brand, color: SW_COLORS.paper, border: 'none' }}
+            style={{ ...navBtn(), background: SW_COLORS.brand, color: SW_COLORS.paper, border: 'none' }}
             title="Advance sim by 1 hour"
           >
             +1 hr
@@ -112,7 +112,7 @@ export function QueueIndexPage() {
           <button
             type="button"
             onClick={() => navigate('/queues/analytics')}
-            style={navBtn}
+            style={navBtn()}
             title="Open the time-series view"
           >
             Compare stations →
@@ -286,7 +286,7 @@ function StationTable({
             <button
               type="button"
               onClick={() => onPick(s.opId)}
-              style={analyzeBtn}
+              style={analyzeBtn()}
             >
               Analyze →
             </button>
@@ -419,7 +419,9 @@ function fmt2(v: number): string {
   return v.toFixed(2);
 }
 
-const navBtn: React.CSSProperties = {
+// Functions (not consts) so tokens are read at render time — the vibe system
+// mutates SW_COLORS/SW_FONTS in place.
+const navBtn = (): React.CSSProperties => ({
   background: SW_COLORS.paper,
   border: `1px solid ${SW_COLORS.line}`,
   borderRadius: SW_RADIUS.sm,
@@ -429,10 +431,10 @@ const navBtn: React.CSSProperties = {
   cursor: 'pointer',
   fontFamily: SW_FONTS.body,
   color: SW_COLORS.ink,
-};
+});
 
-const analyzeBtn: React.CSSProperties = {
-  ...navBtn,
+const analyzeBtn = (): React.CSSProperties => ({
+  ...navBtn(),
   padding: '5px 10px',
   fontSize: 11,
-};
+});

@@ -1,5 +1,5 @@
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, type OperatorAssignment } from '../components';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
+import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, HudSelect, Tag, type OperatorAssignment } from '../components';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ScenariosPanel } from './Scenarios';
@@ -144,7 +144,20 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
 
   // Yamazumi state — picks from store override if present, else LPT auto.
   const [yamGarment, setYamGarment] = useState<string>(project.selectedGarmentId);
-  const [yamOperators, setYamOperators] = useState<number>(project.defaultOperators);
+  // Seed the line-balance operator count from the line that actually produces
+  // the selected garment (its authored operatorTarget), NOT the factory-wide
+  // `defaultOperators` (≈25). Balancing a 3-op line onto 25 operators reads as
+  // ~90% balance loss and misleads — the count must reflect the line being
+  // balanced. Falls back to any wired line's target, then the project default
+  // for legacy / canonical-only twins. Clamp matches the input's [4, 60] range.
+  const [yamOperators, setYamOperators] = useState<number>(() => {
+    const lines = selectActiveTwin(useTwin.getState()).lines ?? [];
+    const target =
+      lines.find((l) => l.garmentId === project.selectedGarmentId && l.operatorTarget)?.operatorTarget ??
+      lines.find((l) => l.operatorTarget)?.operatorTarget ??
+      project.defaultOperators;
+    return Math.max(4, Math.min(60, target));
+  });
 
   const yamTemplate = garments.byId[yamGarment] ?? garments.all[0];
   const storedOverride = project.yamazumiOverrides[yamGarment];
@@ -500,7 +513,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'0.5px' }}>RUNS</span>
+              <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing:'0.5px' }}>RUNS</span>
               <ToggleGroup value={String(runs)} onChange={(v) => setRuns(parseInt(v))} options={[
                 { value: '1',  label: '1' },
                 { value: '3',  label: '3' },
@@ -557,12 +570,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         >
           <span
             style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 9,
-              fontWeight: 700,
+              ...SW_TYPE.overline,
               color: SW_COLORS.muted,
               letterSpacing: '1.5px',
-              textTransform: 'uppercase',
             }}
           >
             Active systems
@@ -611,7 +621,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
             <div>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '2px', marginBottom: 4 }}>
+              <div style={{ ...SW_TYPE.kicker, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '2px', marginBottom: 4 }}>
                 📚 PAPER VALIDATION
               </div>
               <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>
@@ -718,7 +728,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
           <div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>
+            <div style={{ ...SW_TYPE.heading }}>
               ⚙ PML SIMULATION
             </div>
             <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 2 }}>
@@ -829,10 +839,10 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         <HideableBox>
           <Card padding={20} style={{ marginBottom: 14 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>
+              <div style={{ ...SW_TYPE.heading }}>
                 OB DECLARED vs SIM OBSERVED
               </div>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
+              <div style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
                 {runs} REPLICATION{runs === 1 ? '' : 'S'} · 480 MIN SHIFT
               </div>
             </div>
@@ -842,7 +852,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
-                  <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
+                  <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}`, ...SW_TYPE.kicker, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
                     <th style={{ padding: '6px 8px' }}>LINE</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @100%</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @PLAN 60%</th>
@@ -1032,7 +1042,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <Card padding={20}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14, paddingRight: 36, flexWrap: 'wrap', gap: 8 }}>
                 <div>
-                  <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>PER-LINE OUTPUT OVER TIME</div>
+                  <div style={{ ...SW_TYPE.heading }}>PER-LINE OUTPUT OVER TIME</div>
                   <div style={{ fontSize: 12, color: SW_COLORS.muted }}>
                     Cumulative pieces produced per line, sampled every 5 sim-minutes and averaged across all {runs} replication{runs === 1 ? '' : 's'}.
                   </div>
@@ -1059,7 +1069,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         <Card padding={20}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap: 14, flexWrap: 'wrap', paddingRight: 36 }}>
             <div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>YAMAZUMI · LINE BALANCE</div>
+              <div style={{ ...SW_TYPE.heading }}>YAMAZUMI · LINE BALANCE</div>
               <div style={{ fontSize:12, color: SW_COLORS.muted }}>
                 Operator-by-operation SMV stack with takt-line overlay. Drag any segment onto another operator's bar to rebalance manually. Bars over the takt line are bottlenecks.
               </div>
@@ -1071,7 +1081,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                   Line 2's setup from the LiveSim picker and type it in. */}
               {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).length > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>LOAD LINE</span>
+                  <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>LOAD LINE</span>
                   {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).map((lb) => {
                     const accent = DEPT_LINE_COLORS[lb.line.color] ?? SW_COLORS.brand;
                     const lineGarmentId = lb.line.garmentId!;
@@ -1107,7 +1117,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               )}
               <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
               <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPERATORS</span>
+                <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPERATORS</span>
                 <input type="number" min={4} max={60} value={yamOperators}
                   onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
                   style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
@@ -1132,7 +1142,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               theoretical minimum headcount at takt. */}
           <div style={{ marginTop: 10, padding: '6px 10px 4px', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, background: '#fafaf6' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6, justifyContent: 'space-between' }}>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', color: SW_COLORS.muted }}>
+              <div style={{ ...SW_TYPE.kicker, fontWeight: 800, letterSpacing: '0.08em', color: SW_COLORS.muted }}>
                 3-METRIC LINE BALANCE  ·  FAIRNESS · TAKT-EFFICIENCY · MANNING
               </div>
               <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
@@ -1231,10 +1241,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                       <span
                         style={{
                           padding: '2px 6px',
-                          fontFamily: SW_FONTS.mono,
-                          fontSize: 9,
+                          ...SW_TYPE.overline,
                           fontWeight: 900,
-                          letterSpacing: '0.08em',
                           background: c.chip,
                           color: c.chipText,
                           borderRadius: 3,
@@ -1554,7 +1562,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <div style={{ marginBottom:14 }}>
         <HideableBox>
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:6, paddingRight: 36 }}>BY SYSTEM</div>
+            <div style={{ ...SW_TYPE.heading, marginBottom:6, paddingRight: 36 }}>BY SYSTEM</div>
             <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 14 }}>
               Efficiency = SAM-earned ÷ operator-minutes, weighted across the lines on each system. Pieces are summed across those lines{periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''}.
             </div>
@@ -1599,9 +1607,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                           <span
                             title={`${b.sharedStations} station${b.sharedStations === 1 ? '' : 's'} share an operator · ${b.sharedSavings.toFixed(1)} operator-equivalent${b.sharedSavings >= 1.05 ? 's' : ''} saved (each ⇄ slows that station's cycle 1/shareFrac×)`}
                             style={{
-                              fontFamily: SW_FONTS.mono,
-                              fontSize: 10,
-                              fontWeight: 700,
+                              ...SW_TYPE.kicker,
                               color: SW_COLORS.bobbin,
                               marginLeft: 8,
                               padding: '1px 6px',
@@ -1743,8 +1749,7 @@ function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarPro
               cursor: 'pointer',
               padding: '10px 18px 12px',
               color: active ? SW_COLORS.ink : SW_COLORS.muted,
-              fontFamily: SW_FONTS.body,
-              fontSize: 13,
+              ...SW_TYPE.body,
               fontWeight: active ? 800 : 600,
               display: 'flex',
               alignItems: 'baseline',
@@ -1768,10 +1773,8 @@ function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarPro
             {t.badge && (
               <span
                 style={{
-                  fontFamily: SW_FONTS.mono,
-                  fontSize: 9,
+                  ...SW_TYPE.overline,
                   fontWeight: 800,
-                  letterSpacing: '0.08em',
                   background: SW_COLORS.brandLite,
                   color: SW_COLORS.brandDeep,
                   padding: '2px 5px',
@@ -1838,7 +1841,7 @@ function SaveScenarioModal({
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(15, 20, 25, 0.45)',
+        background: SW_COLORS.overlay,
         zIndex: 50,
         display: 'flex',
         alignItems: 'center',
@@ -1867,7 +1870,7 @@ function SaveScenarioModal({
             gap: 10,
           }}
         >
-          <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, letterSpacing: '0.1em' }}>
+          <div style={{ ...SW_TYPE.heading, letterSpacing: '0.1em' }}>
             ✦ SAVE SCENARIO
           </div>
           <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>
@@ -1877,7 +1880,7 @@ function SaveScenarioModal({
 
         <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
+            <span style={{ ...SW_TYPE.kicker, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
               NAME
             </span>
             <input
@@ -1986,9 +1989,49 @@ function PerLineKpiTable({
   periodLabel: string;
   periodMultiplier: number;
 }) {
+  // Reading posture, not a preference — ephemeral, resets with the page.
+  const [sortBy, setSortBy] = useState<'line' | 'eff' | 'wip' | 'output'>('line');
+  const sortedRows = useMemo(() => {
+    if (sortBy === 'line') return rows;
+    const sorted = [...rows];
+    if (sortBy === 'eff') sorted.sort((a, b) => a.agg.efficiencyPct.mean - b.agg.efficiencyPct.mean);
+    else if (sortBy === 'wip') sorted.sort((a, b) => b.agg.wipBundles.mean - a.agg.wipBundles.mean);
+    else sorted.sort((a, b) => b.agg.producedPieces.mean - a.agg.producedPieces.mean);
+    return sorted;
+  }, [rows, sortBy]);
+  // Constraint line: lowest mean efficiency, ties broken by highest WIP.
+  const bottleneckLineId = useMemo(() => {
+    if (rows.length < 2) return null;
+    let worst = rows[0];
+    for (const r of rows.slice(1)) {
+      const d = r.agg.efficiencyPct.mean - worst.agg.efficiencyPct.mean;
+      if (d < 0 || (d === 0 && r.agg.wipBundles.mean > worst.agg.wipBundles.mean)) worst = r;
+    }
+    return worst.line.id;
+  }, [rows]);
   return (
     <Card padding={16} style={{ marginBottom: 20 }}>
-      <SectionHeader title="PER LINE" sub="Replication-mean KPIs run independently on each wired sewing line. FACTORY row sums extensive KPIs (output, throughput, WIP) and weights intensives (efficiency by operator-minutes, util by operator count, lead time by pieces)." />
+      <SectionHeader
+        title="PER LINE"
+        sub="Replication-mean KPIs run independently on each wired sewing line. FACTORY row sums extensive KPIs (output, throughput, WIP) and weights intensives (efficiency by operator-minutes, util by operator count, lead time by pieces)."
+        right={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ ...SW_TYPE.kicker, letterSpacing: '1px', color: SW_COLORS.muted }}>SORT</span>
+            <HudSelect
+              value={sortBy}
+              onChange={(v) => setSortBy(v as typeof sortBy)}
+              variant="light"
+              size="sm"
+              options={[
+                { value: 'line', label: 'Line order' },
+                { value: 'eff', label: 'Lowest efficiency first' },
+                { value: 'wip', label: 'Highest WIP first' },
+                { value: 'output', label: 'Highest output first' },
+              ]}
+            />
+          </div>
+        }
+      />
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.mono, fontSize: 12 }}>
           <thead>
@@ -2003,14 +2046,28 @@ function PerLineKpiTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {sortedRows.map((r) => {
               const accent = DEPT_LINE_COLORS[r.line.color] ?? SW_COLORS.brand;
+              const isBottleneck = r.line.id === bottleneckLineId;
               return (
-                <tr key={r.line.id} style={{ borderTop: `1px solid ${SW_COLORS.line}` }}>
+                <tr
+                  key={r.line.id}
+                  style={{
+                    borderTop: `1px solid ${SW_COLORS.line}`,
+                    borderLeft: isBottleneck ? `3px solid ${SW_COLORS.alarm}` : '3px solid transparent',
+                  }}
+                >
                   <td style={{ padding: '8px', textAlign: 'left' }}>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                       <span aria-hidden style={{ width: 6, height: 6, borderRadius: 1, background: accent }} />
                       <span style={{ fontWeight: 800 }}>{r.line.name}</span>
+                      {isBottleneck && (
+                        <span
+                          title={`Constraint line — lowest efficiency (${r.agg.efficiencyPct.mean.toFixed(1)}%). Slowest OP inside line: ${r.agg.bottleneckOpName} (Q=${Math.round(r.agg.bottleneckQueue)}).`}
+                        >
+                          <Tag color={SW_COLORS.alarm} soft>◆ BOTTLENECK</Tag>
+                        </span>
+                      )}
                     </span>
                   </td>
                   <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.brand, fontWeight: 800 }}>
@@ -2210,7 +2267,7 @@ function ChartHeader({
   return (
     <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14, paddingRight: 36, gap: 14, flexWrap: 'wrap' }}>
       <div>
-        <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>{title}</div>
+        <div style={{ ...SW_TYPE.heading }}>{title}</div>
         <div style={{ fontSize:12, color: SW_COLORS.muted, marginTop: 2, maxWidth: 520, lineHeight: 1.45 }}>{sub}</div>
       </div>
       {legend && legend.length > 0 && (
@@ -2260,20 +2317,20 @@ function ChartInference({
       }}
     >
       <div style={{ display: 'flex', gap: 8 }}>
-        <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+        <span style={{ ...SW_TYPE.overline, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', minWidth: 60 }}>
           OBSERVE
         </span>
         <span>{observation}</span>
       </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+        <span style={{ ...SW_TYPE.overline, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', minWidth: 60 }}>
           INFER
         </span>
         <span>{inference}</span>
       </div>
       {action && (
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-          <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+          <span style={{ ...SW_TYPE.overline, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', minWidth: 60 }}>
             ACTION
           </span>
           <span>{action}</span>
@@ -2549,7 +2606,7 @@ function LittlesLawPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>LITTLE'S LAW · CHECK</div>
+      <div style={{ ...SW_TYPE.heading }}>LITTLE'S LAW · CHECK</div>
       <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4, marginBottom: 14, lineHeight: 1.45 }}>
         Steady-state queueing identity: <strong style={{ color: SW_COLORS.ink, fontFamily: SW_FONTS.mono }}>L = λ × W</strong>. If observed WIP and the prediction diverge by &gt;15 %, the run isn't in steady state — extend simulation time or trim warm-up.
       </div>
@@ -2563,7 +2620,7 @@ function LittlesLawPanel({
 
       <div style={{ marginTop: 14, padding: '10px 12px', border: `1px solid ${withinTol ? SW_COLORS.ok : SW_COLORS.warn}`, borderRadius: SW_RADIUS.sm, background: withinTol ? '#1FB36B11' : '#F5A62311' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: SW_COLORS.muted }}>
+          <span style={{ ...SW_TYPE.kicker, fontWeight: 800, letterSpacing: '0.1em', color: SW_COLORS.muted }}>
             AGREEMENT
           </span>
           <span style={{ fontFamily: SW_FONTS.mono, fontSize: 12, fontWeight: 900, color: withinTol ? SW_COLORS.ok : SW_COLORS.warn }}>

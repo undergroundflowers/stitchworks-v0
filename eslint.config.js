@@ -37,4 +37,20 @@ export default defineConfig([
       'no-useless-assignment': 'warn',
     },
   },
+  {
+    // Colour literals belong in src/design/tokens.ts (or derive with
+    // alpha()/darken()). Warn-only: ~350 legacy literals remain, and the
+    // grep ratchet in scripts/check-color-literals.sh enforces the ceiling.
+    files: ['src/pages/**/*.{ts,tsx}', 'src/components/**/*.{ts,tsx}', 'src/shell/**/*.{ts,tsx}', 'src/App.tsx'],
+    ignores: ['src/components/ProcessCodeView.tsx'],
+    rules: {
+      'no-restricted-syntax': [
+        'warn',
+        {
+          selector: 'Literal[value=/^#[0-9a-fA-F]{3,8}$/]',
+          message: 'Use SW_COLORS / alpha() from src/design instead of hex literals.',
+        },
+      ],
+    },
+  },
 ])

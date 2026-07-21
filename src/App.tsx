@@ -1,12 +1,11 @@
-import { useEffect, useReducer, useState } from 'react';
-import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useReducer } from 'react';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { SideBar } from './shell/SideBar';
 import { SW_COLORS, SW_FONTS } from './design/tokens';
 import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
 import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
 import { ErrorBoundary, useToast } from './components';
 import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
-import { getFlag, setFlag } from './lib/safeStorage';
 import { useStoresHydrated } from './store/storage/useHydrated';
 
 import { useTwin } from './store/twin';
@@ -19,25 +18,21 @@ import { LiveSimPage } from './pages/LiveSim';
 import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
-import { Onboarding } from './pages/Onboarding';
 import { BuilderPage } from './pages/Builder';
 import { LiveFloorPage } from './pages/LiveFloor';
-import { ReferenceModelsPage } from './pages/ReferenceModels';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { QueueIndexPage } from './pages/QueueIndex';
 import { QueueAnalyticsPage } from './pages/QueueAnalytics';
-import { PilotStudyPage } from './pages/PilotStudy';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
- * Tweaks panel (industrial/workshop/arcade · intensity · avatar style),
- * and the first-run Onboarding modal. Game state is currently a static
- * demo object (see lib/game.ts); it will become reactive once we add a
- * store and wire simulation outputs to it.
+ * Tweaks panel (industrial/workshop/arcade · intensity · avatar style).
+ * On launch the app opens straight to the home menu (route "/"). Game
+ * state is currently a static demo object (see lib/game.ts); it will
+ * become reactive once we add a store and wire simulation outputs to it.
  */
 export default function App() {
   const location = useLocation();
-  const navigate = useNavigate();
   const toast = useToast();
   const hydrated = useStoresHydrated();
   const [t, setTweak] = useTweaks(SW_TWEAK_DEFAULTS);
@@ -104,22 +99,6 @@ export default function App() {
     window.dispatchEvent(new Event('sw_tweaks'));
   }, [t.intensity, t.avatars]);
 
-  // Onboarding shows once per browser; a tiny localStorage flag remembers
-  // the dismissal so refreshes don't re-prompt.
-  const [showOnboarding, setShowOnboarding] = useState<boolean>(
-    () => getFlag('sw_onboarded') !== '1',
-  );
-  const finishOnboarding = (skipped: boolean) => {
-    setFlag('sw_onboarded', '1');
-    setShowOnboarding(false);
-    if (!skipped) {
-      // Completing onboarding lands you on the live floor; skipping leaves
-      // you wherever you were. (HashRouter listens for hashchange, so we
-      // route through useNavigate rather than pushState + popstate.)
-      navigate('/floor');
-    }
-  };
-
   const showSideBar = location.pathname !== '/';
   const intensityFilter = `saturate(${0.7 + ((t.intensity as number) / 100) * 0.9}) contrast(${0.95 + ((t.intensity as number) / 100) * 0.15})`;
 
@@ -158,7 +137,6 @@ export default function App() {
         transition: 'filter 240ms',
       }}
     >
-      {showOnboarding && <Onboarding onFinish={finishOnboarding} />}
       {showSideBar && <SideBar />}
       <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
         <ErrorBoundary key={location.pathname} scope="page">
@@ -191,9 +169,10 @@ export default function App() {
           {/* Assets is now a tab inside Resources. The standalone /assets URL
               redirects there so old links and deep-links still resolve. */}
           <Route path="/assets" element={<Navigate to="/resources?tab=assets" replace />} />
-          <Route path="/reference" element={<ReferenceModelsPage />} />
-          {/* Pilot Factory 1.0 · line replacement study */}
-          <Route path="/pilot" element={<PilotStudyPage />} />
+          {/* Reference Models and Pilot Study were removed; redirect any stale
+              deep-links back to the home menu rather than dead-ending. */}
+          <Route path="/reference" element={<Navigate to="/" replace />} />
+          <Route path="/pilot" element={<Navigate to="/" replace />} />
         </Routes>
         </ErrorBoundary>
       </div>

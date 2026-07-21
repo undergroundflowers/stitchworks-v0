@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 
 interface StatProps {
   label: string;
@@ -47,12 +47,9 @@ export function Stat({
             display: 'inline-flex',
             alignItems: 'center',
             gap: 4,
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 700,
-            color: SW_COLORS.muted,
+            ...SW_TYPE.kicker,
             letterSpacing: '0.6px',
-            textTransform: 'uppercase',
+            color: SW_COLORS.muted,
           }}
         >
           {label}
@@ -63,11 +60,8 @@ export function Stat({
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
         <span
           style={{
-            fontFamily: SW_FONTS.display,
-            fontSize: big ? 32 : 24,
-            fontWeight: 900,
+            ...(big ? SW_TYPE.display : SW_TYPE.displaySm),
             color,
-            letterSpacing: '-0.02em',
           }}
         >
           {value}
@@ -159,11 +153,11 @@ function InfoButton({ label, children }: { label: string; children: ReactNode })
             minWidth: 240,
             maxWidth: 320,
             padding: '10px 12px 11px',
-            background: '#fff',
+            background: SW_COLORS.paper,
             color: SW_COLORS.ink,
             border: `1px solid ${SW_COLORS.line}`,
             borderRadius: 8,
-            boxShadow: '0 8px 20px rgba(0,0,0,0.12)',
+            boxShadow: SW_SHADOWS.float,
             fontFamily: SW_FONTS.mono,
             fontSize: 11,
             fontWeight: 500,

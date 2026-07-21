@@ -477,6 +477,11 @@ function addSimPlumbing(
     ...wsSource.operation,
     freeText: `${sourceRatePerHr} pcs/hr · seeds the line`,
   };
+  // Stamp the line id onto the plumbing. The per-line sim/report views scope a
+  // twin via `scopedTwinForLine` (workstations.filter(w => w.lineId === lineId));
+  // without this the Source/Pool/Sink are filtered out and the scoped run
+  // generates + counts nothing (every KPI reads 0). Mirrors buildModelamaTwin.
+  wsSource.lineId = args.lineId;
 
   const wsPool = makeWorkstation({
     deptId,
@@ -488,6 +493,7 @@ function addSimPlumbing(
     kind: 'ResourcePool',
     params: { capacity: args.operators },
   };
+  wsPool.lineId = args.lineId;
 
   const wsSink = makeWorkstation({
     deptId,
@@ -496,6 +502,7 @@ function addSimPlumbing(
     name: 'Sink — finished pcs',
   });
   wsSink.block = { kind: 'Sink' };
+  wsSink.lineId = args.lineId;
 
   const newConnectors: Connector[] = [
     {

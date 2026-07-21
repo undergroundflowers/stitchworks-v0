@@ -61,6 +61,7 @@ import {
   validateTwin,
 } from '../domain/twin';
 import type { PmlBlockOverride, PmlBlockParams } from '../domain/pml';
+import { getBlockSpec } from '../domain/pml';
 
 export const TWIN_STORE_SCHEMA_VERSION = 5 as const;
 
@@ -170,6 +171,11 @@ export interface TwinState {
   removeWorkstation: (id: string) => void;
   /** Move a workstation to a new world position. */
   moveWorkstation: (id: string, position: Vec2) => void;
+  /** Bulk-write freeform PROCESS-canvas positions (block.processPos) in a
+   *  single undo step. Used by the process view for drag-commit and the
+   *  "Auto-arrange" action. Ensures a block override exists (pinning the
+   *  catalog-inferred kind) so the position has a home. */
+  setProcessPositions: (entries: { wsId: string; pos: Vec2 }[]) => void;
   /** Rotate a workstation in 90° steps. dir = +1 turns CW, -1 turns CCW. */
   rotateWorkstation: (id: string, dir: 1 | -1) => void;
   /** Clone a workstation, offsetting the copy slightly. Returns the new id
@@ -671,6 +677,29 @@ export const useTwin = create<TwinState>()(
           patchWorkstation(s, id, (w) => ({ ...w, position: { ...position } })),
         ),
 
+      setProcessPositions: (entries) =>
+        set((s) =>
+          updateActive(s, (twin) => {
+            if (entries.length === 0) return twin;
+            const byId = new Map(entries.map((e) => [e.wsId, e.pos]));
+            return {
+              ...twin,
+              workstations: twin.workstations.map((w) => {
+                const pos = byId.get(w.id);
+                if (!pos) return w;
+                // processPos lives on the block override, so ensure one
+                // exists — pin the catalog-inferred kind when the ws has no
+                // authored block yet. Idempotent w.r.t. sim behaviour.
+                const kind = w.block?.kind ?? getBlockSpec(w).kind;
+                return {
+                  ...w,
+                  block: { ...(w.block ?? { kind }), processPos: { x: pos.x, y: pos.y } },
+                };
+              }),
+            };
+          }),
+        ),
+
       rotateWorkstation: (id, dir) =>
         set((s) =>
           patchWorkstation(s, id, (w) => {
@@ -772,6 +801,18 @@ export const useTwin = create<TwinState>()(
         const active = selectActiveTwin(get());
         const wsIds = new Set(active.workstations.map((w) => w.id));
         if (!wsIds.has(input.fromWsId) || !wsIds.has(input.toWsId)) return null;
+        // Reject an exact-duplicate edge (same endpoints AND same ports) so
+        // the freeform canvas can't accumulate stacked identical wires when a
+        // user drags the same output→input twice. A second wire between the
+        // same blocks on *different* ports is still allowed (branch/merge).
+        const isDup = (active.connectors ?? []).some(
+          (c) =>
+            c.fromWsId === input.fromWsId &&
+            c.toWsId === input.toWsId &&
+            (c.fromPort ?? null) === (input.fromPort ?? null) &&
+            (c.toPort ?? null) === (input.toPort ?? null),
+        );
+        if (isDup) return null;
         const id = newConnectorId();
         const conn: Connector = {
           id,
@@ -890,6 +931,10 @@ export const useTwin = create<TwinState>()(
                   inputs: block.inputs ? block.inputs.map((p) => ({ ...p })) : undefined,
                   outputs: block.outputs ? block.outputs.map((p) => ({ ...p })) : undefined,
                   params: block.params ? { ...block.params } : undefined,
+                  // Preserve the freeform PROCESS-canvas position across a
+                  // block-kind edit — without this, editing a block in the
+                  // Inspector would snap it back to the swim-lane seed.
+                  processPos: block.processPos ? { ...block.processPos } : undefined,
                 }
               : undefined,
           })),
@@ -1097,6 +1142,7 @@ export const useTwin = create<TwinState>()(
           updateWorkstation: get().updateWorkstation,
           removeWorkstation: get().removeWorkstation,
           moveWorkstation: get().moveWorkstation,
+          setProcessPositions: get().setProcessPositions,
           rotateWorkstation: get().rotateWorkstation,
           duplicateWorkstation: get().duplicateWorkstation,
           pasteWorkstations: get().pasteWorkstations,

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { SW_COLORS, SW_TYPE } from '../design/tokens';
 
 interface SectionHeaderProps {
   kicker?: string;
@@ -15,12 +15,8 @@ export function SectionHeader({ kicker, title, sub, right }: SectionHeaderProps)
         {kicker && (
           <div
             style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 10,
-              fontWeight: 700,
+              ...SW_TYPE.kicker,
               color: SW_COLORS.brand,
-              letterSpacing: '1.5px',
-              textTransform: 'uppercase',
               marginBottom: 4,
             }}
           >
@@ -29,12 +25,8 @@ export function SectionHeader({ kicker, title, sub, right }: SectionHeaderProps)
         )}
         <div
           style={{
-            fontFamily: SW_FONTS.display,
-            fontSize: 22,
-            fontWeight: 900,
+            ...SW_TYPE.title,
             color: SW_COLORS.ink,
-            letterSpacing: '-0.01em',
-            lineHeight: 1.1,
           }}
         >
           {title}

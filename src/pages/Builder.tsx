@@ -26,10 +26,10 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
-import { HudSelect, StageOverlay, useConfirm } from '../components';
+import { SW_COLORS, SW_FONTS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
+import { HudSelect, StageOverlay, ViewTitle, useConfirm } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
-import { InspectorQueuePanel } from '../components/InspectorQueuePanel';
+import { ServiceQueueParams } from '../components/ServiceQueueParams';
 import {
   ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
@@ -84,6 +84,7 @@ import {
 } from '../domain/apparelPresets';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
 import { runPmlOnTwin } from '../simulation/pml-runner';
+import { computeProcessSeedLayout } from '../domain/processLayout';
 
 // ============================================================================
 // CONSTANTS
@@ -231,7 +232,10 @@ function wsFootprint(ws: Workstation): { w: number; d: number; h: number } {
 // SHARED STYLE FRAGMENTS
 // ============================================================================
 
-const btnPrim: CSSProperties = {
+// Functions (not consts) so SW_COLORS/SW_FONTS are read at render time — the
+// vibe system mutates the token objects in place, and a module-level const
+// would capture the pre-vibe values forever.
+const btnPrim = (): CSSProperties => ({
   background: SW_COLORS.brand,
   border: 'none',
   color: '#fff',
@@ -242,9 +246,9 @@ const btnPrim: CSSProperties = {
   letterSpacing: '0.06em',
   cursor: 'pointer',
   borderRadius: 6,
-};
+});
 
-const btnSec: CSSProperties = {
+const btnSec = (): CSSProperties => ({
   background: SW_COLORS.paper,
   border: `1px solid ${SW_COLORS.line}`,
   padding: '6px 11px',
@@ -255,7 +259,7 @@ const btnSec: CSSProperties = {
   cursor: 'pointer',
   borderRadius: 6,
   color: SW_COLORS.steel,
-};
+});
 
 const sectionLabel: CSSProperties = {
   fontFamily: SW_FONTS.mono,
@@ -379,6 +383,7 @@ export function BuilderPage() {
   const addWorkstation = useTwin((s) => s.addWorkstation);
   const moveWorkstation = useTwin((s) => s.moveWorkstation);
   const updateWorkstation = useTwin((s) => s.updateWorkstation);
+  const setProcessPositions = useTwin((s) => s.setProcessPositions);
   const removeWorkstation = useTwin((s) => s.removeWorkstation);
   const rotateWorkstation = useTwin((s) => s.rotateWorkstation);
   const duplicateWorkstation = useTwin((s) => s.duplicateWorkstation);
@@ -870,23 +875,33 @@ export function BuilderPage() {
     beginPanFromPoint(e.clientX, e.clientY);
   };
 
-  // Wheel zoom (zoom-toward-cursor). React's wheel listener is passive at the
-  // root, so we attach a non-passive native listener to call preventDefault
-  // and stop the page from scrolling while zooming over the canvas.
+  // Wheel gesture. React's wheel listener is passive at the root, so we attach
+  // a non-passive native listener to call preventDefault and keep the page from
+  // scrolling under the canvas. Convention (shared with LiveFloor and the
+  // process grid): trackpad pinch (ctrlKey) or a mouse wheel (line-mode delta,
+  // or a large discrete vertical step with no horizontal component) zooms
+  // toward the cursor; a plain trackpad two-finger swipe pans.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     function onWheel(ev: WheelEvent) {
       ev.preventDefault();
-      const rect = el!.getBoundingClientRect();
-      const cx = ev.clientX - rect.left;
-      const cy = ev.clientY - rect.top;
-      // Trackpad pinch reports ctrlKey+small delta; mouse wheel reports larger
-      // delta. Same exponential map handles both, with a stronger response
-      // when ctrlKey is set so pinch feels natural.
-      const k = ev.ctrlKey ? 0.012 : 0.0015;
-      const factor = Math.exp(-ev.deltaY * k);
-      zoomAt(cx, cy, factor);
+      const isPinch = ev.ctrlKey || ev.metaKey;
+      const isMouseWheel =
+        ev.deltaMode !== 0 || (ev.deltaX === 0 && Math.abs(ev.deltaY) >= 50);
+      if (isPinch || isMouseWheel) {
+        const rect = el!.getBoundingClientRect();
+        const cx = ev.clientX - rect.left;
+        const cy = ev.clientY - rect.top;
+        // Stronger response when ctrlKey is set so pinch feels natural.
+        const k = ev.ctrlKey ? 0.012 : 0.0015;
+        const factor = Math.exp(-ev.deltaY * k);
+        zoomAt(cx, cy, factor);
+        return;
+      }
+      // Two-finger swipe → pan. `pan` is in screen pixels (same space as the
+      // mouse-drag pan), so subtract the raw deltas for 1:1 tracking.
+      setPan((p) => ({ x: p.x - ev.deltaX, y: p.y - ev.deltaY }));
     }
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1347,7 +1362,7 @@ export function BuilderPage() {
           minWidth: 0,
         }}
       >
-        <button onClick={() => navigate('/')} style={btnSec} title="Back to menu" aria-label="Back to menu">
+        <button onClick={() => navigate('/')} style={btnSec()} title="Back to menu" aria-label="Back to menu">
           ←
         </button>
         {/* Title and the full action row (FACTORY picker, SAVE, SAVE AS,
@@ -1356,9 +1371,7 @@ export function BuilderPage() {
             SIMULATE so the pre-flight health is read right before the
             user commits to a sim run. */}
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
-            FACTORY BUILDER
-          </div>
+          <ViewTitle kicker="Authoring" title="Factory Builder" />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
             <HudSelect
@@ -1393,11 +1406,13 @@ export function BuilderPage() {
                         label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
                         disabled: true,
                       },
-                      ...savedFactories.map((f) => ({
-                        value: `lib:${f.id}`,
-                        label: `📚 ${f.name}`,
-                        tag: `${f.stationCount} STN`,
-                      })),
+                      ...[...savedFactories]
+                        .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+                        .map((f) => ({
+                          value: `lib:${f.id}`,
+                          label: `${f.pinned ? '★' : '📚'} ${f.name}`,
+                          tag: `${f.stationCount} STN`,
+                        })),
                     ]
                   : []),
               ]}
@@ -1407,7 +1422,7 @@ export function BuilderPage() {
           <button
             onClick={onSave}
             style={{
-              ...btnPrim,
+              ...btnPrim(),
               background: savedAt ? SW_COLORS.ok : SW_COLORS.brand,
               transition: 'background 160ms',
             }}
@@ -1421,7 +1436,7 @@ export function BuilderPage() {
           </button>
           <button
             onClick={onSaveAsOpen}
-            style={btnSec}
+            style={btnSec()}
             title={
               activeScenarioId === null
                 ? 'Fork the canonical twin into a new scenario'
@@ -1441,7 +1456,7 @@ export function BuilderPage() {
             }}
             disabled={activeScenarioId === null}
             style={{
-              ...btnSec,
+              ...btnSec(),
               color: activeScenarioId === null ? SW_COLORS.muted : SW_COLORS.alarm,
               borderColor: activeScenarioId === null ? SW_COLORS.line : SW_COLORS.alarm + '60',
               cursor: activeScenarioId === null ? 'not-allowed' : 'pointer',
@@ -1467,7 +1482,7 @@ export function BuilderPage() {
                   : 'Click to expand the pre-flight issue list.'
               }
               style={{
-                ...btnSec,
+                ...btnSec(),
                 background:
                   errorCount > 0
                     ? '#FFE5E5'
@@ -1580,7 +1595,7 @@ export function BuilderPage() {
                 }}
                 disabled={!canSimulate}
                 style={{
-                  ...btnPrim,
+                  ...btnPrim(),
                   background: canSimulate ? SW_COLORS.ok : SW_COLORS.line,
                   color: canSimulate ? '#fff' : SW_COLORS.muted,
                   cursor: canSimulate ? 'pointer' : 'not-allowed',
@@ -1899,7 +1914,7 @@ export function BuilderPage() {
               zIndex: 4,
             }}
           >
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, color: SW_COLORS.steel, marginBottom: 4 }}>
+            <div style={{ ...SW_TYPE.title, color: SW_COLORS.steel, marginBottom: 4 }}>
               Empty factory
             </div>
             <div style={{ fontSize: 13 }}>
@@ -2041,6 +2056,9 @@ export function BuilderPage() {
             addWorkstation={addWorkstation}
             moveWorkstation={moveWorkstation}
             updateWorkstation={updateWorkstation}
+            addConnector={addConnector}
+            removeConnector={removeConnector}
+            setProcessPositions={setProcessPositions}
             connect={connect}
             zoom={zoom}
             pan={pan}
@@ -2105,28 +2123,28 @@ export function BuilderPage() {
         >
           <button
             onClick={() => setZoom((z) => clampZoom(z / 1.15))}
-            style={{ ...btnSec, padding: '4px 10px' }}
+            style={{ ...btnSec(), padding: '4px 10px' }}
             title="Zoom out  (−)"
           >
             −
           </button>
           <button
             onClick={resetView}
-            style={{ ...btnSec, padding: '4px 8px', minWidth: 56 }}
+            style={{ ...btnSec(), padding: '4px 8px', minWidth: 56 }}
             title="Reset view  (⌘0)"
           >
             {Math.round(zoom * 100)}%
           </button>
           <button
             onClick={() => setZoom((z) => clampZoom(z * 1.15))}
-            style={{ ...btnSec, padding: '4px 10px' }}
+            style={{ ...btnSec(), padding: '4px 10px' }}
             title="Zoom in  (+)"
           >
             +
           </button>
           <button
             onClick={resetView}
-            style={{ ...btnSec, padding: '4px 8px' }}
+            style={{ ...btnSec(), padding: '4px 8px' }}
             title="Reset zoom & pan"
           >
             ⛶
@@ -2150,12 +2168,11 @@ export function BuilderPage() {
         </div>
 
         {/* Bottom-right canvas legend — sits above the zoom controls.
-            Explains the connector kinds (flow / operator / material), the
-            carrier letter badges painted on flow connectors (B/P/H/T), and
-            the per-lens header pill above each workstation. The active
-            lens row is highlighted so the reader knows which pill is
-            currently rendered above the iso sprites. */}
-        <IsoLegend lens={lens} />
+            Explains the connector kinds (flow / operator / material) and the
+            carrier letter badges painted on flow connectors (B/P/H/T). In ISO
+            it also shows the station-header pill for the ACTIVE lens only, so
+            the legend matches what's currently painted on the floor. */}
+        <IsoLegend lens={lens} canvasMode={canvasMode} />
 
         {/* Top-left connect-flow tool — sits at the same vertical baseline
             as the canvas-mode toggle and CONTROLS dropdown so the three
@@ -2256,6 +2273,60 @@ export function BuilderPage() {
           ))}
         </div>
 
+        {/* Floor-overlay lens switch — moved here from the inspector so it
+            reads as a canvas view-mode control. It drives what every station
+            paints (operation code · worker count · utilisation heat-map); only
+            the ISO canvas renders those overlays, so the switch is scoped to
+            it. Sits directly under the canvas-mode toggle; active = ink so it
+            reads distinctly from the brand-green mode toggle above it. */}
+        {canvasMode === 'iso' && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 50,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 6,
+              display: 'flex',
+              gap: 4,
+              background: SW_COLORS.paper + 'cc',
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+              padding: 3,
+              borderRadius: 6,
+              border: `1px solid ${SW_COLORS.line}`,
+            }}
+            title="Floor overlay — what each station shows · OPERATIONS: operation code · RESOURCES: worker count · KPIS: utilisation heat-map"
+          >
+            {(
+              [
+                ['operations', 'OPERATIONS'],
+                ['resources', 'RESOURCES'],
+                ['kpis', 'KPIS'],
+              ] as const
+            ).map(([l, label]) => (
+              <button
+                key={l}
+                onClick={() => setLens(l)}
+                style={{
+                  background: lens === l ? SW_COLORS.ink : 'transparent',
+                  color: lens === l ? '#fff' : SW_COLORS.steel,
+                  border: 'none',
+                  padding: '6px 12px',
+                  fontFamily: SW_FONTS.display,
+                  fontSize: 10,
+                  fontWeight: 900,
+                  letterSpacing: '0.08em',
+                  cursor: 'pointer',
+                  borderRadius: 4,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Top-right controls dropdown — keyboard / pointer shortcut reference */}
         <ControlsMenu />
       </div>
@@ -2280,7 +2351,6 @@ export function BuilderPage() {
         twin={twin}
         selected={selected}
         lens={lens}
-        onLensChange={setLens}
         onUpdateDept={(id, patch) => updateDepartment(id, patch)}
         onRemoveDept={(id) => {
           removeDepartment(id);
@@ -2349,29 +2419,42 @@ function Palette(props: PaletteProps) {
         minHeight: 0,
       }}
     >
-      <div style={{ padding: '10px 12px', borderBottom: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.display, fontSize: 12, fontWeight: 900, letterSpacing: '2px', color: SW_COLORS.ink }}>
-        PALETTE
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderBottom: `1px solid ${SW_COLORS.line}` }}>
-        {(['dept', 'ws', 'pml'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => props.onTab(t)}
-            style={{
-              background: props.tab === t ? SW_COLORS.ink : 'transparent',
-              color: props.tab === t ? '#fff' : SW_COLORS.steel,
-              border: 'none',
-              cursor: 'pointer',
-              padding: '10px 0',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-            }}
-          >
-            {t === 'dept' ? 'DEPTS' : t === 'ws' ? 'STATIONS' : 'BLOCKS'}
-          </button>
-        ))}
+      {/* Header row doubles as the palette switcher: the old 3-button tab
+          strip is now a compact dropdown so the pane spends its vertical
+          space on actual palette content. */}
+      <div
+        style={{
+          padding: '8px 12px',
+          borderBottom: `1px solid ${SW_COLORS.line}`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+        }}
+      >
+        <span style={{ fontFamily: SW_FONTS.display, fontSize: 12, fontWeight: 900, letterSpacing: '2px', color: SW_COLORS.ink }}>
+          PALETTE
+        </span>
+        <select
+          value={props.tab}
+          onChange={(e) => props.onTab(e.target.value as 'dept' | 'ws' | 'pml')}
+          style={{
+            background: SW_COLORS.ink,
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            padding: '5px 8px',
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.08em',
+          }}
+        >
+          <option value="dept">DEPTS</option>
+          <option value="ws">STATIONS</option>
+          <option value="pml">BLOCKS</option>
+        </select>
       </div>
 
       {props.tab === 'dept' && (
@@ -3737,7 +3820,7 @@ function SaveAsScenarioModal({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'rgba(15, 20, 25, 0.45)',
+        background: SW_COLORS.overlay,
       }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onCancel();
@@ -3872,14 +3955,14 @@ function SaveAsScenarioModal({
             background: SW_COLORS.paperDeep,
           }}
         >
-          <button onClick={onCancel} style={btnSec}>
+          <button onClick={onCancel} style={btnSec()}>
             CANCEL
           </button>
           <button
             onClick={onConfirm}
             disabled={!canConfirm}
             style={{
-              ...btnPrim,
+              ...btnPrim(),
               opacity: canConfirm ? 1 : 0.5,
               cursor: canConfirm ? 'pointer' : 'not-allowed',
             }}
@@ -4679,6 +4762,18 @@ interface BuilderProcessViewProps {
   }) => string;
   moveWorkstation: (id: string, position: { x: number; y: number }) => void;
   updateWorkstation: (id: string, patch: Partial<Workstation>) => void;
+  /** Connector store mutators — drag-to-connect creates, select+Del removes. */
+  addConnector: (input: {
+    kind: ConnectorKind;
+    fromWsId: string;
+    toWsId: string;
+    fromPort?: string;
+    toPort?: string;
+  }) => string | null;
+  removeConnector: (id: string) => void;
+  /** Bulk freeform-position writer (block.processPos) — one undo step.
+   *  Used for drag-commit and the "Auto-arrange" action. */
+  setProcessPositions: (entries: { wsId: string; pos: { x: number; y: number } }[]) => void;
   /** Active CONNECT-tool state. When `on` is true, port dots become
    *  clickable and the cursor switches to crosshair. */
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null; fromPort: string | null };
@@ -4719,6 +4814,18 @@ const PML_CATEGORY_TINT: Record<string, { fill: string; stroke: string }> = {
   movement:  { fill: '#FDF1E0', stroke: '#C8915E' },
 };
 
+/** Picks a legible glyph colour (near-white or near-black) for a solid fill,
+ *  so the PML symbol reads on both light (amber) and dark (blue/red) squares. */
+function contrastInk(hex: string): string {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return '#FFFFFF';
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 150 ? '#1A1A1A' : '#FFFFFF';
+}
+
 /** Returns the SVG-space center of a port on a node. Inputs are spread
  *  along the left edge, outputs along the right edge. */
 function portPosition(
@@ -4743,8 +4850,9 @@ function BuilderProcessView({
   setDrop,
   addDepartment,
   addWorkstation,
-  moveWorkstation,
-  updateWorkstation,
+  addConnector,
+  removeConnector,
+  setProcessPositions,
   connect,
   onPickFromPort,
   onPickToPort,
@@ -4753,101 +4861,78 @@ function BuilderProcessView({
   onPan,
   onZoom,
 }: BuilderProcessViewProps) {
-  const BLOCK_W = 168;
-  const BLOCK_H = 80;
-  const GAP_X = 28;
-  const LANE_GAP = 28;
+  // Minimal AnyLogic-style nodes: a small category-coloured symbol square with
+  // the station name beneath it. BLOCK_W/H is the symbol footprint that the
+  // ports attach to; the wider column/row spacing lives in the seed layout.
+  const BLOCK_W = 56;
+  const BLOCK_H = 56;
   const LANE_PAD_TOP = 28;
   const LANE_LABEL_W = 140;
   const PAD_X = 24 + LANE_LABEL_W;
   const PAD_TOP = 64;
 
-  // Resolve PML block for every workstation, then split into flow vs resource pools.
-  const allNodes = twin.workstations.map<{ ws: Workstation; block: PmlBlock; isPool: boolean }>(
-    (ws) => {
-      const block = getBlockSpec(ws);
-      return { ws, block, isPool: block.kind === 'ResourcePool' };
-    },
-  );
-  const flowNodes = allNodes.filter((n) => !n.isPool);
-  const poolNodes = allNodes.filter((n) => n.isPool);
+  // ── Interaction state ─────────────────────────────────────────────────
+  // Declared up-front because the layout/extent pass below reads the live
+  // drag position. `dragNodePos` is the ghost position during a drag (only
+  // committed to the store on drop); `pendingWire` is the rubber-band while
+  // drawing a connector; `hoverPort` is the input port currently under the
+  // wire end; `selectedConnId` is the wire selected for deletion.
+  const [dragWsId, setDragWsId] = useState<string | null>(null);
+  const [dragNodePos, setDragNodePos] = useState<{ x: number; y: number } | null>(null);
+  const [pendingWire, setPendingWire] = useState<
+    { fromWsId: string; fromPort: string; x: number; y: number } | null
+  >(null);
+  const [hoverPort, setHoverPort] = useState<{ wsId: string; portId: string } | null>(null);
+  const hoverPortRef = useRef<{ wsId: string; portId: string } | null>(null);
+  const setHover = (v: { wsId: string; portId: string } | null) => {
+    hoverPortRef.current = v;
+    setHoverPort(v);
+  };
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
 
-  // Departments in reading order (top-left first).
-  const ordered = [...twin.departments].sort((a, b) => {
-    if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
-    return a.bounds.x - b.bounds.x;
-  });
+  // Department-swim-lane seed: flow blocks sequenced along the connector graph
+  // and serpentine-wrapped into rows, so a long tandem line reads as a compact
+  // grid instead of an endless strip. Recomputed only when the twin changes.
+  const seed = useMemo(() => computeProcessSeedLayout(twin), [twin]);
 
-  // Layout each department lane, then a final pool lane.
+  // Resolve every workstation to a node. Position priority:
+  //   authored block.processPos  →  swim-lane seed  →  origin.
   const positions = new Map<string, ProcessNode>();
-  let cursorY = PAD_TOP;
-  let maxBlocksInLane = 1;
-
-  ordered.forEach((d) => {
-    const dBlocks = flowNodes
-      .filter((n) => n.ws.deptId === d.id)
-      .sort((a, b) => a.ws.position.x - b.ws.position.x || a.ws.position.y - b.ws.position.y);
-    if (dBlocks.length === 0) {
-      // Still render the lane label so empty depts are visible.
-      cursorY += BLOCK_H + LANE_GAP;
-      return;
-    }
-    maxBlocksInLane = Math.max(maxBlocksInLane, dBlocks.length);
-    dBlocks.forEach((n, idx) => {
-      positions.set(n.ws.id, {
-        ws: n.ws,
-        block: n.block,
-        x: PAD_X + idx * (BLOCK_W + GAP_X),
-        y: cursorY + LANE_PAD_TOP,
-        w: BLOCK_W,
-        h: BLOCK_H,
-        dept: d,
-      });
-    });
-    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
-  });
-
-  // Workstations whose dept didn't make it into `ordered` (defensive — shouldn't
-  // happen; would mean a dangling deptId).
-  const orphanFlow = flowNodes.filter(
-    (n) => !ordered.find((d) => d.id === n.ws.deptId),
-  );
-  if (orphanFlow.length > 0) {
-    orphanFlow.forEach((n, idx) => {
-      positions.set(n.ws.id, {
-        ws: n.ws,
-        block: n.block,
-        x: PAD_X + idx * (BLOCK_W + GAP_X),
-        y: cursorY + LANE_PAD_TOP,
-        w: BLOCK_W,
-        h: BLOCK_H,
-        dept: undefined,
-      });
-    });
-    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
-    maxBlocksInLane = Math.max(maxBlocksInLane, orphanFlow.length);
-  }
-
-  // Resource-pool lane.
-  const poolY = cursorY + LANE_PAD_TOP;
-  poolNodes.forEach((n, idx) => {
-    positions.set(n.ws.id, {
-      ws: n.ws,
-      block: n.block,
-      x: PAD_X + idx * (BLOCK_W + GAP_X),
-      y: poolY,
+  twin.workstations.forEach((ws) => {
+    const block = getBlockSpec(ws);
+    const sp = seed.positions.get(ws.id) ?? { x: PAD_X, y: PAD_TOP };
+    const p = ws.block?.processPos ?? sp;
+    positions.set(ws.id, {
+      ws,
+      block,
+      x: p.x,
+      y: p.y,
       w: BLOCK_W,
       h: BLOCK_H,
-      dept: twin.departments.find((d) => d.id === n.ws.deptId),
+      dept: twin.departments.find((d) => d.id === ws.deptId),
     });
   });
-  if (poolNodes.length > 0) {
-    maxBlocksInLane = Math.max(maxBlocksInLane, poolNodes.length);
-    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
-  }
 
-  const W = Math.max(1280, PAD_X + maxBlocksInLane * (BLOCK_W + GAP_X) + 40);
-  const H = Math.max(640, cursorY + 60);
+  // Live position of a node, honouring an in-progress drag (ghost preview).
+  const posOf = (wsId: string): { x: number; y: number } | null => {
+    const n = positions.get(wsId);
+    if (!n) return null;
+    if (wsId === dragWsId && dragNodePos) return dragNodePos;
+    return { x: n.x, y: n.y };
+  };
+
+  // Canvas extent — fit the lane backdrop AND any freely-placed blocks so the
+  // scroll area always reaches the furthest node (+ margins).
+  let extentX = 1280;
+  let extentY = 640;
+  for (const ln of seed.lanes) extentY = Math.max(extentY, ln.y + ln.height + 48);
+  positions.forEach((n) => {
+    const live = n.ws.id === dragWsId && dragNodePos ? dragNodePos : n;
+    extentX = Math.max(extentX, live.x + n.w + 220);
+    extentY = Math.max(extentY, live.y + n.h + 120);
+  });
+  const W = extentX;
+  const H = extentY;
 
   // Pre-resolve connector wire endpoints. Honour the connector's named
   // `fromPort` / `toPort` when set; otherwise default to the source's
@@ -4864,8 +4949,10 @@ function BuilderProcessView({
         (c.toPort ? to.block.inputs.find((p) => p.id === c.toPort) : null) ??
         to.block.inputs[0];
       if (!outPort || !inPort) return null;
-      const a = portPosition(from, outPort, 'out');
-      const b = portPosition(to, inPort, 'in');
+      const fl = posOf(from.ws.id)!;
+      const tl = posOf(to.ws.id)!;
+      const a = portPosition({ ...from, x: fl.x, y: fl.y }, outPort, 'out');
+      const b = portPosition({ ...to, x: tl.x, y: tl.y }, inPort, 'in');
       return { c, a, b, outPortLabel: outPort.label, inPortLabel: inPort.label };
     })
     .filter(Boolean) as {
@@ -4978,14 +5065,6 @@ function BuilderProcessView({
     return true;
   };
 
-  // ── Block drag (PROCESS reorder / re-assign) ───────────────────────────
-  // Dragging a block sideways within a lane reorders it (by writing a new
-  // position.x that interlieves between neighbours). Dragging it into a
-  // different lane reassigns its deptId. Position values are sub-cell so
-  // the ISO layout doesn't visibly jump — the lane resort picks them up.
-  const [dragWsId, setDragWsId] = useState<string | null>(null);
-  const [dragNodePos, setDragNodePos] = useState<{ x: number; y: number } | null>(null);
-
   const svgRef = useRef<SVGSVGElement | null>(null);
   const screenToSvg = (clientX: number, clientY: number) => {
     const el = svgRef.current;
@@ -4999,26 +5078,22 @@ function BuilderProcessView({
     return pt.matrixTransform(inv);
   };
 
-  // Compute the dept whose lane vertically contains `svgY` — used to
-  // decide which lane a dropped block lands in.
-  const laneOfY = (svgY: number): string | null => {
-    let y = PAD_TOP;
-    for (const d of ordered) {
-      const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
-      if (svgY >= y && svgY < y + laneH) return d.id;
-      y += laneH;
-    }
-    return null;
-  };
-
+  // ── Free block drag ────────────────────────────────────────────────────
+  // Drag a block anywhere on the canvas; the ghost previews live and commits
+  // once on drop (snapped to an 8px grid) as `block.processPos`. No
+  // department reassignment — physical/org membership is edited in the ISO /
+  // Logic views; this canvas is purely the logical-graph layout.
+  const snap8 = (v: number) => Math.max(0, Math.round(v / 8) * 8);
   const beginBlockDrag = (node: ProcessNode, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    setSelectedConnId(null);
     const start = screenToSvg(e.clientX, e.clientY);
-    const offX = start.x - node.x;
-    const offY = start.y - node.y;
+    const base = posOf(node.ws.id) ?? { x: node.x, y: node.y };
+    const offX = start.x - base.x;
+    const offY = start.y - base.y;
     setDragWsId(node.ws.id);
-    setDragNodePos({ x: node.x, y: node.y });
+    setDragNodePos({ x: base.x, y: base.y });
     let didMove = false;
     const move = (ev: MouseEvent) => {
       const w = screenToSvg(ev.clientX, ev.clientY);
@@ -5030,56 +5105,75 @@ function BuilderProcessView({
       window.removeEventListener('mouseup', up);
       setDragWsId(null);
       const w = screenToSvg(ev.clientX, ev.clientY);
-      const endY = w.y - offY + BLOCK_H / 2;
-      const endX = w.x - offX + BLOCK_W / 2;
       setDragNodePos(null);
       if (!didMove) {
         onSelect({ kind: 'ws', id: node.ws.id });
         return;
       }
-      const tgtDeptId = laneOfY(endY);
-      if (!tgtDeptId) return;
-      const tgtDept = twin.departments.find((dd) => dd.id === tgtDeptId);
-      if (!tgtDept) return;
-      // Map svg-x to a slot among tgt-lane blocks; use slot to derive a
-      // new iso position.x interlieved between neighbours so the lane
-      // re-sort lands the block where the user dropped it.
-      const tgtBlocks = flowNodes
-        .filter((n) => n.ws.deptId === tgtDeptId && n.ws.id !== node.ws.id)
-        .sort((a, b) => a.ws.position.x - b.ws.position.x);
-      let slot = tgtBlocks.findIndex(
-        (n) => endX < PAD_X + (tgtBlocks.indexOf(n) + 0.5) * (BLOCK_W + GAP_X),
-      );
-      if (slot < 0) slot = tgtBlocks.length;
-      let newPosX: number;
-      if (tgtBlocks.length === 0) {
-        newPosX = tgtDept.bounds.x;
-      } else if (slot === 0) {
-        newPosX = tgtBlocks[0].ws.position.x - 1;
-      } else if (slot >= tgtBlocks.length) {
-        newPosX = tgtBlocks[tgtBlocks.length - 1].ws.position.x + 1;
-      } else {
-        const a = tgtBlocks[slot - 1].ws.position.x;
-        const b = tgtBlocks[slot].ws.position.x;
-        newPosX = (a + b) / 2;
-      }
-      const newPosY = Math.max(
-        tgtDept.bounds.y,
-        Math.min(tgtDept.bounds.y + tgtDept.bounds.h - 1, node.ws.position.y),
-      );
-      // If lane changed, reassign deptId atomically with position update.
-      if (tgtDeptId !== node.ws.deptId) {
-        updateWorkstation(node.ws.id, {
-          deptId: tgtDeptId,
-          position: { x: newPosX, y: newPosY },
-        });
-      } else {
-        moveWorkstation(node.ws.id, { x: newPosX, y: newPosY });
-      }
+      setProcessPositions([
+        { wsId: node.ws.id, pos: { x: snap8(w.x - offX), y: snap8(w.y - offY) } },
+      ]);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
   };
+
+  // ── Drag-to-connect ─────────────────────────────────────────────────────
+  // Press on an OUTPUT port, drag a rubber-band wire, release over a
+  // compatible INPUT port to create a connector with explicit ports. The
+  // target is tracked via the input ports' hover (enter/leave) so the drop
+  // doesn't depend on the mouseup landing exactly on the dot.
+  const beginWireDrag = (wsId: string, portId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedConnId(null);
+    const p = screenToSvg(e.clientX, e.clientY);
+    setPendingWire({ fromWsId: wsId, fromPort: portId, x: p.x, y: p.y });
+    setHover(null);
+    const move = (ev: MouseEvent) => {
+      const w = screenToSvg(ev.clientX, ev.clientY);
+      setPendingWire((pw) => (pw ? { ...pw, x: w.x, y: w.y } : pw));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      const target = hoverPortRef.current;
+      if (target && target.wsId !== wsId) {
+        addConnector({
+          kind: connect.kind ?? 'flow',
+          fromWsId: wsId,
+          toWsId: target.wsId,
+          fromPort: portId,
+          toPort: target.portId,
+        });
+      }
+      setPendingWire(null);
+      setHover(null);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  // Kind of the source output port mid-drag — used to highlight only
+  // compatible input ports (agent→agent, resource→resource).
+  const pendingFromKind: 'agent' | 'resource' | null = pendingWire
+    ? positions.get(pendingWire.fromWsId)?.block.outputs.find((p) => p.id === pendingWire.fromPort)?.kind ?? null
+    : null;
+
+  // Delete the selected connector on Del/Backspace (ignoring text fields).
+  useEffect(() => {
+    if (!selectedConnId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      const t = e.target as HTMLElement | null;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      e.preventDefault();
+      removeConnector(selectedConnId);
+      setSelectedConnId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedConnId, removeConnector]);
 
   return (
     <>
@@ -5108,6 +5202,7 @@ function BuilderProcessView({
           return;
         }
         onSelect(null);
+        setSelectedConnId(null);
       }}
       onMouseDown={onBackgroundMouseDown}
       onWheel={onWheel}
@@ -5130,6 +5225,7 @@ function BuilderProcessView({
             return;
           }
           onSelect(null);
+          setSelectedConnId(null);
         }}
       >
         <defs>
@@ -5160,38 +5256,48 @@ function BuilderProcessView({
           {twin.name.toUpperCase()} · PROCESS · PML BLOCKS WITH I/O PORTS
         </text>
 
-        {/* Swim-lane backgrounds + dept labels. Each lane fades when a
-            *different* dept/ws is the focus so the user's pick reads clearly.
-            A lane stays in focus when its dept is selected, or when it
-            contains the selected workstation. */}
+        {/* Lane backdrops + labels, one band per department (plus orphan /
+            resource-pool lanes). Sized from the seed layout so wrapped lanes
+            keep their blocks inside the band. A lane fades when a *different*
+            dept/ws is the focus. */}
         {(() => {
-          let y = PAD_TOP;
-          const lanes: ReactNode[] = [];
           const focusActive = selected !== null;
           const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
           const selectedWsDeptId =
             selected?.kind === 'ws'
               ? twin.workstations.find((w) => w.id === selected.id)?.deptId ?? null
               : null;
-          ordered.forEach((d) => {
-            const blocksInLane = flowNodes.filter((n) => n.ws.deptId === d.id);
-            const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
-            const accent = DEPT_COLOR_HEX[d.color];
-            const laneArmed = drop.kind === 'ws';
-            const laneFocused =
-              selectedDeptId === d.id || selectedWsDeptId === d.id;
+          return seed.lanes.map((ln) => {
+            const dept = ln.synthetic
+              ? null
+              : twin.departments.find((d) => d.id === ln.deptId);
+            const isPool = ln.deptId === '__pool__';
+            const accent = dept ? DEPT_COLOR_HEX[dept.color] : SW_COLORS.steel;
+            const laneArmed = !!dept && drop.kind === 'ws';
+            const laneFocused = dept
+              ? selectedDeptId === dept.id || selectedWsDeptId === dept.id
+              : false;
             const laneOpacity = focusActive && !laneFocused ? FOCUS_DIM : 1;
-            lanes.push(
+            const title = dept
+              ? dept.name.toUpperCase()
+              : isPool
+                ? 'RESOURCE POOLS'
+                : 'UNASSIGNED';
+            const sub = dept ? dept.kind : isPool ? 'referenced by Services' : 'no department';
+            const countLabel = isPool
+              ? `${ln.wsIds.length} POOL${ln.wsIds.length === 1 ? '' : 'S'}`
+              : `${ln.wsIds.length} BLOCK${ln.wsIds.length === 1 ? '' : 'S'}`;
+            return (
               <g
-                key={`lane-${d.id}`}
-                transform={`translate(0, ${y})`}
+                key={`lane-${ln.deptId ?? 'x'}`}
+                transform={`translate(0, ${ln.y})`}
                 style={{ opacity: laneOpacity, transition: 'opacity 160ms' }}
               >
                 <rect
                   x={LANE_LABEL_W}
                   y={4}
-                  width={W - LANE_LABEL_W - 16}
-                  height={laneH - 12}
+                  width={Math.max(40, W - LANE_LABEL_W - 16)}
+                  height={ln.height - 12}
                   fill={laneArmed ? accent + '20' : accent + '0a'}
                   stroke={laneArmed ? accent : accent + '40'}
                   strokeDasharray={laneArmed ? '6 4' : '2 4'}
@@ -5199,17 +5305,16 @@ function BuilderProcessView({
                   rx={4}
                   style={{ cursor: laneArmed ? 'crosshair' : 'default' }}
                   onClick={(e) => {
-                    if (drop.kind === 'ws') {
+                    if (drop.kind === 'ws' && dept) {
                       e.stopPropagation();
-                      handleDropWsInDept(d.id);
+                      handleDropWsInDept(dept.id);
                     } else if (drop.kind === 'dept') {
                       e.stopPropagation();
                       handleDropDept();
-                    } else {
-                      // Click on lane background selects the dept so the
-                      // inspector can be used to edit it from PROCESS view.
+                    } else if (dept) {
+                      // Click selects the dept so the inspector can edit it.
                       e.stopPropagation();
-                      onSelect({ kind: 'dept', id: d.id });
+                      onSelect({ kind: 'dept', id: dept.id });
                     }
                   }}
                 />
@@ -5223,7 +5328,7 @@ function BuilderProcessView({
                   fill={SW_COLORS.ink}
                   letterSpacing="0.1em"
                 >
-                  {d.name.toUpperCase()}
+                  {title}
                 </text>
                 <text
                   x={26}
@@ -5233,7 +5338,7 @@ function BuilderProcessView({
                   fontWeight={700}
                   fill={SW_COLORS.muted}
                 >
-                  {blocksInLane.length} BLOCK{blocksInLane.length === 1 ? '' : 'S'}
+                  {countLabel}
                 </text>
                 <text
                   x={26}
@@ -5243,63 +5348,12 @@ function BuilderProcessView({
                   fontWeight={500}
                   fill={SW_COLORS.muted}
                 >
-                  {d.kind}
+                  {sub}
                 </text>
-              </g>,
+              </g>
             );
-            y += laneH;
           });
-          return lanes;
         })()}
-
-        {/* Resource-pool lane label */}
-        {poolNodes.length > 0 && (
-          <g transform={`translate(0, ${poolY - LANE_PAD_TOP})`}>
-            <rect
-              x={LANE_LABEL_W}
-              y={4}
-              width={W - LANE_LABEL_W - 16}
-              height={BLOCK_H + 8}
-              fill={SW_COLORS.steel + '0a'}
-              stroke={SW_COLORS.steel + '40'}
-              strokeDasharray="2 4"
-              strokeWidth={1}
-              rx={4}
-            />
-            <rect x={12} y={LANE_PAD_TOP} width={6} height={BLOCK_H} fill={SW_COLORS.steel} rx={2} />
-            <text
-              x={26}
-              y={LANE_PAD_TOP + 16}
-              fontFamily={SW_FONTS.display}
-              fontSize={11}
-              fontWeight={900}
-              fill={SW_COLORS.ink}
-              letterSpacing="0.1em"
-            >
-              RESOURCE POOLS
-            </text>
-            <text
-              x={26}
-              y={LANE_PAD_TOP + 32}
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={700}
-              fill={SW_COLORS.muted}
-            >
-              {poolNodes.length} POOL{poolNodes.length === 1 ? '' : 'S'}
-            </text>
-            <text
-              x={26}
-              y={LANE_PAD_TOP + 48}
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={500}
-              fill={SW_COLORS.muted}
-            >
-              referenced by Services
-            </text>
-          </g>
-        )}
 
         {/* Connector wires (drawn before blocks so blocks sit on top).
             Wires stay full opacity when either endpoint is part of the focus,
@@ -5325,19 +5379,46 @@ function BuilderProcessView({
             const cx1 = a.x + Math.max(28, dx / 2);
             const cx2 = b.x - Math.max(28, dx / 2);
             const path = `M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${b.y}, ${b.x} ${b.y}`;
+            const isSel = selectedConnId === c.id;
             const wireOpacity =
               focusActive && !wireFocused(c) ? FOCUS_DIM : 1;
+            const fs = flowStyleFor(c);
             return (
               <g
                 key={c.id}
-                style={{ opacity: wireOpacity, transition: 'opacity 160ms' }}
+                style={{ opacity: isSel ? 1 : wireOpacity, transition: 'opacity 160ms' }}
               >
+                {/* Fat transparent hit-area so the thin wire is easy to
+                    click-select; the visible stroke stays non-interactive. */}
                 <path
                   d={path}
                   fill="none"
-                  stroke={flowStyleFor(c).stroke}
-                  strokeWidth={flowStyleFor(c).width}
-                  strokeDasharray={flowStyleFor(c).dash ?? undefined}
+                  stroke="transparent"
+                  strokeWidth={14}
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect(null);
+                    setSelectedConnId(c.id);
+                  }}
+                />
+                {isSel && (
+                  <path
+                    d={path}
+                    fill="none"
+                    stroke={SW_COLORS.brand}
+                    strokeWidth={(fs.width ?? 2) + 5}
+                    strokeOpacity={0.28}
+                    strokeLinecap="round"
+                    pointerEvents="none"
+                  />
+                )}
+                <path
+                  d={path}
+                  fill="none"
+                  stroke={isSel ? SW_COLORS.brand : fs.stroke}
+                  strokeWidth={fs.width}
+                  strokeDasharray={fs.dash ?? undefined}
                   strokeOpacity={0.85}
                   markerEnd="url(#builder-process-arrow)"
                   pointerEvents="none"
@@ -5345,6 +5426,34 @@ function BuilderProcessView({
               </g>
             );
           });
+        })()}
+
+        {/* Rubber-band wire shown while dragging out a new connector. */}
+        {pendingWire && (() => {
+          const from = positions.get(pendingWire.fromWsId);
+          if (!from) return null;
+          const outPort =
+            from.block.outputs.find((p) => p.id === pendingWire.fromPort) ??
+            from.block.outputs[0];
+          if (!outPort) return null;
+          const live = posOf(from.ws.id)!;
+          const a = portPosition({ ...from, x: live.x, y: live.y }, outPort, 'out');
+          const bx = pendingWire.x;
+          const by = pendingWire.y;
+          const dx = bx - a.x;
+          const cx1 = a.x + Math.max(28, dx / 2);
+          const cx2 = bx - Math.max(28, dx / 2);
+          return (
+            <path
+              d={`M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${by}, ${bx} ${by}`}
+              fill="none"
+              stroke={SW_COLORS.brand}
+              strokeWidth={2.5}
+              strokeDasharray="5 4"
+              strokeOpacity={0.9}
+              pointerEvents="none"
+            />
+          );
         })()}
 
         {/* Block cards. A block stays in focus when it is itself selected, or
@@ -5359,7 +5468,7 @@ function BuilderProcessView({
             fill: SW_COLORS.paper,
             stroke: SW_COLORS.line,
           };
-          const role = apparelRoleFor(n.ws);
+          const bottleneck = !!n.ws.kpiObserved?.bottleneck;
           const focusActive = selected !== null;
           const blockFocused =
             isSelected ||
@@ -5389,138 +5498,87 @@ function BuilderProcessView({
               }}
               onClick={(e) => {
                 e.stopPropagation();
+                setSelectedConnId(null);
                 onSelect({ kind: 'ws', id: n.ws.id });
               }}
             >
-              {/* Card body */}
-              <rect
-                x={0}
-                y={0}
-                width={n.w}
-                height={n.h}
-                rx={6}
-                fill={tint.fill}
-                stroke={isSelected ? SW_COLORS.brand : tint.stroke}
-                strokeWidth={isSelected ? 2.5 : 1.5}
+              {/* Selection / bottleneck halo — drawn behind the symbol so it
+                  reads as a ring whatever the symbol's fill colour is. */}
+              {(isSelected || bottleneck) && (
+                <rect
+                  x={-4}
+                  y={-4}
+                  width={n.w + 8}
+                  height={n.h + 8}
+                  rx={14}
+                  fill="none"
+                  stroke={isSelected ? SW_COLORS.brand : SW_COLORS.alarm}
+                  strokeWidth={3}
+                />
+              )}
+              {/* Symbol — a solid, category-coloured square holding the PML
+                  glyph (AnyLogic-style). Nothing else lives on the block face. */}
+              <rect x={0} y={0} width={n.w} height={n.h} rx={12} fill={tint.stroke} />
+              <n.block.spec.Icon
+                size={30}
+                color={contrastInk(tint.stroke)}
+                x={(n.w - 30) / 2}
+                y={(n.h - 30) / 2}
               />
-              {/* Header strip */}
-              <rect x={0} y={0} width={n.w} height={22} rx={6} fill={tint.stroke} />
-              <rect x={0} y={16} width={n.w} height={6} fill={tint.stroke} />
-              <n.block.spec.Icon size={14} color="#fff" x={6} y={4} />
+              {/* Name — centred beneath the symbol, the only text on the node. */}
               <text
-                x={24}
-                y={15}
-                fontFamily={SW_FONTS.mono}
-                fontSize={10}
-                fontWeight={900}
-                fill="#fff"
-                letterSpacing="0.08em"
-              >
-                {n.block.spec.label.toUpperCase()}
-              </text>
-              <text
-                x={n.w - 8}
-                y={15}
-                textAnchor="end"
-                fontFamily={SW_FONTS.mono}
-                fontSize={9}
-                fontWeight={800}
-                fill="#ffffffcc"
-              >
-                {n.block.inputs.length}/{n.block.outputs.length}
-              </text>
-
-              {/* Body — apparel role + ws name */}
-              <text
-                x={10}
-                y={40}
+                x={n.w / 2}
+                y={n.h + 15}
+                textAnchor="middle"
                 fontFamily={SW_FONTS.body}
                 fontSize={11}
-                fontWeight={800}
+                fontWeight={700}
                 fill={SW_COLORS.ink}
               >
-                {role.length > 22 ? role.slice(0, 21) + '…' : role}
+                {n.ws.name.length > 20 ? n.ws.name.slice(0, 19) + '…' : n.ws.name}
               </text>
-              <text
-                x={10}
-                y={56}
-                fontFamily={SW_FONTS.mono}
-                fontSize={9}
-                fontWeight={500}
-                fill={SW_COLORS.muted}
-              >
-                {n.ws.name.length > 26 ? n.ws.name.slice(0, 24) + '…' : n.ws.name}
-              </text>
-              {n.block.spec.usesResources && !n.ws.kpiObserved && (
-                <text
-                  x={n.w - 8}
-                  y={n.h - 6}
-                  textAnchor="end"
-                  fontFamily={SW_FONTS.mono}
-                  fontSize={8}
-                  fontWeight={800}
-                  fill={SW_COLORS.muted}
-                  letterSpacing="0.1em"
-                >
-                  ⚡ RESOURCE
-                </text>
-              )}
-
-              {/* Observed-throughput badge — renders along the bottom of the
-                  block when the active twin has KPIs from a recent PML run.
-                  Shows "X /hr" plus utilisation %. Bottleneck blocks get a
-                  red ◆. */}
-              {n.ws.kpiObserved && (
-                <g transform={`translate(8, ${n.h - 16})`}>
-                  <rect
-                    x={0}
-                    y={0}
-                    width={n.w - 16}
-                    height={14}
-                    rx={3}
-                    fill={n.ws.kpiObserved.bottleneck ? SW_COLORS.alarm : tint.stroke}
-                    fillOpacity={0.92}
-                  />
-                  <text
-                    x={6}
-                    y={10}
-                    fontFamily={SW_FONTS.mono}
-                    fontSize={9}
-                    fontWeight={900}
-                    fill="#fff"
-                    letterSpacing="0.04em"
-                  >
-                    {n.ws.kpiObserved.bottleneck && '◆ '}
-                    {Math.round(n.ws.kpiObserved.capacityPerHr)} /hr
-                    {n.block.spec.usesResources && ` · ${Math.round(n.ws.kpiObserved.utilizationPct)}% util`}
-                  </text>
-                </g>
-              )}
 
               {/* Input port dots — left edge. Clickable in CONNECT mode
                   once a source has been picked. */}
               {n.block.inputs.map((p, i) => {
                 const slot = (i + 1) / (n.block.inputs.length + 1);
                 const py = n.h * slot;
-                const armed = connect.on && connect.fromWsId !== null && connect.fromWsId !== n.ws.id;
+                // Armed in two-click CONNECT mode (a source is already picked)
+                // OR while dragging a kind-compatible rubber-band wire here.
+                const wireArmed =
+                  pendingWire != null &&
+                  pendingWire.fromWsId !== n.ws.id &&
+                  (pendingFromKind == null || p.kind === pendingFromKind);
+                const clickArmed =
+                  connect.on && connect.fromWsId !== null && connect.fromWsId !== n.ws.id;
+                const armed = wireArmed || clickArmed;
+                const isHover =
+                  hoverPort?.wsId === n.ws.id && hoverPort?.portId === p.id;
                 return (
                   <g
                     key={`in-${p.id}`}
                     transform={`translate(0, ${py})`}
                     style={{ cursor: armed ? 'crosshair' : 'default' }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseEnter={() => {
+                      if (wireArmed) setHover({ wsId: n.ws.id, portId: p.id });
+                    }}
+                    onMouseLeave={() => {
+                      if (isHover) setHover(null);
+                    }}
                     onClick={(e) => {
-                      if (!armed) return;
+                      if (!clickArmed) return;
                       e.stopPropagation();
                       onPickToPort(n.ws.id, p.id);
                     }}
                   >
-                    {/* Larger transparent hit area so the click target is
-                        comfortable even though the visible dot is small. */}
+                    {/* Larger transparent hit area so the click/hover target
+                        is comfortable even though the visible dot is small. */}
                     <circle cx={0} cy={0} r={12} fill="transparent" />
                     <circle
                       cx={0}
                       cy={0}
-                      r={armed ? 6 : 5}
+                      r={isHover ? 7 : armed ? 6 : 5}
                       fill={SW_COLORS.paper}
                       stroke={armed ? SW_COLORS.brand : tint.stroke}
                       strokeWidth={armed ? 2.5 : 2}
@@ -5549,18 +5607,24 @@ function BuilderProcessView({
               {n.block.outputs.map((p, i) => {
                 const slot = (i + 1) / (n.block.outputs.length + 1);
                 const py = n.h * slot;
-                const armed = connect.on;
                 const isFrom =
-                  connect.on &&
-                  connect.fromWsId === n.ws.id &&
-                  connect.fromPort === p.id;
+                  (connect.on &&
+                    connect.fromWsId === n.ws.id &&
+                    connect.fromPort === p.id) ||
+                  (pendingWire?.fromWsId === n.ws.id && pendingWire?.fromPort === p.id);
                 return (
                   <g
                     key={`out-${p.id}`}
                     transform={`translate(${n.w}, ${py})`}
-                    style={{ cursor: armed ? 'crosshair' : 'default' }}
+                    style={{ cursor: 'crosshair' }}
+                    onMouseDown={(e) => {
+                      // Two-click CONNECT mode sets the source on click;
+                      // otherwise press-drag starts a rubber-band wire.
+                      if (connect.on) return;
+                      beginWireDrag(n.ws.id, p.id, e);
+                    }}
                     onClick={(e) => {
-                      if (!armed) return;
+                      if (!connect.on) return;
                       e.stopPropagation();
                       onPickFromPort(n.ws.id, p.id);
                     }}
@@ -5639,11 +5703,47 @@ function BuilderProcessView({
             ◯ input port (left) · ● output port (right)
           </text>
           <text x={12} y={48} fontFamily={SW_FONTS.mono} fontSize={9} fill={SW_COLORS.muted}>
-            → connector · header = block kind · click → inspect
+            drag block to move · drag port→port to wire · click wire + Del
           </text>
         </g>
       </svg>
     </div>
+    {/* Auto-arrange — reset every block to the department swim-lane layout.
+        A clean way out of a tangled canvas; preserves dept grouping. */}
+    <button
+      type="button"
+      onClick={() => {
+        const layout = computeProcessSeedLayout(twin);
+        const entries = twin.workstations
+          .map((ws) => {
+            const pos = layout.positions.get(ws.id);
+            return pos ? { wsId: ws.id, pos } : null;
+          })
+          .filter(Boolean) as { wsId: string; pos: { x: number; y: number } }[];
+        if (entries.length > 0) setProcessPositions(entries);
+        setSelectedConnId(null);
+      }}
+      title="Reset all blocks to the department swim-lane layout"
+      style={{
+        position: 'absolute',
+        bottom: 92,
+        left: 14,
+        zIndex: 5,
+        padding: '6px 12px',
+        background: SW_COLORS.paper,
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: 6,
+        cursor: 'pointer',
+        fontFamily: SW_FONTS.mono,
+        fontSize: 11,
+        fontWeight: 800,
+        letterSpacing: '0.06em',
+        color: SW_COLORS.ink,
+        boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+      }}
+    >
+      ⤢ AUTO-ARRANGE
+    </button>
     <ProcessCodeView twin={twin} />
     </>
   );
@@ -5659,50 +5759,6 @@ function BuilderProcessView({
  * Inspector highlights (Operations · Resources · KPI targets) — keeping the
  * toggle next to the highlighted section makes the wiring legible.
  */
-function LensToggle({
-  lens,
-  onChange,
-}: {
-  lens: Lens;
-  onChange: (l: Lens) => void;
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        gap: 4,
-        background: SW_COLORS.paperDeep,
-        padding: 3,
-        borderRadius: 6,
-        border: `1px solid ${SW_COLORS.line}`,
-        marginBottom: 12,
-      }}
-    >
-      {(['operations', 'resources', 'kpis'] as const).map((l) => (
-        <button
-          key={l}
-          onClick={() => onChange(l)}
-          style={{
-            flex: 1,
-            background: lens === l ? SW_COLORS.ink : 'transparent',
-            color: lens === l ? '#fff' : SW_COLORS.steel,
-            border: 'none',
-            padding: '6px 8px',
-            fontFamily: SW_FONTS.display,
-            fontSize: 10,
-            fontWeight: 900,
-            letterSpacing: '0.08em',
-            cursor: 'pointer',
-            borderRadius: 4,
-          }}
-        >
-          {l.toUpperCase()}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /**
  * Show every operator currently assigned to a workstation, with their
  * role + shareFrac. Surfaces the data model that the Build-in-Builder seed
@@ -6062,7 +6118,7 @@ function LinePolicyEditor({
       <button
         onClick={() => setOpen((v) => !v)}
         style={{
-          ...btnSec,
+          ...btnSec(),
           padding: '3px 8px',
           fontSize: 10,
           background: 'transparent',
@@ -6189,7 +6245,6 @@ interface InspectorProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
   lens: Lens;
-  onLensChange: (l: Lens) => void;
   onUpdateDept: (id: string, patch: Partial<Department>) => void;
   onRemoveDept: (id: string) => void;
   onUpdateWs: (id: string, patch: Partial<Workstation>) => void;
@@ -6221,14 +6276,9 @@ function Inspector(props: InspectorProps) {
     padding: 14,
   };
 
-  const lensToggle = (
-    <LensToggle lens={props.lens} onChange={props.onLensChange} />
-  );
-
   if (!props.selected) {
     return (
       <div style={wrapper}>
-        {lensToggle}
         <div style={sectionLabel}>Inspector</div>
         <div style={{ color: SW_COLORS.muted, fontSize: 12 }}>
           Click a department or workstation to inspect its parameters.
@@ -6242,14 +6292,14 @@ function Inspector(props: InspectorProps) {
     if (!dept) return <div style={wrapper}>Selection lost.</div>;
     return (
       <div style={wrapper}>
-        {lensToggle}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div style={sectionLabel}>Department</div>
-          <button onClick={() => props.onRemoveDept(dept.id)} style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 8px' }}>
+          <button onClick={() => props.onRemoveDept(dept.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px' }}>
             ✕ DELETE
           </button>
         </div>
 
+        <InspectorGroup id="dept.identity" title="Identity" defaultOpen>
         <label style={fieldLabel}>Name</label>
         <input
           value={dept.name}
@@ -6283,15 +6333,16 @@ function Inspector(props: InspectorProps) {
             />
           ))}
         </div>
+        </InspectorGroup>
 
-        <div style={{ height: 14 }} />
-        <div style={sectionLabel}>Bounds (cells)</div>
+        <InspectorGroup id="dept.bounds" title="Bounds (cells)" defaultOpen={false}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
           <NumField label="x" step={0.1} value={dept.bounds.x} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, x: v } })} />
           <NumField label="y" step={0.1} value={dept.bounds.y} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, y: v } })} />
           <NumField label="w" step={0.1} value={dept.bounds.w} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, w: v } })} />
           <NumField label="h" step={0.1} value={dept.bounds.h} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, h: v } })} />
         </div>
+        </InspectorGroup>
 
         <div style={{ height: 14 }} />
         <div style={sectionLabel}>
@@ -6301,19 +6352,20 @@ function Inspector(props: InspectorProps) {
         {/* SEWING LINES — production lines that group workstations inside
             this department. Authoring lives here so every department can be a
             multi-line floor (or stay line-less for storage / QC). */}
-        <div style={{ height: 14 }} />
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div style={sectionLabel}>
-            Sewing lines · {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length}
-          </div>
-          <button
-            onClick={() => props.onAddLine(dept.id)}
-            style={{ ...btnSec, padding: '3px 9px', fontSize: 10 }}
-            title="Create a new production line inside this department"
-          >
-            + ADD LINE
-          </button>
-        </div>
+        <InspectorGroup
+          id="dept.lines"
+          title={`Sewing lines · ${(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length}`}
+          defaultOpen
+          right={
+            <button
+              onClick={() => props.onAddLine(dept.id)}
+              style={{ ...btnSec(), padding: '3px 9px', fontSize: 10 }}
+              title="Create a new production line inside this department"
+            >
+              + ADD LINE
+            </button>
+          }
+        >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
           {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).map((line) => {
             const memberCount = props.twin.workstations.filter((w) => w.lineId === line.id).length;
@@ -6339,7 +6391,7 @@ function Inspector(props: InspectorProps) {
                       if (memberCount > 0 && !(await confirm({ title: 'Remove line', message: `Remove ${line.name}? ${memberCount} workstation${memberCount === 1 ? '' : 's'} will become unassigned but stay placed.`, confirmLabel: 'Remove', variant: 'danger' }))) return;
                       props.onRemoveLine(line.id);
                     }}
-                    style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 7px', fontSize: 10 }}
+                    style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 7px', fontSize: 10 }}
                     title="Delete this line"
                   >
                     ✕
@@ -6416,6 +6468,7 @@ function Inspector(props: InspectorProps) {
             </div>
           )}
         </div>
+        </InspectorGroup>
       </div>
     );
   }
@@ -6430,14 +6483,14 @@ function Inspector(props: InspectorProps) {
 
   return (
     <div style={wrapper}>
-      {lensToggle}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div style={sectionLabel}>Workstation</div>
-        <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 8px' }}>
+        <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px' }}>
           ✕ DELETE
         </button>
       </div>
 
+      <InspectorGroup id="ws.identity" title="Identity" defaultOpen>
       <label style={fieldLabel}>Name</label>
       <input
         value={ws.name}
@@ -6488,8 +6541,10 @@ function Inspector(props: InspectorProps) {
         </>
       )}
 
-      <div style={{ height: 12 }} />
-      <div style={sectionLabel}>Position (cells)</div>
+      </InspectorGroup>
+
+      <InspectorGroup id="ws.placement" title="Placement" defaultOpen={false}>
+      <div style={{ ...sectionLabel, marginBottom: 6 }}>Position (cells)</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
         <NumField label="x" step={0.1} value={ws.position.x} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, x: v } })} />
         <NumField label="y" step={0.1} value={ws.position.y} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, y: v } })} />
@@ -6515,7 +6570,7 @@ function Inspector(props: InspectorProps) {
               {ws.size && (
                 <button
                   onClick={() => props.onUpdateWs(ws.id, { size: undefined })}
-                  style={{ ...btnSec, padding: '2px 7px', fontSize: 9 }}
+                  style={{ ...btnSec(), padding: '2px 7px', fontSize: 9 }}
                   title="Restore the catalogue's default size"
                 >
                   RESET
@@ -6530,15 +6585,22 @@ function Inspector(props: InspectorProps) {
           </>
         );
       })()}
+      </InspectorGroup>
 
-      <div style={{ height: 14 }} />
-      <BlockSection
-        ws={ws}
-        onSetBlock={props.onSetBlock}
-      />
+      <InspectorGroup
+        id="ws.block"
+        title="Process block"
+        defaultOpen={false}
+        forceOpen={getBlockSpec(ws).overridden}
+      >
+        <BlockSection
+          ws={ws}
+          onSetBlock={props.onSetBlock}
+        />
+      </InspectorGroup>
 
-      <div style={{ height: 14 }} />
       <LensSection
+        id="ws.operations"
         title="Operations"
         active={props.lens === 'operations'}
       >
@@ -6565,9 +6627,11 @@ function Inspector(props: InspectorProps) {
           placeholder="e.g. fabric rolls — knit cotton"
           style={inputBase}
         />
+        <div style={{ height: 12 }} />
+        <ServiceQueueParams ws={ws} />
       </LensSection>
 
-      <LensSection title="Resources" active={props.lens === 'resources'}>
+      <LensSection id="ws.resources" title="Resources" active={props.lens === 'resources'}>
         <NumField
           label="Workers required"
           value={ws.resources.workersRequired}
@@ -6589,7 +6653,7 @@ function Inspector(props: InspectorProps) {
         />
       </LensSection>
 
-      <LensSection title="KPI targets" active={props.lens === 'kpis'}>
+      <LensSection id="ws.targets" title="KPI targets" active={props.lens === 'kpis'}>
         <NumField
           label="Capacity / hr"
           value={ws.kpiTargets.capacityPerHr ?? 0}
@@ -6608,17 +6672,18 @@ function Inspector(props: InspectorProps) {
           onChange={(v) => props.onSetKpiTargets(ws.id, { utilizationPct: v })}
         />
         {ws.kpiObserved ? (
-          <div style={{ marginTop: 12, padding: 10, background: SW_COLORS.paperDeep, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}>
-            <div style={sectionLabel}>Observed (last run)</div>
-            <ObservedRow label="Capacity / hr" value={ws.kpiObserved.capacityPerHr.toFixed(0)} />
-            <ObservedRow label="Efficiency %" value={ws.kpiObserved.efficiencyPct.toFixed(1)} />
-            <ObservedRow label="Utilisation %" value={ws.kpiObserved.utilizationPct.toFixed(1)} />
-            {ws.kpiObserved.bottleneck && (
-              <div style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: SW_COLORS.alarm }}>
-                ◆ Bottleneck in last run
-              </div>
-            )}
-          </div>
+          <InspectorGroup id="ws.observed" title="Observed (last run)" defaultOpen={false}>
+            <div style={{ padding: 10, background: SW_COLORS.paperDeep, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}>
+              <ObservedRow label="Capacity / hr" value={ws.kpiObserved.capacityPerHr.toFixed(0)} />
+              <ObservedRow label="Efficiency %" value={ws.kpiObserved.efficiencyPct.toFixed(1)} />
+              <ObservedRow label="Utilisation %" value={ws.kpiObserved.utilizationPct.toFixed(1)} />
+              {ws.kpiObserved.bottleneck && (
+                <div style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: SW_COLORS.alarm }}>
+                  ◆ Bottleneck in last run
+                </div>
+              )}
+            </div>
+          </InspectorGroup>
         ) : (
           <div style={{ marginTop: 8, fontSize: 11, color: SW_COLORS.muted }}>
             No simulated values yet — run the sim to populate observed KPIs.
@@ -6626,17 +6691,13 @@ function Inspector(props: InspectorProps) {
         )}
       </LensSection>
 
-      <div style={{ height: 12 }} />
-      <div style={sectionLabel}>Queue analysis</div>
-      <div style={{ marginTop: 6 }}>
-        <InspectorQueuePanel ws={ws} />
-      </div>
-
-      <FlowSection
-        ws={ws}
-        twin={props.twin}
-        onRemoveConnector={props.onRemoveConnector}
-      />
+      <InspectorGroup id="ws.flow" title="Flow connections" defaultOpen={false}>
+        <FlowSection
+          ws={ws}
+          twin={props.twin}
+          onRemoveConnector={props.onRemoveConnector}
+        />
+      </InspectorGroup>
     </div>
   );
 }
@@ -6680,18 +6741,19 @@ function BlockSection({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <div style={sectionLabel}>Process block</div>
-        {block.overridden && (
+      {/* Section title comes from the wrapping InspectorGroup; only the
+          override RESET action renders here. */}
+      {block.overridden && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <button
             onClick={() => onSetBlock(ws.id, null)}
-            style={{ ...btnSec, padding: '2px 7px', fontSize: 9 }}
+            style={{ ...btnSec(), padding: '2px 7px', fontSize: 9 }}
             title="Drop the override and fall back to the catalog-default block kind"
           >
             RESET
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Header chip: glyph · kind · role */}
       <div
@@ -6913,7 +6975,7 @@ function BlockParamFields({
                 {isAuthored && (
                   <button
                     onClick={() => clearParam(f.id)}
-                    style={{ ...btnSec, padding: '1px 6px', fontSize: 9 }}
+                    style={{ ...btnSec(), padding: '1px 6px', fontSize: 9 }}
                     title="Drop this override and fall back to the catalog default"
                   >
                     ✕
@@ -7121,7 +7183,7 @@ function FlowSection({
         <button
           onClick={() => onRemoveConnector(c.id)}
           style={{
-            ...btnSec,
+            ...btnSec(),
             padding: '2px 6px',
             fontSize: 9,
             color: SW_COLORS.alarm,
@@ -7137,14 +7199,12 @@ function FlowSection({
   return (
     <div
       style={{
-        marginTop: 12,
         padding: 10,
         background: SW_COLORS.paperDeep,
         borderRadius: 6,
         border: `1px solid ${SW_COLORS.line}`,
       }}
     >
-      <div style={sectionLabel}>Flow connections</div>
       {incoming.length === 0 && outgoing.length === 0 && (
         <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 4 }}>
           No connectors yet — turn on{' '}
@@ -7168,7 +7228,101 @@ function FlowSection({
   );
 }
 
-function LensSection({ title, active, children }: { title: string; active: boolean; children: ReactNode }) {
+/* ── Inspector disclosure ────────────────────────────────────────────
+ * Open/closed state is a per-group preference (not per-entity), stored
+ * as one JSON record so it survives reloads — same localStorage pattern
+ * as builder.paletteW / builder.inspectorW above. */
+const INSPECTOR_GROUPS_KEY = 'builder.inspectorGroups.v1';
+
+function readGroupPrefs(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(INSPECTOR_GROUPS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeGroupPref(id: string, open: boolean, defaultOpen: boolean) {
+  try {
+    const prefs = readGroupPrefs();
+    if (open === defaultOpen) delete prefs[id];
+    else prefs[id] = open;
+    if (Object.keys(prefs).length === 0) localStorage.removeItem(INSPECTOR_GROUPS_KEY);
+    else localStorage.setItem(INSPECTOR_GROUPS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* storage unavailable (private mode) — state stays session-local */
+  }
+}
+
+function useInspectorGroupPref(id: string, defaultOpen: boolean): [boolean, () => void] {
+  const [open, setOpen] = useState<boolean>(() => readGroupPrefs()[id] ?? defaultOpen);
+  const toggle = useCallback(() => {
+    setOpen((prev) => {
+      const next = !prev;
+      writeGroupPref(id, next, defaultOpen);
+      return next;
+    });
+  }, [id, defaultOpen]);
+  return [open, toggle];
+}
+
+/** Collapsible parameter group for the Inspector. Progressive disclosure:
+ *  identity-level groups default open, secondary detail defaults closed.
+ *  `forceOpen` pins the group open (e.g. an overridden process block must
+ *  stay visible) and wins over a persisted closed preference. */
+function InspectorGroup({
+  id,
+  title,
+  defaultOpen,
+  right,
+  forceOpen,
+  children,
+}: {
+  id: string;
+  title: string;
+  defaultOpen: boolean;
+  right?: ReactNode;
+  forceOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, toggle] = useInspectorGroupPref(id, defaultOpen);
+  const isOpen = forceOpen || open;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div
+        role="button"
+        aria-expanded={isOpen}
+        onClick={() => {
+          if (!forceOpen) toggle();
+        }}
+        title={forceOpen ? 'Pinned open while this station carries an override' : isOpen ? 'Collapse' : 'Expand'}
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 6,
+          cursor: forceOpen ? 'default' : 'pointer',
+          userSelect: 'none',
+        }}
+      >
+        <span aria-hidden style={{ fontSize: 9, color: SW_COLORS.muted, width: 10, flexShrink: 0 }}>
+          {isOpen ? '▾' : '▸'}
+        </span>
+        <span style={{ ...sectionLabel, marginBottom: 0, flex: 1 }}>{title}</span>
+        {right && <span onClick={(e) => e.stopPropagation()}>{right}</span>}
+      </div>
+      {isOpen && <div style={{ marginTop: 6 }}>{children}</div>}
+    </div>
+  );
+}
+
+/** One lens's section in the Inspector. The ACTIVE lens is always open —
+ *  the lens toggle at the top of the panel is the primary disclosure
+ *  control, so its section never shows a competing chevron. Inactive
+ *  lens sections collapse (default closed) but stay user-expandable. */
+function LensSection({ id, title, active, children }: { id: string; title: string; active: boolean; children: ReactNode }) {
+  const [open, toggle] = useInspectorGroupPref(id, false);
+  const isOpen = active || open;
   return (
     <div
       style={{
@@ -7179,10 +7333,32 @@ function LensSection({ title, active, children }: { title: string; active: boole
         border: `1px solid ${active ? SW_COLORS.brand : SW_COLORS.line}`,
       }}
     >
-      <div style={{ ...sectionLabel, color: active ? SW_COLORS.brandDeep : SW_COLORS.muted, marginBottom: 8 }}>
-        {title}{active && ' · active lens'}
+      <div
+        role={active ? undefined : 'button'}
+        aria-expanded={active ? undefined : isOpen}
+        onClick={() => {
+          if (!active) toggle();
+        }}
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 6,
+          cursor: active ? 'default' : 'pointer',
+          userSelect: 'none',
+          marginBottom: isOpen ? 8 : 0,
+        }}
+      >
+        {!active && (
+          <span aria-hidden style={{ fontSize: 9, color: SW_COLORS.muted, width: 10, flexShrink: 0 }}>
+            {isOpen ? '▾' : '▸'}
+          </span>
+        )}
+        <span style={{ ...sectionLabel, color: active ? SW_COLORS.brandDeep : SW_COLORS.muted, marginBottom: 0 }}>
+          {title}
+          {active && ' · active lens'}
+        </span>
       </div>
-      {children}
+      {isOpen && children}
     </div>
   );
 }
@@ -7232,7 +7408,7 @@ function CountChip({ label, value }: { label: string; value: number }) {
       }}
     >
       <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.2px' }}>{label}</span>
-      <strong style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, color: SW_COLORS.ink }}>{value}</strong>
+      <strong style={{ ...SW_TYPE.heading, color: SW_COLORS.ink }}>{value}</strong>
     </div>
   );
 }
@@ -7250,7 +7426,7 @@ function CountChip({ label, value }: { label: string; value: number }) {
  * legend row without translation. Pointer events are off so the panel
  * never steals clicks from the canvas underneath.
  */
-function IsoLegend({ lens }: { lens: Lens }) {
+function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode }) {
   const lensRows: { key: Lens; bg: string; label: string; meaning: string }[] = [
     { key: 'operations', bg: SW_COLORS.ink,       label: 'op-code', meaning: 'operation' },
     { key: 'resources',  bg: SW_COLORS.bobbin,    label: '☻ × N',   meaning: 'workers' },
@@ -7305,17 +7481,16 @@ function IsoLegend({ lens }: { lens: Lens }) {
         <CarrierChip letter="T" color={SW_COLORS.ink}   width={2.0} dash="8 4" meaning="takt" />
       </div>
 
-      {/* Lens header pills above each station. We only render the pill swatch
-       *  (no trailing meaning word) to stay narrow; the meaning is in the
-       *  title tooltip and the inspector lens toggle next to the canvas. The
-       *  active lens row is haloed in brand red so the reader knows which
-       *  pill is currently rendered above the iso sprites. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {lensRows.map((row) => {
-          const active = row.key === lens;
-          return (
+      {/* Station-header pill — shows ONLY the overlay the active lens paints
+       *  above each iso sprite (op-code · worker count · utilisation), so the
+       *  legend describes what's actually on the floor instead of listing all
+       *  three at once. ISO-only: the LOGIC / PROCESS canvases draw no
+       *  per-station pills, so this row is omitted there. */}
+      {canvasMode === 'iso' && (() => {
+        const row = lensRows.find((r) => r.key === lens)!;
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span
-              key={row.key}
               style={{
                 background: row.bg,
                 color: '#fff',
@@ -7325,19 +7500,16 @@ function IsoLegend({ lens }: { lens: Lens }) {
                 padding: '2px 6px',
                 borderRadius: 3,
                 letterSpacing: '0.04em',
-                opacity: active ? 1 : 0.45,
-                border: active ? `1px solid ${SW_COLORS.brand}` : '1px solid transparent',
               }}
-              title={`${row.meaning} pill — active in the ${row.key} lens`}
             >
               {row.label}
             </span>
-          );
-        })}
-        <span style={{ color: SW_COLORS.muted, fontSize: 9 }}>
-          {`station header · ${lensRows.find((r) => r.key === lens)?.meaning ?? ''}`}
-        </span>
-      </div>
+            <span style={{ color: SW_COLORS.muted, fontSize: 9 }}>
+              {`station header · ${row.meaning}`}
+            </span>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -7518,9 +7690,7 @@ function ControlsMenu() {
           WebkitBackdropFilter: 'blur(8px)',
           border: open ? `1px solid ${SW_COLORS.brand}66` : '1px solid transparent',
           borderRadius: 6,
-          boxShadow: open
-            ? '0 12px 32px rgba(15,20,25,0.18), 0 2px 6px rgba(15,20,25,0.1)'
-            : 'none',
+          boxShadow: open ? SW_SHADOWS.hud : 'none',
           padding: open ? 4 : 0,
           maxHeight: open ? 480 : 0,
           overflow: 'hidden',

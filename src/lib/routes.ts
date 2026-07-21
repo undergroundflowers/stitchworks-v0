@@ -47,10 +47,6 @@ export const ROUTES: RouteDef[] = [
   // route still resolves for deep-links and internal navigations.
   { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'special' },
   { path: '/queues/analytics', id: 'queues-analytics', label: 'Queue Analytics', shortLabel: 'Analytics', icon: '∿', kind: 'special' },
-  // Reference Models is reachable from the splash menu's dedicated tile, so
-  // it's kept out of the top-bar nav to reduce clutter. The /reference path
-  // and deep-links keep working.
-  { path: '/reference', id: 'reference', label: 'Reference Models', shortLabel: 'References', icon: '📖', kind: 'special' },
   // Assets is no longer a top-level nav item — it lives inside Resources as
   // the "Assets" tab. The /assets path stays for deep-links; App.tsx redirects
   // it to /resources?tab=assets.

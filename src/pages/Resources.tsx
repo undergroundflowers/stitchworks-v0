@@ -1,5 +1,6 @@
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip, useConfirm } from '../components';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
+import { alpha } from '../design/color-utils';
+import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip, EmptyState, useConfirm } from '../components';
 import { Fragment, useRef, useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -96,6 +97,38 @@ export function ResourcesPage() {
   const trainingCount = operators.filter((o) => o.status === 'TRAINING').length;
   const avgEff = Math.round(operators.reduce((s, o) => s + o.eff, 0) / operators.length);
 
+  // Avatar tint keyed to the operator's position in the flat roster so the
+  // colour stays put whether the table renders grouped or flat.
+  const avatarTintById = useMemo(
+    () => new Map(operators.map((o, i) => [o.id, i % 5])),
+    [operators],
+  );
+  // Group the roster by sewing line. When the roster has fewer than two
+  // distinct lines (e.g. the seeded demo crew carries no line names) the
+  // table renders flat, exactly as before.
+  const operatorRows = useMemo(() => {
+    const buckets = new Map<string, typeof operators>();
+    for (const o of operators) {
+      const key = o.lineName ?? '— Unassigned';
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key)!.push(o);
+    }
+    if (buckets.size < 2) return operators.map((op) => ({ kind: 'op' as const, op }));
+    const names = [...buckets.keys()].sort((a, b) => {
+      if (a === '— Unassigned') return 1;
+      if (b === '— Unassigned') return -1;
+      return a.localeCompare(b, undefined, { numeric: true });
+    });
+    return names.flatMap((name) => {
+      const ops = buckets.get(name)!;
+      const groupEff = Math.round(ops.reduce((s, o) => s + o.eff, 0) / ops.length);
+      return [
+        { kind: 'section' as const, name, count: ops.length, groupEff },
+        ...ops.map((op) => ({ kind: 'op' as const, op })),
+      ];
+    });
+  }, [operators]);
+
   return (
     <div style={{ width:'100%', height:'100%', display:'flex', flexDirection:'column', background: SW_COLORS.paperDeep }}>
       <div style={{ padding:'18px 24px', background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
@@ -138,12 +171,23 @@ export function ResourcesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {operators.map((o, i) => (
+                  {operatorRows.map((row) => {
+                    if (row.kind === 'section') {
+                      return (
+                        <tr key={`section:${row.name}`} style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                          <td colSpan={9} style={{ padding:'7px 12px', fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'1px', textTransform:'uppercase' }}>
+                            {row.name} · {row.count} OPR · AVG EFF {row.groupEff}%
+                          </td>
+                        </tr>
+                      );
+                    }
+                    const o = row.op;
+                    return (
                     <tr key={o.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}`, fontSize:12 }}>
                       <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.muted }}>{o.id}</td>
                       <td style={{ padding:'10px 12px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                          <div style={{ width:24, height:24, borderRadius:'50%', background: ['#FFE4D6','#D6F0E4','#E4DEFF','#FFEAD6','#D6E8FF'][i%5], display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color: SW_COLORS.ink }}>{o.name[0]}</div>
+                          <div style={{ width:24, height:24, borderRadius:'50%', background: ['#FFE4D6','#D6F0E4','#E4DEFF','#FFEAD6','#D6E8FF'][avatarTintById.get(o.id) ?? 0], display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color: SW_COLORS.ink }}>{o.name[0]}</div>
                           <span style={{ fontWeight:700 }}>{o.name}</span>
                         </div>
                       </td>
@@ -216,14 +260,15 @@ export function ResourcesPage() {
                         <Tag soft color={o.status==='ACTIVE'?SW_COLORS.ok:o.status==='SICK'?SW_COLORS.alarm:SW_COLORS.thread} dot>{o.status}</Tag>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </Card>
 
             <div>
               <Card padding={16} style={{ marginBottom:14 }}>
-                <div style={{ fontFamily: SW_FONTS.display, fontSize:13, fontWeight:900, marginBottom:10 }}>WORKFORCE</div>
+                <div style={{ ...SW_TYPE.heading, fontSize: 13, marginBottom: 10 }}>WORKFORCE</div>
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
                   <Stat label="ACTIVE" value={activeCount} color={SW_COLORS.ok}/>
                   <Stat label="SICK" value={sickCount} color={SW_COLORS.alarm}/>
@@ -232,7 +277,7 @@ export function ResourcesPage() {
                 </div>
               </Card>
               <Card padding={16}>
-                <div style={{ fontFamily: SW_FONTS.display, fontSize:13, fontWeight:900, marginBottom:10 }}>ROLE COVERAGE</div>
+                <div style={{ ...SW_TYPE.heading, fontSize: 13, marginBottom: 10 }}>ROLE COVERAGE</div>
                 {ALL_WORKER_ARCHETYPES.filter((a) => operators.some((o) => o.archetype.role === a.role)).map((a) => {
                   const c = operators.filter((o) => o.archetype.role === a.role).length;
                   return (
@@ -260,7 +305,7 @@ export function ResourcesPage() {
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
                   <div>
                     <div style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted }}>{m.id} · {m.line} · {m.spec.code}</div>
-                    <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginTop:2, color: m.spec.color }}>
+                    <div style={{ ...SW_TYPE.heading, marginTop: 2, color: m.spec.color }}>
                       <span style={{ marginRight:6 }}>{m.spec.icon}</span>{m.spec.shortName}
                     </div>
                     <div style={{ fontSize:11, color: SW_COLORS.muted }}>{m.brand} · {m.spec.label}</div>
@@ -301,7 +346,7 @@ export function ResourcesPage() {
         {tab==='roster' && (
           <Card padding={20}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>WEEKLY ROSTER · DAY {rosterDayN}–{rosterDayN + 6}</div>
+              <div style={{ ...SW_TYPE.heading }}>WEEKLY ROSTER · DAY {rosterDayN}–{rosterDayN + 6}</div>
               <TimeChip kind="MODEL" />
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'120px repeat(7, 1fr)', gap: 1, background: SW_COLORS.line }}>
@@ -779,8 +824,13 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
             ))}
             {garment.operations.length === 0 && (
               <tr>
-                <td colSpan={9} style={{ padding: 24, textAlign: 'center', color: SW_COLORS.muted, fontSize: 12, fontStyle: 'italic' }}>
-                  No operations yet. Click <strong style={{ color: SW_COLORS.ink }}>+ Add operation</strong> below.
+                <td colSpan={9} style={{ padding: 12 }}>
+                  <EmptyState
+                    size="sm"
+                    icon="🪡"
+                    title="No operations yet"
+                    body={<>Click <strong style={{ color: SW_COLORS.ink }}>+ Add operation</strong> below to build this bulletin.</>}
+                  />
                 </td>
               </tr>
             )}
@@ -919,7 +969,7 @@ function ImportPreviewModal({
       onClick={onCancel}
       style={{
         position: 'fixed', inset: 0, zIndex: 100,
-        background: 'rgba(15,20,25,0.55)',
+        background: alpha(SW_COLORS.ink, 0.55),
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 24,
       }}
@@ -1099,7 +1149,7 @@ function LayoutPreviewModal({
       onClick={onCancel}
       style={{
         position: 'fixed', inset: 0, zIndex: 100,
-        background: 'rgba(15,20,25,0.55)',
+        background: alpha(SW_COLORS.ink, 0.55),
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 24,
       }}

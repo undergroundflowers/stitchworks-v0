@@ -9,7 +9,8 @@
  */
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { alpha } from '../design/color-utils';
 
 export interface HudSelectOption<T extends string> {
   value: T;
@@ -144,29 +145,29 @@ export function HudSelect<T extends string>({
   // palette sits on paper cards.
   const palette = variant === 'dark'
     ? {
-        trigBg: '#ffffff10',
-        trigBgOpen: '#ffffff18',
-        trigBgHover: '#ffffff14',
-        trigBorder: '#ffffff25',
+        trigBg: alpha(SW_COLORS.paper, 0.06),
+        trigBgOpen: alpha(SW_COLORS.paper, 0.09),
+        trigBgHover: alpha(SW_COLORS.paper, 0.08),
+        trigBorder: alpha(SW_COLORS.paper, 0.15),
         trigBorderOpen: `${SW_COLORS.brand}99`,
         trigText: '#fff',
-        trigPlaceholder: '#ffffff70',
-        chevron: '#ffffff90',
+        trigPlaceholder: alpha(SW_COLORS.paper, 0.44),
+        chevron: alpha(SW_COLORS.paper, 0.56),
         panelBg: '#11161dF2',
         panelBlur: true,
         panelBorder: `${SW_COLORS.brand}55`,
         panelShadow: '0 10px 28px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)',
-        rowText: '#ffffffd0',
+        rowText: alpha(SW_COLORS.paper, 0.82),
         rowTextSelected: '#fff',
-        rowBgActive: '#ffffff10',
+        rowBgActive: alpha(SW_COLORS.paper, 0.06),
         rowBgSelected: `${SW_COLORS.brand}26`,
-        tagBg: '#ffffff14',
+        tagBg: alpha(SW_COLORS.paper, 0.08),
         tagBgSelected: `${SW_COLORS.brand}40`,
         tagBorder: `${SW_COLORS.brand}55`,
         tagText: SW_COLORS.brand,
         tagTextSelected: '#fff',
-        metaText: '#ffffff70',
-        emptyText: '#ffffff60',
+        metaText: alpha(SW_COLORS.paper, 0.44),
+        emptyText: alpha(SW_COLORS.paper, 0.38),
       }
     : {
         trigBg: SW_COLORS.paper,
@@ -180,7 +181,7 @@ export function HudSelect<T extends string>({
         panelBg: '#FFFFFFF5',
         panelBlur: true,
         panelBorder: `${SW_COLORS.brand}66`,
-        panelShadow: '0 12px 32px rgba(15,20,25,0.18), 0 2px 6px rgba(15,20,25,0.1)',
+        panelShadow: SW_SHADOWS.hud,
         rowText: SW_COLORS.ink,
         rowTextSelected: SW_COLORS.brand,
         rowBgActive: '#0F141908',

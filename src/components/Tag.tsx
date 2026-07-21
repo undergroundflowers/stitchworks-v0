@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { SW_COLORS, SW_TYPE } from '../design/tokens';
 
 interface TagProps {
   children: ReactNode;
@@ -22,10 +22,9 @@ export function Tag({ children, color = SW_COLORS.ink, bg, soft, dot }: TagProps
         color: _fg,
         borderRadius: 999,
         padding: '3px 9px',
-        fontSize: 11,
+        ...SW_TYPE.caption,
         fontWeight: 700,
         letterSpacing: '0.2px',
-        fontFamily: SW_FONTS.body,
         whiteSpace: 'nowrap',
       }}
     >

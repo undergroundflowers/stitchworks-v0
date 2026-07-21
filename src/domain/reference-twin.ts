@@ -18,7 +18,7 @@
 
 import type { Operation } from './operations';
 import type { GarmentTemplate } from './garments';
-import { REFERENCE_MODELS, type ReferenceModel, type ReferenceScenario } from './reference-models';
+import { type ReferenceModel, type ReferenceScenario } from './reference-models';
 import {
   type Twin,
   type Workstation,
@@ -588,133 +588,6 @@ export function buildGarmentTwin(
     workstations,
     connectors,
     notes: `Auto-built from garment template "${garment.name}" — ${ops.length} ops, total SMV ${totalSmv.toFixed(2)} min, ${operators} operators.`,
-  };
-}
-
-// ============================================================================
-// MULTI-LINE FACTORY (one Twin · one line per reference paper)
-// ============================================================================
-
-/**
- * Build a single Twin that contains one production line per reference paper
- * with an enumerated operation bulletin. Each paper's `buildReferenceTwin`
- * output is stacked vertically inside the same factory grid, with a band of
- * empty cells between lines so departments don't visually collide.
- *
- * Use this to seed a "showcase factory" that lets the user visualise every
- * reproducible reference layout side-by-side on the Factory Builder canvas.
- *
- * Papers without an enumerated bulletin (where the source paper reports
- * only aggregate figures) are surfaced as a placeholder Logistics
- * department so the user knows the line exists in the literature but is
- * not yet wired.
- */
-export interface BuildReferenceFactoryOpts {
-  /** Override the twin name. */
-  name?: string;
-  /** Vertical gap (in cells) between adjacent lines. */
-  gap?: number;
-  /** Variant to build per model. Defaults to 'baseline' across the board. */
-  variant?: ReferenceVariant;
-}
-
-export function buildReferenceFactoryTwin(
-  opts: BuildReferenceFactoryOpts = {},
-): Twin {
-  const variant = opts.variant ?? 'baseline';
-  const gap = opts.gap ?? 3;
-  const now = new Date().toISOString();
-
-  const allDepartments: Department[] = [];
-  const allWorkstations: Workstation[] = [];
-  const allConnectors: Connector[] = [];
-  let cursorY = 1;
-  let maxW = 0;
-
-  for (const model of REFERENCE_MODELS) {
-    const ops = model.garmentTemplate.operations;
-
-    if (ops.length === 0) {
-      // Paper has no enumerated bulletin — surface as a placeholder dept so
-      // the line is visible on the floor even though it isn't wired yet.
-      const placeholderH = 6;
-      const placeholderW = 36;
-      const dPlaceholder = newDeptId();
-      allDepartments.push({
-        id: dPlaceholder,
-        name: `${model.title} — ${model.authorYear}`,
-        kind: 'Logistics',
-        color: 'cream',
-        bounds: { x: 1, y: cursorY, w: placeholderW - 2, h: placeholderH },
-        notes:
-          `${model.authorYear} — bulletin not enumerated in the source paper. ` +
-          `Aggregate KPIs only (operators ${model.baseline.operators}` +
-          (model.baseline.throughputPerDayPcs
-            ? ` · ${model.baseline.throughputPerDayPcs} pcs/day`
-            : '') +
-          ').',
-      });
-      cursorY += placeholderH + gap;
-      maxW = Math.max(maxW, placeholderW);
-      continue;
-    }
-
-    const lineTwin = buildReferenceTwin(model, { variant });
-    if (!lineTwin) continue;
-
-    // Re-key the line into the factory frame: stamp each dept with a
-    // paper-qualified name and shift every dept / workstation by `cursorY`.
-    const paperTag = model.authorYear;
-    const linePrefix = paperTag.split(/\s+\d/)[0]; // "Kursun & Kalaoglu"
-
-    for (const dept of lineTwin.departments) {
-      allDepartments.push({
-        ...dept,
-        // Keep ids — buildReferenceTwin already generated fresh ones per call.
-        name:
-          dept.kind === 'Sewing'
-            ? `${linePrefix} — ${model.garmentTemplate.name}`
-            : `${linePrefix} · ${dept.name}`,
-        bounds: { ...dept.bounds, y: dept.bounds.y + cursorY - 1 },
-      });
-    }
-
-    for (const ws of lineTwin.workstations) {
-      allWorkstations.push({
-        ...ws,
-        position: { x: ws.position.x, y: ws.position.y + cursorY - 1 },
-      });
-    }
-
-    for (const conn of lineTwin.connectors) {
-      allConnectors.push({ ...conn });
-    }
-
-    cursorY += lineTwin.gridH + gap;
-    maxW = Math.max(maxW, lineTwin.gridW);
-  }
-
-  const gridW = Math.max(40, maxW + 2);
-  const gridH = Math.max(40, cursorY + 2);
-
-  return {
-    schemaVersion: TWIN_SCHEMA_VERSION as TwinSchemaVersion,
-    id: newTwinId(),
-    name: opts.name ?? 'Reference Factory — All Lines',
-    parentTwinId: null,
-    isCanonical: true,
-    createdAt: now,
-    modifiedAt: now,
-    gridW,
-    gridH,
-    departments: allDepartments,
-    lines: [],
-    workstations: allWorkstations,
-    connectors: allConnectors,
-    notes:
-      'Multi-line showcase factory · auto-built from every reference paper ' +
-      'with an enumerated operation bulletin. Each line carries its own ' +
-      'Source → operations → Sink pipeline and operator pool sized to the paper.',
   };
 }
 

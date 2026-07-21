@@ -87,7 +87,7 @@ export function Dialog({
         position: 'fixed',
         inset: 0,
         zIndex: 10040,
-        background: 'rgba(15,20,25,0.42)',
+        background: SW_COLORS.overlay,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
