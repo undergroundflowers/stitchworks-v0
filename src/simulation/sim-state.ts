@@ -71,6 +71,11 @@ export interface StationView {
   busy: number;
   /** Bundles waiting in queue. */
   queueLen: number;
+  /** Bundles blocked-after-service here right now: service finished but the
+   *  piece can't advance because the downstream buffer is full. 0 under
+   *  unbounded buffers. Distinct from `busy` (productive service) — drives the
+   *  "blocked station" tint in the sim views. */
+  blocked: number;
   /** Bundles completed at this station so far. */
   produced: number;
   /** Cumulative busy minutes across all servers. */

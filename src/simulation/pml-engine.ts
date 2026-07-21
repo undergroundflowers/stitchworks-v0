@@ -309,6 +309,10 @@ export interface PmlSimSample {
       /** Parallel servers at this block (machine count). Static; mirrors
        *  the legacy `StationView.serversTotal`. */
       serversTotal: number;
+      /** P2/P3 — bundles blocked-after-service here at sample time (finished
+       *  but can't advance because the downstream buffer is full). 0 under
+       *  unbounded buffers. Drives the LiveSim "blocked station" tint. */
+      blocked: number;
     }
   >;
   /** Cumulative agents that have reached any Sink. */
@@ -1187,6 +1191,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         inService: number;
         busy: number;
         serversTotal: number;
+        blocked: number;
       }
     >();
     let liveBottleneckWsId: string | null = null;
@@ -1208,6 +1213,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // legacy field name without an alias map.
         busy: b.inService,
         serversTotal: b.servers,
+        blocked: b.blocked.length,
       });
     }
     // Snapshot rotation pointers for the canvas overlay. Key by the cell's

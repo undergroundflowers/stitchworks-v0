@@ -53,6 +53,10 @@ export interface UsePmlSimOpts {
    *  the adapter uses when the workstation's `operation.opId` resolves in
    *  the bulletin. Falls back to `ws.operation.*` fields otherwise. */
   garment?: GarmentTemplate;
+  /** Record the entity-flow stream (`result.flow`) so the view can play back
+   *  REAL per-bundle movement instead of synthetic motion. Off by default —
+   *  only LiveSim needs it; analytics/report consumers skip the memory cost. */
+  recordFlow?: boolean;
 }
 
 export interface UseSimResult {
@@ -82,6 +86,7 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
   const garment = opts?.garment;
+  const recordFlow = opts?.recordFlow ?? false;
 
   // Static twin view — opId/opCode/opName/machineCode/smv per station. Cheap
   // to compute; memoize by twin identity so the adapter doesn't redo the
@@ -94,7 +99,7 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
   const result = useMemo<PmlSimResult | null>(() => {
     if (twin.workstations.length === 0) return null;
     try {
-      return runPmlSim({ twin, durationMin, seed, samplePeriodMin: 1 });
+      return runPmlSim({ twin, durationMin, seed, samplePeriodMin: 1, recordFlow });
     } catch (err) {
       // The engine throws on truly broken graphs (no Source, no Sink, etc.);
       // return null so the UI renders an empty-state shell instead of crashing.
@@ -104,7 +109,7 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
       }
       return null;
     }
-  }, [twin, durationMin, seed]);
+  }, [twin, durationMin, seed, recordFlow]);
 
   const samples = result?.samples ?? [];
   const lastFrame = Math.max(0, samples.length - 1);

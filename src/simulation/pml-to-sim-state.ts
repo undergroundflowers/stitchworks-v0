@@ -296,6 +296,7 @@ export function pmlSampleToSimState(
     const snap = sample.blocks.get(st.wsId);
     const busy = snap?.busy ?? 0;
     const queueLen = snap?.queueLen ?? 0;
+    const blocked = snap?.blocked ?? 0;
     const produced = snap?.producedPieces ?? 0;
     const serversTotal = snap?.serversTotal ?? 1;
     // Utilization shape matches the legacy engine's contract:
@@ -342,6 +343,7 @@ export function pmlSampleToSimState(
       serversTotal,
       busy,
       queueLen,
+      blocked,
       produced,
       totalBusyTime,
       utilization,

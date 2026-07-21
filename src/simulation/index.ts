@@ -52,6 +52,12 @@ export {
   type FlowEvent,
   type FlowEventKind,
 } from './pml-engine';
+export {
+  buildFlowPlayback,
+  type FlowPlayback,
+  type BundleFrame,
+  type BundleState,
+} from './flow-playback';
 export { runPmlOnTwin, type RunReport } from './pml-runner';
 export {
   buildPmlTwinView,

@@ -54,10 +54,11 @@ export interface UseMultiPmlSimResult extends Omit<UseSimResult, 'state'> {
 
 export function useMultiPmlSim(
   lineTwins: PmlLineInput[],
-  opts?: { durationMin?: number; seed?: number },
+  opts?: { durationMin?: number; seed?: number; recordFlow?: boolean },
 ): UseMultiPmlSimResult {
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
+  const recordFlow = opts?.recordFlow ?? false;
 
   const views = useMemo(
     () => lineTwins.map((lt) => buildPmlTwinView(lt.twin, lt.garment)),
@@ -68,7 +69,7 @@ export function useMultiPmlSim(
       lineTwins.map((lt) => {
         if (lt.twin.workstations.length === 0) return null;
         try {
-          return runPmlSim({ twin: lt.twin, durationMin, seed, samplePeriodMin: 1 });
+          return runPmlSim({ twin: lt.twin, durationMin, seed, samplePeriodMin: 1, recordFlow });
         } catch (err) {
           if (typeof console !== 'undefined') {
             console.error(`[useMultiPmlSim] runPmlSim failed for line ${lt.lineId}:`, err);
@@ -76,7 +77,7 @@ export function useMultiPmlSim(
           return null;
         }
       }),
-    [lineTwins, durationMin, seed],
+    [lineTwins, durationMin, seed, recordFlow],
   );
 
   // Total frame count — the shorter line settles at its last sample while
