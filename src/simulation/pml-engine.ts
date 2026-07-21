@@ -350,6 +350,12 @@ export interface BlockObserved {
   /** True if this block had the longest queue at end-of-run — heuristic
    *  bottleneck detection that callers can refine. */
   bottleneck: boolean;
+  /** P2 — cumulative minutes this block spent BLOCKED: service finished but
+   *  the completed piece couldn't advance because the downstream buffer was
+   *  full. 0 under unbounded buffers (the default). A high value flags a
+   *  downstream bottleneck starving this station of somewhere to put its
+   *  output — distinct from `utilization`, which counts productive service. */
+  blockedMin: number;
 }
 
 /** One entity-level transition in the recorded flow stream. Coarse enough
@@ -360,9 +366,20 @@ export interface BlockObserved {
  *   • `move`         — the agent traversed an edge; `fromWsId` → `wsId`.
  *   • `startService` — the agent seized a server at `wsId` (service begins).
  *   • `endService`   — the agent released a server at `wsId` (service ends).
+ *   • `block`        — service finished but the agent can't advance (the
+ *                      downstream buffer is full); the server is now blocked.
+ *   • `unblock`      — a previously blocked agent finally advanced; its
+ *                      server is freed. Pairs 1:1 with an earlier `block`.
  *   • `sink`         — the agent reached a Sink (`wsId` = Sink).
  */
-export type FlowEventKind = 'spawn' | 'move' | 'startService' | 'endService' | 'sink';
+export type FlowEventKind =
+  | 'spawn'
+  | 'move'
+  | 'startService'
+  | 'endService'
+  | 'block'
+  | 'unblock'
+  | 'sink';
 
 export interface FlowEvent {
   /** Sim time in MINUTES. Events are pushed in non-decreasing `t` order. */
@@ -393,6 +410,13 @@ export interface PmlSimResult {
   /** Quality fraction for OEE: piecesProducedFTR / (totalProduced + piecesScrapped).
    *  1.0 when no rework / scrap occurred. */
   firstPassYield: number;
+  /** P2 — pieces DROPPED at a saturated finite buffer on a path that can't
+   *  exert back-pressure (a branch/merge/pass-through block emitting into a
+   *  full downstream, or any non-holding emitter). 0 under unbounded buffers
+   *  and on the pure linear Service/Queue/Delay/Conveyor path (which blocks
+   *  instead of dropping). A non-zero value means capacity was set somewhere
+   *  a v1 block kind can't hold — surfaced as a warning too. */
+  piecesLost: number;
   /** Cumulative minutes lost to changeover events during the run. P2 default 0. */
   changeoverMin: number;
   /** Cumulative minutes lost to machine downtime (MTBF/MTTR) during the run. P2 default 0. */
@@ -476,6 +500,11 @@ type Event =
   | { time: number; kind: 'changeoverEnd'; lineId: string }
   | { time: number; kind: 'breakdownBegin'; wsId: string }
   | { time: number; kind: 'breakdownEnd'; wsId: string; mtbfMin: number; mttrMin: number }
+  // P2 — a downstream buffer freed a slot; re-attempt the forward that a
+  // blocked holder (Service/Delay/Conveyor) or a stalled Queue was waiting on.
+  // Zero-delay (fires at the same sim time) so back-pressure relief cascades
+  // upstream without recursion. De-duplicated via `retryScheduled`.
+  | { time: number; kind: 'retryForward'; wsId: string }
   | { time: number; kind: 'sample' };
 
 /** Per-block runtime state. */
@@ -539,6 +568,24 @@ interface BlockState {
   /** Source-only: pieces emitted for the *current* order. Resets to 0
    *  whenever orderSeqIndex advances. */
   orderEmittedSoFar: number;
+  /** P2 — SYSTEM capacity K (agents allowed in this block = waiting + in
+   *  service), matching the analytical M/M/c/K model so DES and theory agree.
+   *  `Infinity` ⇒ unbounded (the default, and today's behaviour). Service:
+   *  accepts while `queue.length + inService < sysCapacity`. Queue: accepts
+   *  while `queue.length < sysCapacity` (no servers). Other kinds ignore it. */
+  sysCapacity: number;
+  /** P2 — agents that FINISHED service here but can't advance yet because the
+   *  downstream buffer is full. Each still occupies a server slot (counted in
+   *  `inService`) so no new service starts — this is blocking-after-service.
+   *  Drained by `retryForward` when the downstream frees a slot. Only Service
+   *  / Delay / MoveTo / Conveyor ever populate this. */
+  blocked: Agent[];
+  /** P2 — cumulative minutes this block held ≥1 blocked agent. */
+  blockedMin: number;
+  /** P2 — sim time the current blocked interval began, or null when not
+   *  blocked. Closed into `blockedMin` when `blocked` empties (and at end of
+   *  run). Interval-based: concurrent blocked servers count as one interval. */
+  blockedSince: number | null;
 }
 
 // ============================================================================
@@ -770,6 +817,33 @@ function batchSizeFor(ws: Workstation): number {
   return getBlockParams(ws).batchSize;
 }
 
+/** Operation-level system capacity (K = queue + in-service), or null when the
+ *  workstation isn't bound to an op that pins one. This is the SAME field the
+ *  analytical M/M/c/K model reads (`Operation.queueCapacity`), so a Service
+ *  authored with a finite buffer behaves consistently in DES and theory. */
+function resolveOpQueueCapacity(ws: Workstation): number | null {
+  const opId = ws.operation?.opId;
+  const garmentId = ws.operation?.garmentId;
+  if (!opId || !garmentId) return null;
+  const garment = GARMENT_TEMPLATES[garmentId];
+  if (!garment) return null;
+  const op = garment.operations.find((o) => o.id === opId);
+  if (!op || op.queueCapacity == null || op.queueCapacity <= 0) return null;
+  return op.queueCapacity;
+}
+
+/** Resolve a block's system capacity K. Precedence: op-level `queueCapacity`
+ *  (matches the analytical model) → block-param `queueCapacity` (0 ⇒ unbounded
+ *  by the existing param convention) → `Infinity` (unbounded — the default,
+ *  preserving the pre-P2 push-semantics behaviour exactly). */
+function systemCapacityFor(ws: Workstation): number {
+  const opCap = resolveOpQueueCapacity(ws);
+  if (opCap != null) return opCap;
+  const blockCap = getBlockParams(ws).queueCapacity; // 0 = unbounded
+  if (blockCap > 0) return blockCap;
+  return Infinity;
+}
+
 // ============================================================================
 // CORE ENGINE
 // ============================================================================
@@ -864,6 +938,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // once we know which lines have a non-empty orderSequence.
       orderSeqIndex: -1,
       orderEmittedSoFar: 0,
+      // P2 — finite-buffer state. Unbounded by default → identical to the
+      // pre-P2 push-semantics engine.
+      sysCapacity: systemCapacityFor(ws),
+      blocked: [],
+      blockedMin: 0,
+      blockedSince: null,
     });
   }
 
@@ -940,6 +1020,20 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     r.outputs.set(fromPortId, list);
   }
 
+  // ── Reverse routing (P2 back-pressure) ────────────────────────────────────
+  // Who feeds each block? When a block frees a buffer slot we schedule a
+  // retryForward for its feeders so a blocked upstream can advance.
+  const feedersOf = new Map<string, string[]>();
+  for (const c of twin.connectors) {
+    if (!blocks.has(c.fromWsId) || !blocks.has(c.toWsId)) continue;
+    const list = feedersOf.get(c.toWsId) ?? [];
+    if (!list.includes(c.fromWsId)) list.push(c.fromWsId);
+    feedersOf.set(c.toWsId, list);
+  }
+  /** Blocks with a retryForward already queued (de-dups the cascade so at most
+   *  one pending retry exists per block per instant). Cleared when it fires. */
+  const retryScheduled = new Set<string>();
+
   // ── Diagnostics ────────────────────────────────────────────────────────────
   // Reuse the same validator the toolbar's pre-flight chip uses, so the
   // user sees identical messaging before vs. after the run. Drop info-
@@ -955,6 +1049,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let totalProduced = 0;
   let piecesProducedFTR = 0;
   let piecesScrapped = 0;
+  let piecesLost = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
   // P2 — line-blocking accumulators. Updated when CHANGEOVER_BEGIN /
@@ -1189,6 +1284,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       pool.busy += 1;
     }
     const a = b.queue.shift()!;
+    // Pulling from the buffer freed a slot — let any blocked upstream retry.
+    notifyFeeders(b, now);
     b.inService += 1;
     // Sample a per-agent cycle so the busy-time accounting at `serviceEnd`
     // sees the same draw that scheduled this completion. Stash on the agent
@@ -1206,6 +1303,80 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
 
   /** Side-table for in-flight Service agents (id → Agent). */
   const inFlightAgents = new Map<number, Agent>();
+
+  // ── P2 finite-buffer / blocking helpers ───────────────────────────────────
+
+  /** Can this block accept one more agent into its buffer right now? Only
+   *  Service (system = queue + in-service) and Queue (system = queue) enforce
+   *  a finite capacity; every other kind has unbounded intake in v1. With the
+   *  default `sysCapacity === Infinity` this is always true, so the whole
+   *  blocking path is inert unless the user authored a finite buffer. */
+  function canAcceptAt(wsId: string): boolean {
+    const b = blocks.get(wsId);
+    if (!b) return true;
+    if (b.kind === 'Service') return b.queue.length + b.inService < b.sysCapacity;
+    if (b.kind === 'Queue') return b.queue.length < b.sysCapacity;
+    return true;
+  }
+
+  /** A block just freed a buffer slot — schedule a zero-delay retry for each
+   *  feeder that is currently holding agents (a blocked Service/Delay/Conveyor,
+   *  or a Queue that couldn't drain). De-duplicated so the cascade can't
+   *  schedule the same block twice at one instant. */
+  function notifyFeeders(b: BlockState, now: number): void {
+    const feeders = feedersOf.get(b.ws.id);
+    if (!feeders) return;
+    for (const fId of feeders) {
+      if (retryScheduled.has(fId)) continue;
+      const f = blocks.get(fId);
+      if (!f) continue;
+      const holding = f.blocked.length > 0 || (f.kind === 'Queue' && f.queue.length > 0);
+      if (!holding) continue;
+      retryScheduled.add(fId);
+      pq.push({ time: now, kind: 'retryForward', wsId: fId });
+    }
+  }
+
+  /** Release one occupied server slot (and, for a Service, its dept-pool
+   *  unit). The inverse of the seize in `tryStartService`. */
+  function freeServer(b: BlockState, now: number): void {
+    b.inService = Math.max(0, b.inService - 1);
+    if (b.kind === 'Service') {
+      const pool = deptPools.get(b.ws.deptId);
+      if (pool) {
+        bumpPoolAccum(pool, now);
+        pool.busy = Math.max(0, pool.busy - 1);
+      }
+    }
+  }
+
+  /** Close an open blocking interval into the cumulative accumulator. */
+  function endBlockInterval(b: BlockState, now: number): void {
+    if (b.blockedSince !== null) {
+      b.blockedMin += now - b.blockedSince;
+      b.blockedSince = null;
+    }
+  }
+
+  /** Advance the visual rotation pointer for a Service completion (canvas
+   *  overlay only — KPIs use the shareFactor approximation). */
+  function advanceRotation(b: BlockState): void {
+    const rotCell = rotationCellByWsId.get(b.ws.id);
+    if (rotCell) {
+      rotCell.pointerIdx = ((rotCell.pointerIdx ?? 0) + 1) % rotCell.wsIds.length;
+    }
+  }
+
+  /** One-time warning when a block kind that can't hold under back-pressure
+   *  drops a piece into a saturated downstream buffer. */
+  const lossWarned = new Set<string>();
+  function warnLossOnce(b: BlockState): void {
+    if (lossWarned.has(b.ws.id)) return;
+    lossWarned.add(b.ws.id);
+    warnings.push(
+      `"${b.ws.name}" (${b.kind}) dropped a piece into a full downstream buffer. v1 back-pressure only blocks on the linear Service/Queue/Delay/Conveyor path; branch/merge blocks drop when saturated. Raise the downstream capacity or insert a Queue.`,
+    );
+  }
 
   /**
    * Deliver one agent to the target block's input. Called by route() after
@@ -1411,14 +1582,18 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
   }
 
-  /** Drain a Queue block — forward as many head-of-line agents as the
-   *  routing target will accept. With push semantics + per-block buffers
-   *  this just forwards everything immediately. */
+  /** Drain a Queue block — forward head-of-line agents while the downstream
+   *  target will accept. Stops when the target's buffer is full (back-pressure);
+   *  the remaining agents stay in this Queue's own bounded buffer. Under the
+   *  default unbounded buffers `tryForwardFirstOutput` never blocks, so this
+   *  forwards everything immediately, exactly as before. */
   function drainQueue(b: BlockState, now: number): void {
     if (b.kind !== 'Queue') return;
     while (b.queue.length > 0) {
-      const a = b.queue.shift()!;
-      emitOnFirstOutput(b, a, now);
+      if (!tryForwardFirstOutput(b, b.queue[0], now)) break; // downstream full
+      b.queue.shift();
+      // Freed a slot in this Queue — a blocked upstream may now advance.
+      notifyFeeders(b, now);
     }
   }
 
@@ -1525,12 +1700,93 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     const targets = routing.get(b.ws.id)?.outputs.get(portId) ?? [];
     if (targets.length === 0) return; // dangling output — silently drop
     for (const t of targets) {
+      // Non-holding emit: this block kind can't exert back-pressure, so a
+      // saturated finite downstream buffer means the piece is DROPPED (and
+      // counted). Under the default unbounded buffers `canAcceptAt` is always
+      // true, so this is exactly the old push behaviour.
+      if (!canAcceptAt(t.targetWsId)) {
+        piecesLost += agent.pieces;
+        warnLossOnce(b);
+        continue;
+      }
       // One edge traversal per target. Emitted BEFORE accept so a fan-out
       // (Split) or a merge (Combine) shows each constituent hop; the arriving
       // agent's id is the one that just left `b` — new ids minted inside
       // accept get their own moves when they in turn emit.
       emitFlow('move', agent, t.targetWsId, b.ws.id);
       accept(t.targetWsId, t.targetInPort, agent, now);
+    }
+  }
+
+  /**
+   * Forward a completed agent on the block's FIRST output port with
+   * blocking-after-service. Returns:
+   *   • `true`  — the agent left (delivered, or dropped on a fan-out edge, or
+   *               a dangling/absent output). The caller frees the server.
+   *   • `false` — the single downstream target's buffer is full; the caller
+   *               must HOLD the agent (block) and keep the server occupied.
+   * Only the single-target case can block — fan-out falls back to the
+   * non-holding drop-on-full path (a documented v1 limitation).
+   */
+  function tryForwardFirstOutput(b: BlockState, agent: Agent, now: number): boolean {
+    const spec = getBlockSpec(b.ws);
+    const portId = spec.outputs[0]?.id;
+    if (!portId) return true; // no output — agent leaves (nothing to count)
+    const targets = routing.get(b.ws.id)?.outputs.get(portId) ?? [];
+    // Single downstream that's full → block (nothing counted; agent stays).
+    if (targets.length === 1 && !canAcceptAt(targets[0].targetWsId)) return false;
+    // Committed to emit.
+    b.outflowByPort.set(portId, (b.outflowByPort.get(portId) ?? 0) + 1);
+    b.outflowPieces += agent.pieces;
+    if (targets.length === 0) return true; // dangling
+    for (const t of targets) {
+      if (!canAcceptAt(t.targetWsId)) {
+        piecesLost += agent.pieces;
+        warnLossOnce(b);
+        continue;
+      }
+      emitFlow('move', agent, t.targetWsId, b.ws.id);
+      accept(t.targetWsId, t.targetInPort, agent, now);
+    }
+    return true;
+  }
+
+  /** True when a Source can't emit because its single downstream target is
+   *  full — the Source then reschedules its next tick without emitting or
+   *  advancing its order state (back-pressure instead of dropping WIP). */
+  function sourceBlocked(src: BlockState): boolean {
+    const spec = getBlockSpec(src.ws);
+    const portId = spec.outputs[0]?.id;
+    if (!portId) return false;
+    const targets = routing.get(src.ws.id)?.outputs.get(portId) ?? [];
+    if (targets.length !== 1) return false; // fan-out / no target — don't stall
+    return !canAcceptAt(targets[0].targetWsId);
+  }
+
+  /** Re-attempt the forward a block was blocked on (fired by a retryForward
+   *  event once a downstream freed a slot). */
+  function retryForward(b: BlockState, now: number): void {
+    if (b.kind === 'Queue') {
+      drainQueue(b, now);
+      return;
+    }
+    // Service / Delay / MoveTo / Conveyor holders: flush blocked agents FIFO.
+    let freed = false;
+    while (b.blocked.length > 0) {
+      if (!tryForwardFirstOutput(b, b.blocked[0], now)) break;
+      const moved = b.blocked.shift()!;
+      emitFlow('unblock', moved, b.ws.id);
+      freeServer(b, now);
+      freed = true;
+    }
+    if (b.blocked.length === 0) endBlockInterval(b, now);
+    if (freed) {
+      if (b.kind === 'Service') {
+        // Freed server(s) can now pull waiting agents into service.
+        while (tryStartService(b, now)) {
+          /* fill every freed slot */
+        }
+      }
     }
   }
 
@@ -1583,6 +1839,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           src.orderSeqIndex += 1;
           src.orderEmittedSoFar = 0;
           pq.push({ time: now + 1e-3, kind: 'sourceTick', wsId: src.ws.id });
+          continue;
+        }
+
+        // P2 back-pressure: if the line's entry buffer is full, don't emit
+        // (and don't advance order state / stamp firstEmittedAt) — retry at
+        // the next arrival beat. The WIP waits in staging rather than dropping.
+        if (sourceBlocked(src)) {
+          pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
           continue;
         }
 
@@ -1646,6 +1910,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       }
 
       // ── Legacy infinite-source path ───────────────────────────────────
+      // P2 back-pressure: reschedule without emitting when the downstream
+      // entry buffer is full (unbounded default ⇒ never blocks).
+      if (sourceBlocked(src)) {
+        pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+        continue;
+      }
       const pieces = src.piecesPerAgent;
       const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
       emitFlow('spawn', agent, src.ws.id);
@@ -1657,44 +1927,60 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'serviceEnd') {
       const b = blocks.get(e.wsId);
       if (!b) continue;
+      const isTimeBlock =
+        b.kind === 'Service' ||
+        b.kind === 'Delay' ||
+        b.kind === 'MoveTo' ||
+        b.kind === 'Conveyor';
+      if (!isTimeBlock) continue; // defensive — only time-based blocks schedule serviceEnd
       const a = inFlightAgents.get(e.agentId);
       inFlightAgents.delete(e.agentId);
       // Credit the SAMPLED cycle (stashed on the agent) when stochastic, the
-      // deterministic `b.cycleMin` otherwise. Keeps utilisation honest under
-      // stochastic service.
+      // deterministic `b.cycleMin` otherwise. `busyMin` is PRODUCTIVE service
+      // only — any subsequent blocking time is tracked separately in blockedMin.
       const elapsed = a?.cycleMin ?? b.cycleMin;
-      if (b.kind === 'Service') {
-        b.busyMin += elapsed;
-        b.inService = Math.max(0, b.inService - 1);
-        const pool = deptPools.get(b.ws.deptId);
-        if (pool) {
-          bumpPoolAccum(pool, now);
-          pool.busy = Math.max(0, pool.busy - 1);
-        }
-        if (a) {
-          emitFlow('endService', a, b.ws.id);
-          // P2 rework: a fraction (op.reworkRate) of completed pieces gets
-          // routed back upstream instead of forwarded. maybeRework consumes
-          // the agent in that case; only forward when it returns false.
-          if (!maybeRework(b, a, now)) emitOnFirstOutput(b, a, now);
-        }
-        // Advance the rotation pointer for the visual overlay — the
-        // engine KPIs use the shareFactor approximation, so this is
-        // purely a UI hook for `PmlSimSample.rotationPointers` so the
-        // canvas can hop the rotation marker between cells in time with
-        // service completions on this cell.
-        const rotCell = rotationCellByWsId.get(b.ws.id);
-        if (rotCell) {
-          rotCell.pointerIdx = ((rotCell.pointerIdx ?? 0) + 1) % rotCell.wsIds.length;
-        }
+      b.busyMin += elapsed;
+      if (a) emitFlow('endService', a, b.ws.id);
+      // Rotation pointer hops on each Service completion (canvas overlay only).
+      if (b.kind === 'Service') advanceRotation(b);
+
+      // P2 rework (Service only): a fraction of completed pieces routes back
+      // upstream / scraps instead of forwarding. Rework is EXEMPT from finite
+      // buffers (it re-queues via `accept` directly) to avoid rework-induced
+      // deadlock — a documented v1 simplification. maybeRework consumes the
+      // agent when it returns true.
+      if (b.kind === 'Service' && a && maybeRework(b, a, now)) {
+        freeServer(b, now);
         tryStartService(b, now);
-      } else if (b.kind === 'Delay' || b.kind === 'MoveTo' || b.kind === 'Conveyor') {
-        // Resource-free time-based blocks. Agent simply leaves on its first
-        // output port when the cycle elapses.
-        b.busyMin += elapsed;
-        b.inService = Math.max(0, b.inService - 1);
-        if (a) emitOnFirstOutput(b, a, now);
+        continue;
       }
+
+      if (!a) {
+        freeServer(b, now);
+        tryStartService(b, now);
+        continue;
+      }
+
+      // Blocking-after-service: try to advance the finished piece. If the
+      // single downstream buffer is full, HOLD it — the server stays occupied
+      // (counted in inService) so no new service starts here until a
+      // retryForward clears the block.
+      if (tryForwardFirstOutput(b, a, now)) {
+        freeServer(b, now);
+        tryStartService(b, now);
+      } else {
+        b.blocked.push(a);
+        if (b.blockedSince === null) b.blockedSince = now;
+        emitFlow('block', a, b.ws.id);
+      }
+      continue;
+    }
+
+    if (e.kind === 'retryForward') {
+      retryScheduled.delete(e.wsId);
+      const b = blocks.get(e.wsId);
+      if (!b) continue;
+      retryForward(b, now);
       continue;
     }
 
@@ -1766,6 +2052,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     bumpPoolAccum(pool, durationMin);
   }
 
+  // ── Close any still-open blocking intervals at end-of-run ──────────────────
+  for (const b of blocks.values()) endBlockInterval(b, durationMin);
+
   // ── Build per-block observed metrics ──────────────────────────────────────
   const blockObs = new Map<string, BlockObserved>();
   let bottleneckWsId: string | null = null;
@@ -1808,6 +2097,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       throughputPerHr: durationMin > 0 ? (totalOut * 60) / durationMin : 0,
       utilization,
       bottleneck: false,
+      blockedMin: b.blockedMin,
     });
   }
   if (bottleneckWsId) {
@@ -1848,6 +2138,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     totalProduced,
     piecesProducedFTR,
     piecesScrapped,
+    piecesLost,
     firstPassYield,
     changeoverMin: changeoverMinAccum,
     downtimeMin: downtimeMinAccum,
