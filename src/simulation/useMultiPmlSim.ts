@@ -276,6 +276,9 @@ export function mergePmlSimStates(states: SimState[], lineIds: string[]): SimSta
     history: states[0].history,
     stationHistory,
     events,
+    // Model diagnostics are per-line but the user sees one factory — dedupe so
+    // "no Sink on this line" doesn't appear six times.
+    warnings: [...new Set(states.flatMap((s) => s.warnings))],
   };
 }
 

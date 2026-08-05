@@ -58,6 +58,15 @@ export interface SimConfig {
 }
 
 export interface StationView {
+  /**
+   * Workstation id this row renders.
+   *
+   * Stable across frames and UNIQUE even when two stations on the same line
+   * run the same operation — which is what happens on any balanced line, and
+   * which made `key={s.opId}` produce duplicate React keys. Also the correct
+   * thing to address a drill-down by.
+   */
+  wsId: string;
   /** Operation id this station runs. */
   opId: string;
   opCode?: string;
@@ -89,16 +98,42 @@ export interface StationView {
   serviceDist: ServiceDist;
   /** System capacity for this station (Infinity if unbounded). */
   capacity: number;
-  /** Bundles offered to this station (queue + service + balked). */
+  /** Bundles OFFERED to this station: admitted + balked. A real engine
+   *  counter now, not the `produced + queueLen + busy` proxy it used to be. */
   arrivals: number;
-  /** Bundles rejected because system was full. 0 for infinite-buffer. */
+  /** Bundles rejected because the system was full. 0 for infinite-buffer. */
   balked: number;
-  /** Observed arrival rate λ (per hour). */
+  /** OFFERED arrival rate λ (per hour) = (admitted + balked) / elapsed hours.
+   *  Previously this was the DEPARTURE rate (produced / elapsed), which at a
+   *  saturated bottleneck drives λ → μ, hence ρ → 1 by construction and an
+   *  analytical Lq understated at exactly the station that matters. */
   lambda: number;
   /** Analytical KPIs against the observed λ and the station's μ. */
   analytical: AnalyticalKpis;
   /** ρ < 1 (infinite buffer) or always-true (finite buffer). */
   isStable: boolean;
+
+  // ── Measured counterparts to `analytical` ─────────────────────────────────
+  // Same quantities the closed-form layer predicts, but observed from the run,
+  // so a chart can plot one against the other and a test can assert they
+  // converge. All windowed to the post-warm-up span when one is supplied.
+  /** Admitted arrival rate λ_eff (per hour) — excludes balks. */
+  lambdaEff: number;
+  /** Time-average L̄q = ∫Lq dt / window. */
+  LqObserved: number;
+  /** Time-average L̄ = ∫L dt / window. */
+  LObserved: number;
+  /** MEASURED mean queue wait in MINUTES — a real mean of per-agent waits,
+   *  not Lq/λ rearranged. This is what makes Little's law a testable
+   *  invariant here rather than a restatement of a definition. */
+  WqObservedMin: number;
+  /** Fraction of offered arrivals turned away, 0..1. Compare against the
+   *  analytical P_N for a finite-buffer station. */
+  balkFraction: number;
+  /** True when the engine could not honour the authored discipline (it
+   *  dequeues FIFO). Lq/L/ρ are discipline-invariant for M/M/c, so the
+   *  analytical numbers hold; only the wait DISTRIBUTION differs. */
+  disciplineNotSimulated: boolean;
 }
 
 export interface HistoryPoint {
@@ -114,10 +149,23 @@ export interface HistoryPoint {
  */
 export interface StationHistoryPoint {
   time: number;
-  utilization: number; // cumulative ρ̂
-  inSystem: number;    // L̂ = busy + queue.length
-  queueLen: number;    // L̂q = queue.length
-  meanWqMin: number;   // Ŵq running average, minutes
+  /** Cumulative ρ̂ = ∫busy dt / (c · t). Genuinely cumulative now: this used
+   *  to be the INSTANTANEOUS `busy / servers`, i.e. a 0/1 square wave at
+   *  c = 1, which is why the plotted line could never settle onto the flat
+   *  analytical ρ drawn beside it. */
+  utilization: number;
+  /** Time-average L̄ = ∫L dt / t. */
+  inSystem: number;
+  /** Time-average L̄q = ∫Lq dt / t. */
+  queueLen: number;
+  /** MEASURED mean queue wait Ŵq in minutes = Σ waits / count. */
+  meanWqMin: number;
+  /** Instantaneous in-system count at this instant. Kept alongside the
+   *  time-average because the animated floor wants "how many are standing
+   *  here right now", not a running mean. */
+  inSystemNow: number;
+  /** Instantaneous queue depth at this instant. */
+  queueLenNow: number;
 }
 
 export interface SimState {
@@ -134,4 +182,12 @@ export interface SimState {
   stationHistory: StationHistoryPoint[][];
   /** Rolling event log for the LiveSim feed. Newest first. Capped at 60. */
   events: { time: number; tag: 'OUT' | 'IN' | 'STARVE' | 'BLOCK'; msg: string }[];
+  /**
+   * Engine diagnostics about the MODEL (missing Sink, dropped pieces on a
+   * fan-out, a rework route that doesn't resolve, …). Deliberately separate
+   * from `events`: these used to be poured into the event feed tagged BLOCK
+   * and stamped with the current frame time, which made a configuration
+   * problem look like something that just happened on the floor.
+   */
+  warnings: string[];
 }

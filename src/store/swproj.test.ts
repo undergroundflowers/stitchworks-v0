@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildSwproj, parseSwproj, applySwproj } from './swproj';
 import { useProject } from './project';
-import { useTwin } from './twin';
+import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import { buildDemoTwin } from '../domain/twin';
 
 /**
@@ -13,7 +13,16 @@ import { buildDemoTwin } from '../domain/twin';
 describe('.swproj format', () => {
   function sampleTwinExport() {
     const canonical = buildDemoTwin();
-    return { schemaVersion: 5, canonical, scenarios: [], activeScenarioId: null };
+    // Track the constant, not a literal. `buildSwproj` always stamps the
+    // CURRENT store version into the envelope, so hardcoding a number here
+    // asserts nothing except that the constant hasn't moved since the test
+    // was written — it broke on the first legitimate schema bump.
+    return {
+      schemaVersion: TWIN_STORE_SCHEMA_VERSION,
+      canonical,
+      scenarios: [],
+      activeScenarioId: null,
+    };
   }
 
   it('round-trips project + twin through build → parse losslessly', () => {

@@ -4514,7 +4514,7 @@ function SimPmlView({ garment, operators, hasReference, useActiveTwin = false }:
     const elapsedHr = currentSample.time / 60;
     return twin.workstations
       .map((w) => {
-        const snap = currentSample.blocks.get(w.id);
+        const snap = currentSample.blocks[w.id];
         if (!snap) return null;
         const spec = getBlockSpec(w);
         const tputPerHr = elapsedHr > 0 ? snap.producedPieces / elapsedHr : 0;

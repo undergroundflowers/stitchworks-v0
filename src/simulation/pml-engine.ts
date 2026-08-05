@@ -257,6 +257,21 @@ export interface PmlSimOpts {
    *  warning is emitted — the sim itself still runs to completion. Ignored
    *  unless `recordFlow` is set. Defaults to `MAX_FLOW_EVENTS_DEFAULT`. */
   maxFlowEvents?: number;
+  /**
+   * Steady-state warm-up in MINUTES. At `t = warmupMin` every queueing
+   * accumulator (the time-integrals, the arrival / balk counters and the wait
+   * sums) is ZEROED and the inflow/outflow totals are snapshotted, so the
+   * end-of-run `BlockObserved` describes the post-transient regime only. The
+   * event calendar and the in-flight agent population are untouched — this is
+   * accumulator truncation, not a restart.
+   *
+   * 0 (the default) means no truncation, i.e. exactly today's numbers.
+   *
+   * Headless callers (replications, tests) want this. The live UI does NOT:
+   * it truncates by DIFFERENCING two samples instead, because it needs the
+   * transient to stay visible on the charts.
+   */
+  warmupMin?: number;
 }
 
 /**
@@ -268,33 +283,77 @@ export interface PmlSimOpts {
  * analytics page need to render a frame, so the legacy `SimState` shape
  * can be reconstructed by an adapter without touching the engine again.
  */
+/**
+ * Per-block metrics frozen at one sample time.
+ *
+ * The `area*` / `arrivals` / `balked` / `waitSum*` fields are CUMULATIVE from
+ * t=0 (or from `warmupMin` when engine truncation is on) and are never
+ * pre-divided. That is deliberate: a caller recovers a WINDOW average by
+ * differencing two samples —
+ *
+ *     L̄q[t0,t1] = (s1.areaLq − s0.areaLq) / (s1.time − s0.time)
+ *     ρ̂[t0,t1]  = (s1.areaBusy − s0.areaBusy) / (c · (s1.time − s0.time))
+ *
+ * — which is what makes warm-up truncation exact on the live surface without
+ * the engine having to know where the warm-up boundary is.
+ */
+export interface PmlBlockSample {
+  /** Cumulative outflow in pieces (or inflow for Sinks). */
+  producedPieces: number;
+  /** Current queue depth (FIFO + per-input-port FIFOs combined). */
+  queueLen: number;
+  /** Agents currently being serviced at this block. Equivalent to
+   *  the legacy `StationView.busy` — count of occupied server slots. */
+  inService: number;
+  /** Alias of `inService` matching the legacy `StationView.busy` field
+   *  name. Kept as a separate field so the adapter can read it without
+   *  a rename per call site. */
+  busy: number;
+  /** Parallel servers at this block (machine count). Static; mirrors
+   *  the legacy `StationView.serversTotal`. */
+  serversTotal: number;
+  /** P2/P3 — bundles blocked-after-service here at sample time (finished
+   *  but can't advance because the downstream buffer is full). 0 under
+   *  unbounded buffers. Drives the LiveSim "blocked station" tint. */
+  blocked: number;
+
+  // ── Queueing observables (cumulative) ─────────────────────────────────────
+  /** Agents ADMITTED here so far. Offered = `arrivals + balked`. */
+  arrivals: number;
+  /** Agents REJECTED here so far because the system was full — a true balk
+   *  in the M/M/c/N sense. Always 0 under unbounded buffers. */
+  balked: number;
+  /** ∫Lq dt in agent-minutes — WAITING only (excludes in-service). */
+  areaLq: number;
+  /** ∫L dt in agent-minutes — waiting + in service. */
+  areaL: number;
+  /** ∫(inService − blocked) dt in server-minutes. PRODUCTIVE occupancy, so
+   *  ρ̂ = areaBusy / (c · t) is comparable to the analytical ρ, which has no
+   *  notion of blocking. */
+  areaBusy: number;
+  /** ∫blocked dt in server-minutes. The c>1-correct companion to the
+   *  interval-based `blockedMin`. */
+  areaBlocked: number;
+  /** Σ of MEASURED per-agent queue waits, in minutes: Ŵq = waitSumMin /
+   *  waitStarts. A real measurement, not Lq/λ rearranged — which is what
+   *  makes Little's law a testable invariant here rather than a definition. */
+  waitSumMin: number;
+  /** Denominator for the above — agents that have STARTED service. */
+  waitStarts: number;
+}
+
 export interface PmlSimSample {
   /** Sim time in minutes when this snapshot was taken. */
   time: number;
-  /** Per-block running totals: keyed by Workstation.id. */
-  blocks: Map<
-    string,
-    {
-      /** Cumulative outflow in pieces (or inflow for Sinks). */
-      producedPieces: number;
-      /** Current queue depth (FIFO + per-input-port FIFOs combined). */
-      queueLen: number;
-      /** Agents currently being serviced at this block. Equivalent to
-       *  the legacy `StationView.busy` — count of occupied server slots. */
-      inService: number;
-      /** Alias of `inService` matching the legacy `StationView.busy` field
-       *  name. Kept as a separate field so the adapter can read it without
-       *  a rename per call site. */
-      busy: number;
-      /** Parallel servers at this block (machine count). Static; mirrors
-       *  the legacy `StationView.serversTotal`. */
-      serversTotal: number;
-      /** P2/P3 — bundles blocked-after-service here at sample time (finished
-       *  but can't advance because the downstream buffer is full). 0 under
-       *  unbounded buffers. Drives the LiveSim "blocked station" tint. */
-      blocked: number;
-    }
-  >;
+  /**
+   * Per-block running totals, keyed by Workstation.id.
+   *
+   * A plain Record, NOT a Map: a sample array has to survive
+   * `JSON.stringify` so a completed run can be persisted into a scenario
+   * blob and replayed without re-running the engine, and so the engine can
+   * move to a Web Worker (structured clone) without a serialisation shim.
+   */
+  blocks: Record<string, PmlBlockSample>;
   /** Cumulative agents that have reached any Sink. */
   totalSunkPieces: number;
   /** Cumulative pieces produced — alias of `totalSunkPieces` exposed under
@@ -329,8 +388,25 @@ export interface BlockObserved {
   perPortOut: Record<string, number>;
   /** Final throughput in agents-per-hour. */
   throughputPerHr: number;
-  /** 0..1, busy / capacity-time. Service-only; 0 for non-resource blocks. */
+  /**
+   * ρ̂ — PER-STATION operator saturation, 0..1, measured as
+   * `areaBusy / (serversTotal · observedMin)`.
+   *
+   * This used to divide by the DEPARTMENT-WIDE ResourcePool capacity, so a
+   * station busy 400 of 480 minutes on a 20-operator line reported 4.2 %
+   * instead of 83 % — and that figure is what `pml-runner` writes into
+   * `ws.kpiObserved.utilizationPct`, i.e. what the Builder Inspector shows.
+   * The dept-wide number still has a use (see `poolUtilization`) but it is
+   * not this station's utilisation.
+   */
   utilization: number;
+  /**
+   * The old dept/line-pool figure under an honest name:
+   * `resourceBusyUnitMin / (poolCapacity · observedMin)`. Answers "how hard
+   * is this line's whole operator pool working", not "how busy is this one
+   * station". 0 when the block has no pool.
+   */
+  poolUtilization: number;
   /** True if this block had the longest queue at end-of-run — heuristic
    *  bottleneck detection that callers can refine. */
   bottleneck: boolean;
@@ -340,6 +416,35 @@ export interface BlockObserved {
    *  downstream bottleneck starving this station of somewhere to put its
    *  output — distinct from `utilization`, which counts productive service. */
   blockedMin: number;
+
+  // ── P5 measured queueing observables ──────────────────────────────────────
+  /** Minutes the observables below cover: `durationMin − warmupMin`. */
+  observedMin: number;
+  /** Parallel servers c — the ρ̂ denominator. Static for the run. */
+  serversTotal: number;
+  /** System capacity N (waiting + in service). `Infinity` = unbounded.
+   *  Mirrors exactly what the DES enforced, so the analytical layer can be
+   *  handed the same N without re-resolving it from the workstation. */
+  systemCapacity: number;
+  /** Agents admitted during the observation window. */
+  arrivals: number;
+  /** Agents turned away at a full buffer during the window. */
+  balked: number;
+  /** Offered arrival rate λ in agents/hr = (arrivals + balked)·60 / observedMin. */
+  lambdaOfferedPerHr: number;
+  /** Admitted arrival rate λ_eff in agents/hr = arrivals·60 / observedMin. */
+  lambdaEffPerHr: number;
+  /** Time-average L̄q = areaLq / observedMin. */
+  LqObserved: number;
+  /** Time-average L̄ = areaL / observedMin. */
+  LObserved: number;
+  /** MEASURED mean queue wait in MINUTES = waitSumMin / waitStarts. */
+  WqObservedMin: number;
+  /** Raw integrals, so a caller can re-window or cross-check. */
+  areaLq: number;
+  areaL: number;
+  areaBusy: number;
+  areaBlocked: number;
 }
 
 /** One entity-level transition in the recorded flow stream. Coarse enough
@@ -451,6 +556,16 @@ interface Agent {
    *  running an OrderSequence. Lets the Sink credit completion times
    *  per order. Undefined for legacy single-garment Sources. */
   orderId?: string;
+  /** Sim time this agent entered the CURRENT block's WAITING buffer. Written
+   *  on every push into `queue` / `queueByInputPort`, read once at the
+   *  matching shift to credit `waitSumMin`. Deliberately overwritten per
+   *  block — it is always read at the same block that wrote it, so there is
+   *  no cross-block aliasing. */
+  queuedAt?: number;
+  /** Sim time this agent entered the CURRENT block in any sub-state (waiting,
+   *  in service, or blocked). Same per-block overwrite semantics as
+   *  `queuedAt`. Credits `sojournSumMin` when the agent leaves. */
+  enteredBlockAt?: number;
 }
 
 /** All the precomputed routing for a block — output port → list of next
@@ -461,17 +576,35 @@ interface Routing {
   outputs: Map<string, { targetWsId: string; targetInPort: string }[]>;
 }
 
-/** Resource pool for a department — sum of capacities of every block of
- *  kind 'ResourcePool' inside that dept. Service blocks Seize/Release
- *  against this pool implicitly. */
-interface DeptPool {
-  deptId: string;
+/**
+ * Operator pool — sum of capacities of every 'ResourcePool' block sharing a
+ * pool key. Service blocks Seize/Release against their pool implicitly.
+ *
+ * Keyed PER SEWING LINE (`poolKeyFor`), not per department. A sewing floor's
+ * operators belong to a line: they don't float between Line A and Line B
+ * mid-shift. Keying by department made every line on one floor draw from a
+ * single shared budget, so adding a second line silently throttled the first
+ * — and once departments collapse to one hidden "Sewing Floor" that pool
+ * would have become factory-wide.
+ */
+interface OperatorPool {
+  /** `ws.lineId` when the station belongs to a line, else `dept:<deptId>`. */
+  key: string;
   capacity: number;
   /** Currently-busy units. */
   busy: number;
   /** Cumulative busy-unit-minutes for utilization calc. */
   cumBusyUnitMin: number;
   lastChangeAt: number;
+}
+
+/**
+ * Which operator pool a workstation draws from. Line membership wins; a
+ * station with no line falls back to its department so unlined twins (and
+ * every twin saved before lines were first-class) keep behaving as before.
+ */
+function poolKeyFor(ws: Workstation): string {
+  return ws.lineId ? `line:${ws.lineId}` : `dept:${ws.deptId}`;
 }
 
 /** Engine event types — coarse-grained, just enough for Tier-1 coverage. */
@@ -485,6 +618,9 @@ type Event =
   // Zero-delay (fires at the same sim time) so back-pressure relief cascades
   // upstream without recursion. De-duplicated via `retryScheduled`.
   | { time: number; kind: 'retryForward'; wsId: string }
+  // P5 — zero every queueing accumulator so the end-of-run rollup describes
+  // the post-transient regime. Fires once, at `warmupMin`.
+  | { time: number; kind: 'warmupReset' }
   | { time: number; kind: 'sample' };
 
 /** Per-block runtime state. */
@@ -566,6 +702,40 @@ interface BlockState {
    *  blocked. Closed into `blockedMin` when `blocked` empties (and at end of
    *  run). Interval-based: concurrent blocked servers count as one interval. */
   blockedSince: number | null;
+
+  // ── P5 queueing observables ───────────────────────────────────────────────
+  // Raw integrals and raw counts only — nothing is pre-divided, so a consumer
+  // can window by differencing two samples. See `advanceAreas`.
+  /** Sim time the area accumulators have been advanced to. */
+  lastAccumAt: number;
+  /** ∫Lq dt — agent-minutes WAITING (excludes in-service and blocked). */
+  areaLq: number;
+  /** ∫L dt — agent-minutes IN SYSTEM. Blocked agents count: a blocked piece
+   *  is still physically sitting at this station. */
+  areaL: number;
+  /** ∫(inService − blocked) dt — PRODUCTIVE server-minutes summed over
+   *  servers. Excluding blocking is what keeps ρ̂ comparable to the analytical
+   *  ρ, which has no notion of a downstream buffer being full. */
+  areaBusyServers: number;
+  /** ∫blocked dt — blocked server-minutes. */
+  areaBlockedServers: number;
+  /** Agents REJECTED here because the system was full. A deferred offer (an
+   *  upstream Service that BLOCKS and retries) is NOT a balk — it arrives
+   *  later and is counted once, as inflow. */
+  balked: number;
+  balkedPieces: number;
+  /** Σ (serviceStart − queuedAt) over agents that have STARTED service. */
+  waitSumMin: number;
+  /** Denominator for the above: Ŵq = waitSumMin / waitStarts. */
+  waitStarts: number;
+  /** Σ (blockExit − enteredBlockAt) over agents that have LEFT this block. */
+  sojournSumMin: number;
+  sojournExits: number;
+  /** Snapshots taken at `warmupMin` so end-of-run rollups can report the
+   *  post-transient regime. All zero when no warm-up was requested. */
+  warmupAt: number;
+  warmupInflow: number;
+  warmupOutflowPieces: number;
 }
 
 // ============================================================================
@@ -821,12 +991,46 @@ function resolveOpQueueCapacity(ws: Workstation): number | null {
  *  DES reads the same value the analytical M/M/c/K model reads off the live
  *  operation. The op-level lookup is a fallback for twins built without baking
  *  (imports, hand-built) and reads the static garment seed. */
-function systemCapacityFor(ws: Workstation): number {
+export function systemCapacityFor(ws: Workstation): number {
   const blockCap = getBlockParams(ws).queueCapacity; // 0 = unbounded
   if (blockCap > 0) return blockCap;
   const opCap = resolveOpQueueCapacity(ws);
   if (opCap != null) return opCap;
   return Infinity;
+}
+
+/** Operation-level parallel-server count c, or null when the workstation
+ *  isn't bound to an op that pins one. Mirrors `resolveOpQueueCapacity`. */
+function resolveOpServers(ws: Workstation): number | null {
+  const opId = ws.operation?.opId;
+  const garmentId = ws.operation?.garmentId;
+  if (!opId || !garmentId) return null;
+  const garment = GARMENT_TEMPLATES[garmentId];
+  if (!garment) return null;
+  const op = garment.operations.find((o) => o.id === opId);
+  if (!op || op.servers == null || op.servers <= 0) return null;
+  return Math.max(1, Math.round(op.servers));
+}
+
+/**
+ * Resolve a block's parallel-server count c. Precedence mirrors
+ * `systemCapacityFor` exactly: block-param `servers` → op-level
+ * `Operation.servers` → catalog prop → 1.
+ *
+ * Exported so the analytical adapter resolves c and N through the SAME code
+ * path the DES uses. The wrong-capacity-field defect existed precisely
+ * because the two layers each resolved these independently.
+ *
+ * The op-level tier also fixes a quieter bug: the engine used to read only
+ * `getBlockParams(ws).servers`, so an operation authored with c = 3 was
+ * silently simulated as c = 1 unless the value had been baked into the block.
+ */
+export function serversFor(ws: Workstation): number {
+  const p = ws.block?.params?.servers;
+  if (p != null && p > 0) return Math.max(1, Math.round(p));
+  const opServers = resolveOpServers(ws);
+  if (opServers != null) return opServers;
+  return Math.max(1, Math.round(getBlockParams(ws).servers));
 }
 
 // ============================================================================
@@ -917,7 +1121,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       arrivalDist: arrivalDistFor(ws),
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
-      servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
+      servers: serversFor(ws),
       piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
       // P4 — order sequence tracking is enabled at engine-init time below,
       // once we know which lines have a non-empty orderSequence.
@@ -929,6 +1133,21 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       blocked: [],
       blockedMin: 0,
       blockedSince: null,
+      // P5 queueing observables — all raw, all start empty.
+      lastAccumAt: 0,
+      areaLq: 0,
+      areaL: 0,
+      areaBusyServers: 0,
+      areaBlockedServers: 0,
+      balked: 0,
+      balkedPieces: 0,
+      waitSumMin: 0,
+      waitStarts: 0,
+      sojournSumMin: 0,
+      sojournExits: 0,
+      warmupAt: 0,
+      warmupInflow: 0,
+      warmupOutflowPieces: 0,
     });
   }
 
@@ -970,21 +1189,21 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (bundleSize) b.piecesPerAgent = bundleSize;
   }
 
-  // ── Build dept resource pools (implicit binding for v1) ───────────────────
-  const deptPools = new Map<string, DeptPool>();
+  // ── Build operator pools (implicit binding, keyed per sewing line) ────────
+  const operatorPools = new Map<string, OperatorPool>();
   for (const ws of twin.workstations) {
     const kind = getBlockSpec(ws).kind;
     if (kind !== 'ResourcePool') continue;
-    const dept = ws.deptId;
-    const pool = deptPools.get(dept) ?? {
-      deptId: dept,
+    const key = poolKeyFor(ws);
+    const pool = operatorPools.get(key) ?? {
+      key,
       capacity: 0,
       busy: 0,
       cumBusyUnitMin: 0,
       lastChangeAt: 0,
     };
     pool.capacity += poolUnitsFor(ws);
-    deptPools.set(dept, pool);
+    operatorPools.set(key, pool);
   }
 
   // ── Build routing (precompute output → target lookup) ─────────────────────
@@ -1115,6 +1334,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
   }
 
+  // P5 — steady-state warm-up truncation. One event, fired once.
+  const warmupMin = Math.max(0, Math.min(opts.warmupMin ?? 0, durationMin));
+  if (warmupMin > 0) pq.push({ time: warmupMin, kind: 'warmupReset' });
+
   /** Capture a frozen snapshot of every block's running totals at sim
    *  time `t`. O(blocks) — cheap, runs once per `samplePeriodMin`.
    *
@@ -1122,20 +1345,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
    *  instant) and a running piece-mean lead time so LiveSim can show the
    *  same numbers the legacy engine surfaces frame-by-frame. */
   function takeSample(t: number): void {
-    const m = new Map<
-      string,
-      {
-        producedPieces: number;
-        queueLen: number;
-        inService: number;
-        busy: number;
-        serversTotal: number;
-        blocked: number;
-      }
-    >();
+    const m: Record<string, PmlBlockSample> = {};
     let liveBottleneckWsId: string | null = null;
     let liveBottleneckQ = 0;
     for (const b of blocks.values()) {
+      // Bring the time-integrals up to the sample instant BEFORE reading them,
+      // otherwise every area lags by one inter-event gap — which is what made
+      // the plotted ρ̂ a step function that could never converge onto the flat
+      // analytical line drawn beside it.
+      advanceAreas(b, t);
       const portQ = [...b.queueByInputPort.values()].reduce((s, q) => s + q.length, 0);
       const queueLen = b.queue.length + portQ;
       if (queueLen > liveBottleneckQ) {
@@ -1143,7 +1361,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         liveBottleneckWsId = b.ws.id;
       }
       // Sinks have no output ports — their "produced" is what flowed IN.
-      m.set(b.ws.id, {
+      m[b.ws.id] = {
         producedPieces: b.kind === 'Sink' ? b.inflowPieces : b.outflowPieces,
         queueLen,
         inService: b.inService,
@@ -1153,7 +1371,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         busy: b.inService,
         serversTotal: b.servers,
         blocked: b.blocked.length,
-      });
+        arrivals: b.inflow,
+        balked: b.balked,
+        areaLq: b.areaLq,
+        areaL: b.areaL,
+        areaBusy: b.areaBusyServers,
+        areaBlocked: b.areaBlockedServers,
+        waitSumMin: b.waitSumMin,
+        waitStarts: b.waitStarts,
+      };
     }
     // Snapshot rotation pointers for the canvas overlay. Key by the cell's
     // canonical wsId-join so two cells with the same ws-set (rare — same
@@ -1198,10 +1424,53 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     return Math.max(0, b.arrivalIntervalMin);
   }
 
-  /** Update a dept-pool's busy-unit-minute accumulator before mutating busy. */
-  function bumpPoolAccum(pool: DeptPool, now: number): void {
+  /** Update a pool's busy-unit-minute accumulator before mutating busy. */
+  function bumpPoolAccum(pool: OperatorPool, now: number): void {
     pool.cumBusyUnitMin += pool.busy * (now - pool.lastChangeAt);
     pool.lastChangeAt = now;
+  }
+
+  /**
+   * Advance this block's time-integral accumulators to `now`.
+   *
+   * MUST be called immediately BEFORE any mutation of `queue`,
+   * `queueByInputPort`, `inService` or `blocked`. The areas are rectangles
+   * under piecewise-constant counts, so it is the PRE-change level that earns
+   * credit for the elapsed span — calling it after the mutation attributes the
+   * span to the wrong level and silently biases every derived ρ̂ / L̄q / L̄.
+   *
+   * Idempotent in time: a second call at the same `now` credits nothing.
+   */
+  function advanceAreas(b: BlockState, now: number): void {
+    const dt = now - b.lastAccumAt;
+    if (dt > 0) {
+      let waiting = b.queue.length;
+      if (b.queueByInputPort.size > 0) {
+        for (const q of b.queueByInputPort.values()) waiting += q.length;
+      }
+      const blocked = b.blocked.length;
+      const busy = Math.max(0, b.inService - blocked);
+      b.areaLq += waiting * dt;
+      b.areaL += (waiting + b.inService) * dt;
+      b.areaBusyServers += busy * dt;
+      b.areaBlockedServers += blocked * dt;
+    }
+    b.lastAccumAt = now;
+  }
+
+  /**
+   * Record an offer REJECTED at a saturated finite buffer — a true balk in the
+   * M/M/c/N sense: the arrival found the system full and was turned away.
+   *
+   * Note what is NOT a balk: an upstream Service that finishes, finds the
+   * downstream full, and HOLDS the piece (blocking-after-service). That piece
+   * is not lost, it arrives later, and it is counted once as inflow then.
+   */
+  function recordBalk(targetWsId: string, pieces: number): void {
+    const b = blocks.get(targetWsId);
+    if (!b) return;
+    b.balked += 1;
+    b.balkedPieces += pieces;
   }
 
   /**
@@ -1226,13 +1495,21 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // long-run KPIs are stable. The visual rotation pointer is advanced
     // separately for the canvas overlay — see `rotationCells` /
     // `advanceRotationPointer` below.
-    const pool = deptPools.get(b.ws.deptId);
+    const pool = operatorPools.get(poolKeyFor(b.ws));
     if (pool) {
       if (pool.busy >= pool.capacity) return false; // no free unit
       bumpPoolAccum(pool, now);
       pool.busy += 1;
     }
+    // Areas must be credited at the PRE-shift levels (one more waiting, one
+    // fewer in service) before the mutations below.
+    advanceAreas(b, now);
     const a = b.queue.shift()!;
+    // Measured queue wait: the span this agent actually spent in the buffer.
+    // This is the number Ŵq is built from — not Lq/λ rearranged, which is
+    // what made Little's law untestable here before.
+    b.waitSumMin += Math.max(0, now - (a.queuedAt ?? now));
+    b.waitStarts += 1;
     // Pulling from the buffer freed a slot — let any blocked upstream retry.
     notifyFeeders(b, now);
     b.inService += 1;
@@ -1289,9 +1566,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   /** Release one occupied server slot (and, for a Service, its dept-pool
    *  unit). The inverse of the seize in `tryStartService`. */
   function freeServer(b: BlockState, now: number): void {
+    advanceAreas(b, now);
     b.inService = Math.max(0, b.inService - 1);
     if (b.kind === 'Service') {
-      const pool = deptPools.get(b.ws.deptId);
+      const pool = operatorPools.get(poolKeyFor(b.ws));
       if (pool) {
         bumpPoolAccum(pool, now);
         pool.busy = Math.max(0, pool.busy - 1);
@@ -1339,6 +1617,11 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   ): void {
     const b = blocks.get(targetWsId);
     if (!b) return;
+    // Credit the areas at the PRE-arrival levels. This single call covers
+    // every push below (Service, Queue, Batch, Combine/Match/Assembler) and
+    // the `inService += 1` in the Delay/MoveTo/Conveyor branch, because all of
+    // them mutate after this point at the same `now`.
+    advanceAreas(b, now);
     b.inflow += 1;
     b.inflowPieces += agent.pieces;
     switch (b.kind) {
@@ -1364,10 +1647,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // Push semantics — downstream blocks have internal buffers, so
         // forward immediately. Back-pressure (queueCapacity) lands in a
         // future turn.
+        agent.queuedAt = now;
+        agent.enteredBlockAt = now;
         b.queue.push(agent);
         drainQueue(b, now);
         return;
       case 'Service':
+        agent.queuedAt = now;
+        agent.enteredBlockAt = now;
         b.queue.push(agent);
         tryStartService(b, now);
         return;
@@ -1389,6 +1676,11 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       case 'Conveyor': {
         // Time-based pass-through — hold the agent for one cycle, then
         // forward. No resource binding (use Service if you need one).
+        // A Delay has no queue, so the agent's wait is zero — credit the
+        // denominator anyway so Ŵq stays a well-defined mean over arrivals
+        // rather than dividing by a count that skipped these blocks.
+        agent.enteredBlockAt = now;
+        b.waitStarts += 1;
         b.inService += 1;
         const cycle = drawCycle(b);
         agent.cycleMin = cycle;
@@ -1407,6 +1699,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // whose pieces = sum of input pieces. The batched agent inherits
         // the bornAt of the OLDEST collected piece so lead-time remains
         // sensible at the Sink.
+        agent.queuedAt = now;
+        agent.enteredBlockAt = now;
         b.queue.push(agent);
         if (b.queue.length >= b.batchSize) {
           const totalPieces = b.queue.reduce((s, a) => s + a.pieces, 0);
@@ -1453,6 +1747,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // queued agent. Combine: 2 inputs → 1 merged agent. Assembler:
         // N inputs → 1 merged agent (sums pieces). Implicit recipe in
         // v1 is "one agent on every input port".
+        agent.queuedAt = now;
+        agent.enteredBlockAt = now;
         const list = b.queueByInputPort.get(targetInPort) ?? [];
         list.push(agent);
         b.queueByInputPort.set(targetInPort, list);
@@ -1463,6 +1759,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // Like Combine but emits each agent on its own paired output
         // (pass-through pairing — Match's purpose is synchronization,
         // not merging). With ports `in1`/`in2` → `out1`/`out2`.
+        agent.queuedAt = now;
+        agent.enteredBlockAt = now;
         const list = b.queueByInputPort.get(targetInPort) ?? [];
         list.push(agent);
         b.queueByInputPort.set(targetInPort, list);
@@ -1507,9 +1805,17 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (spec.inputs.length === 0 || spec.outputs.length === 0) return;
     // While every input port has an agent, pop one from each and fire.
     while (spec.inputs.every((p) => (b.queueByInputPort.get(p.id)?.length ?? 0) > 0)) {
+      advanceAreas(b, now);
       const popped: Agent[] = spec.inputs.map(
         (p) => b.queueByInputPort.get(p.id)!.shift()!,
       );
+      // Each popped agent's port wait ends here.
+      for (const a of popped) {
+        b.waitSumMin += Math.max(0, now - (a.queuedAt ?? now));
+        b.waitStarts += 1;
+        b.sojournSumMin += Math.max(0, now - (a.enteredBlockAt ?? now));
+        b.sojournExits += 1;
+      }
       if (emitMerged) {
         const totalPieces = popped.reduce((s, a) => s + a.pieces, 0);
         const oldestBornAt = popped.reduce((m, a) => Math.min(m, a.bornAt), popped[0].bornAt);
@@ -1540,7 +1846,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (b.kind !== 'Queue') return;
     while (b.queue.length > 0) {
       if (!tryForwardFirstOutput(b, b.queue[0], now)) break; // downstream full
-      b.queue.shift();
+      advanceAreas(b, now);
+      const moved = b.queue.shift()!;
+      // A Queue block has no servers, so "leaving the queue" IS leaving the
+      // block: credit both the wait and the sojourn from the same instant.
+      b.waitSumMin += Math.max(0, now - (moved.queuedAt ?? now));
+      b.waitStarts += 1;
+      b.sojournSumMin += Math.max(0, now - (moved.enteredBlockAt ?? now));
+      b.sojournExits += 1;
       // Freed a slot in this Queue — a blocked upstream may now advance.
       notifyFeeders(b, now);
     }
@@ -1619,6 +1932,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // the op didn't pin a route — re-queues onto this same Service block.
     const routeToOpId = params.routeToOpId;
     if (!routeToOpId) {
+      advanceAreas(b, now);
+      agent.queuedAt = now;
+      agent.enteredBlockAt = now;
       b.queue.push(agent);
       tryStartService(b, now);
       return true;
@@ -1633,6 +1949,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         );
         warnedReworkMissing.add(routeToOpId);
       }
+      advanceAreas(b, now);
+      agent.queuedAt = now;
+      agent.enteredBlockAt = now;
       b.queue.push(agent);
       tryStartService(b, now);
       return true;
@@ -1655,6 +1974,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // true, so this is exactly the old push behaviour.
       if (!canAcceptAt(t.targetWsId)) {
         piecesLost += agent.pieces;
+        recordBalk(t.targetWsId, agent.pieces);
         warnLossOnce(b);
         continue;
       }
@@ -1691,6 +2011,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     for (const t of targets) {
       if (!canAcceptAt(t.targetWsId)) {
         piecesLost += agent.pieces;
+        recordBalk(t.targetWsId, agent.pieces);
         warnLossOnce(b);
         continue;
       }
@@ -1700,16 +2021,26 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     return true;
   }
 
-  /** True when a Source can't emit because its single downstream target is
-   *  full — the Source then reschedules its next tick without emitting or
-   *  advancing its order state (back-pressure instead of dropping WIP). */
-  function sourceBlocked(src: BlockState): boolean {
+  /**
+   * The single downstream target that is currently full, or null when the
+   * Source can emit. The Source then reschedules its next tick without
+   * emitting or advancing its order state (back-pressure instead of dropping
+   * WIP).
+   *
+   * Returning the id rather than a boolean is what lets the caller credit a
+   * BALK against that target. A non-null result at an arrival epoch is exactly
+   * the textbook event "an arrival found the system full and was turned away":
+   * under exponential inter-arrivals, retrying at the next drawn gap is
+   * memoryless, so the ADMITTED process is identical to classical balking —
+   * only the bookkeeping was missing.
+   */
+  function blockedSourceTarget(src: BlockState): string | null {
     const spec = getBlockSpec(src.ws);
     const portId = spec.outputs[0]?.id;
-    if (!portId) return false;
+    if (!portId) return null;
     const targets = routing.get(src.ws.id)?.outputs.get(portId) ?? [];
-    if (targets.length !== 1) return false; // fan-out / no target — don't stall
-    return !canAcceptAt(targets[0].targetWsId);
+    if (targets.length !== 1) return null; // fan-out / no target — don't stall
+    return canAcceptAt(targets[0].targetWsId) ? null : targets[0].targetWsId;
   }
 
   /** Re-attempt the forward a block was blocked on (fired by a retryForward
@@ -1723,7 +2054,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     let freed = false;
     while (b.blocked.length > 0) {
       if (!tryForwardFirstOutput(b, b.blocked[0], now)) break;
+      advanceAreas(b, now);
       const moved = b.blocked.shift()!;
+      b.sojournSumMin += Math.max(0, now - (moved.enteredBlockAt ?? now));
+      b.sojournExits += 1;
       emitFlow('unblock', moved, b.ws.id);
       freeServer(b, now);
       freed = true;
@@ -1767,6 +2101,31 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       continue;
     }
 
+    if (e.kind === 'warmupReset') {
+      // Discard the transient. The event calendar and the agent population are
+      // untouched — only the ACCOUNTING restarts, so the queues the run has
+      // built up so far stay in place and steady state is not re-approached.
+      for (const b of blocks.values()) {
+        advanceAreas(b, now);
+        b.areaLq = 0;
+        b.areaL = 0;
+        b.areaBusyServers = 0;
+        b.areaBlockedServers = 0;
+        b.balked = 0;
+        b.balkedPieces = 0;
+        b.waitSumMin = 0;
+        b.waitStarts = 0;
+        b.sojournSumMin = 0;
+        b.sojournExits = 0;
+        b.blockedMin = 0;
+        if (b.blockedSince !== null) b.blockedSince = now;
+        b.warmupAt = now;
+        b.warmupInflow = b.inflow;
+        b.warmupOutflowPieces = b.kind === 'Sink' ? b.inflowPieces : b.outflowPieces;
+      }
+      continue;
+    }
+
     if (e.kind === 'sourceTick') {
       const src = blocks.get(e.wsId);
       if (!src) continue;
@@ -1794,7 +2153,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // P2 back-pressure: if the line's entry buffer is full, don't emit
         // (and don't advance order state / stamp firstEmittedAt) — retry at
         // the next arrival beat. The WIP waits in staging rather than dropping.
-        if (sourceBlocked(src)) {
+        const fullTargetOrdered = blockedSourceTarget(src);
+        if (fullTargetOrdered) {
+          recordBalk(fullTargetOrdered, src.piecesPerAgent);
           pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
           continue;
         }
@@ -1861,7 +2222,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // ── Legacy infinite-source path ───────────────────────────────────
       // P2 back-pressure: reschedule without emitting when the downstream
       // entry buffer is full (unbounded default ⇒ never blocks).
-      if (sourceBlocked(src)) {
+      const fullTarget = blockedSourceTarget(src);
+      if (fullTarget) {
+        recordBalk(fullTarget, src.piecesPerAgent);
         pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
         continue;
       }
@@ -1915,9 +2278,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // (counted in inService) so no new service starts here until a
       // retryForward clears the block.
       if (tryForwardFirstOutput(b, a, now)) {
+        b.sojournSumMin += Math.max(0, now - (a.enteredBlockAt ?? now));
+        b.sojournExits += 1;
         freeServer(b, now);
         tryStartService(b, now);
       } else {
+        // Becoming blocked moves a server from PRODUCTIVE to BLOCKED, and the
+        // two areas are tracked separately — credit the pre-transition split
+        // before the push.
+        advanceAreas(b, now);
         b.blocked.push(a);
         if (b.blockedSince === null) b.blockedSince = now;
         emitFlow('block', a, b.ws.id);
@@ -1962,12 +2331,17 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   }
 
   // ── Final pool-utilisation flush ──────────────────────────────────────────
-  for (const pool of deptPools.values()) {
+  for (const pool of operatorPools.values()) {
     bumpPoolAccum(pool, durationMin);
   }
 
   // ── Close any still-open blocking intervals at end-of-run ──────────────────
-  for (const b of blocks.values()) endBlockInterval(b, durationMin);
+  // Flush the time-integrals to the shift bell first, so the final span
+  // between the last event and `durationMin` is credited.
+  for (const b of blocks.values()) {
+    advanceAreas(b, durationMin);
+    endBlockInterval(b, durationMin);
+  }
 
   // ── Build per-block observed metrics ──────────────────────────────────────
   const blockObs = new Map<string, BlockObserved>();
@@ -1986,20 +2360,31 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // are conserved across the chain even when agent counts collapse
     // (Batch) or expand (Unbatch).
     const totalOut = b.kind === 'Sink' ? b.inflowPieces : b.outflowPieces;
+    // The observation window: post-warm-up when truncation was requested,
+    // otherwise the whole run.
+    const observedMin = Math.max(1e-9, durationMin - b.warmupAt);
+    const observedOut = totalOut - b.warmupOutflowPieces;
+    const arrivals = b.inflow - b.warmupInflow;
+    const offered = arrivals + b.balked;
+
     let resourceBusy = 0;
-    let utilization = 0;
+    let poolUtilization = 0;
     if (b.kind === 'Service') {
-      const pool = deptPools.get(b.ws.deptId);
-      // Per-block utilization is approximated by service busyMin / capacity
-      // available across the whole run. This is fine for a single Service
-      // in a dept; for shared pools the dept-level utilisation is more
-      // informative (rendered in the runner).
       resourceBusy = b.busyMin;
-      utilization =
+      const pool = operatorPools.get(poolKeyFor(b.ws));
+      poolUtilization =
         pool && pool.capacity > 0
-          ? Math.min(1, resourceBusy / (pool.capacity * durationMin))
+          ? Math.min(1, resourceBusy / (pool.capacity * observedMin))
           : 0;
     }
+    // ρ̂ for THIS station: productive server-minutes over available
+    // server-minutes. Previously this divided by the department-wide pool
+    // capacity, so a station busy 400/480 min on a 20-operator line reported
+    // 4.2 % instead of 83 % — and that number is what gets persisted onto the
+    // workstation as `kpiObserved.utilizationPct`.
+    const utilization =
+      b.servers > 0 ? Math.min(1, b.areaBusyServers / (b.servers * observedMin)) : 0;
+
     blockObs.set(b.ws.id, {
       wsId: b.ws.id,
       kind: b.kind,
@@ -2008,10 +2393,26 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       busyMin: b.busyMin,
       resourceBusyUnitMin: resourceBusy,
       perPortOut: Object.fromEntries(b.outflowByPort),
-      throughputPerHr: durationMin > 0 ? (totalOut * 60) / durationMin : 0,
+      throughputPerHr: observedMin > 0 ? (observedOut * 60) / observedMin : 0,
       utilization,
+      poolUtilization,
       bottleneck: false,
       blockedMin: b.blockedMin,
+      // ── P5 measured queueing observables ──────────────────────────────────
+      observedMin,
+      serversTotal: b.servers,
+      systemCapacity: b.sysCapacity,
+      arrivals,
+      balked: b.balked,
+      lambdaOfferedPerHr: (offered * 60) / observedMin,
+      lambdaEffPerHr: (arrivals * 60) / observedMin,
+      LqObserved: b.areaLq / observedMin,
+      LObserved: b.areaL / observedMin,
+      WqObservedMin: b.waitStarts > 0 ? b.waitSumMin / b.waitStarts : 0,
+      areaLq: b.areaLq,
+      areaL: b.areaL,
+      areaBusy: b.areaBusyServers,
+      areaBlocked: b.areaBlockedServers,
     });
   }
   if (bottleneckWsId) {

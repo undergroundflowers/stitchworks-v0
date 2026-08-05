@@ -84,7 +84,7 @@ describe('PML finite buffers + blocking-after-service', () => {
 
   it('keeps every capped block within its system capacity K', () => {
     for (const s of capped.samples) {
-      for (const [wsId, b] of s.blocks) {
+      for (const [wsId, b] of Object.entries(s.blocks)) {
         if (!cappedIds.has(wsId)) continue;
         // system = waiting (queueLen) + in-service/blocked (busy). Rework
         // re-entry is exempt from capacity (documented), so allow a small
@@ -103,7 +103,7 @@ describe('PML finite buffers + blocking-after-service', () => {
     const maxWip = (r: typeof capped) =>
       Math.max(
         0,
-        ...r.samples.flatMap((s) => [...s.blocks.values()].map((b) => b.queueLen + b.busy)),
+        ...r.samples.flatMap((s) => Object.values(s.blocks).map((b) => b.queueLen + b.busy)),
       );
     expect(maxWip(capped)).toBeLessThan(maxWip(uncapped));
   });

@@ -30,14 +30,25 @@ import {
 } from '../domain/pml';
 import { defaultDist, distFromOpNotes, scaleServiceDist } from './distributions';
 import type { ServiceDist } from './distributions';
-import { analyticalKpis, classify, type AnalyticalKpis } from './queueing';
+import {
+  analyticalKpis,
+  classify,
+  type AnalyticalKpis,
+  type KendallNotation,
+  type QueueDiscipline,
+} from './queueing';
 import type {
   HistoryPoint,
   SimState,
   StationHistoryPoint,
   StationView,
 } from './sim-state';
-import type { PmlSimResult, PmlSimSample } from './pml-engine';
+import {
+  serversFor,
+  systemCapacityFor,
+  type PmlSimResult,
+  type PmlSimSample,
+} from './pml-engine';
 import type {
   BuildFromTwinMeta,
   InfraWorkstation,
@@ -80,9 +91,20 @@ export interface PmlTwinView {
   infrastructure: InfraWorkstation[];
   /** Cached `BuildFromTwinMeta` for the ISO/TOP/HEAT layout. */
   meta: BuildFromTwinMeta;
+  /**
+   * Names of stations whose authored queue discipline is NOT FCFS. The engine
+   * dequeues strictly FIFO (`queue.shift()`), so SIRO / Priority change the
+   * Kendall label and nothing else. Surfaced so the UI can badge them "not
+   * simulated" rather than implying the discipline was honoured.
+   *
+   * Worth noting for the user: Lq, L and ρ are discipline-invariant for
+   * M/M/c, so the analytical values stay valid — it is the wait-time
+   * DISTRIBUTION that differs, not its mean.
+   */
+  nonFifoStations: string[];
 }
 
-interface StationStatic {
+export interface StationStatic {
   wsId: string;
   ws: Workstation;
   /** opId from `ws.operation.opId` or a synthesized fallback (`ws-${id}`). */
@@ -92,8 +114,21 @@ interface StationStatic {
   machineCode: string;
   smv: number;
   serviceDist: ServiceDist;
-  /** System capacity (queue + in-service). Infinity when unbounded. */
+  /** System capacity N (queue + in-service). Infinity when unbounded.
+   *  Resolved through the engine's own `systemCapacityFor`. */
   capacity: number;
+  /** Parallel servers c. Resolved through the engine's own `serversFor`. */
+  servers: number;
+  /** Authored queue discipline. The engine dequeues FIFO regardless — see
+   *  the warning raised in `buildPmlTwinView`. */
+  discipline: QueueDiscipline;
+  /**
+   * Kendall–Lee notation. STATIC for the whole run, so it is resolved once
+   * here instead of per-frame-per-station: `classify` builds a label string
+   * and the M/M/c path runs factorials, neither of which should be in the
+   * playback hot loop.
+   */
+  notation: KendallNotation;
 }
 
 /**
@@ -132,6 +167,11 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     if (capped < 1) shareFactorByWs.set(wsId, capped);
   }
 
+  /** Stations whose authored discipline the engine can't honour — collected
+   *  so the UI can badge them instead of silently implying SIRO/Priority was
+   *  simulated. */
+  const nonFifoStations: string[] = [];
+
   for (const ws of twin.workstations) {
     const spec = getBlockSpec(ws);
     if (NON_STATION_KINDS.has(spec.kind)) {
@@ -160,7 +200,18 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     // shared. shareFactor=1 ⇒ identity, no allocation churn.
     const shareFactor = shareFactorByWs.get(ws.id) ?? 1;
     const serviceDist = shareFactor < 1 ? scaleServiceDist(nominalDist, 1 / shareFactor) : nominalDist;
-    const capacity = ws.block?.params?.capacity ?? Infinity;
+    // c and N come from the ENGINE's own resolvers. This used to read
+    // `ws.block?.params?.capacity` — the ResourcePool unit count, not the
+    // system capacity K. The engine reads `queueCapacity` via
+    // `systemCapacityFor`, so an authored finite buffer correctly
+    // back-pressured the DES while the analytical layer still classified the
+    // station M/M/c with N = ∞: the M/M/c/N branch of `analyticalKpis` could
+    // never fire, and Lq/Wq were reported for the wrong model. Sharing one
+    // resolver is what makes that class of drift impossible.
+    const capacity = systemCapacityFor(ws);
+    const servers = serversFor(ws);
+    const discipline = op?.queueDiscipline ?? 'FCFS';
+    if (discipline !== 'FCFS') nonFifoStations.push(opName);
 
     stations.push({
       wsId: ws.id,
@@ -172,6 +223,9 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
       smv: shareFactor < 1 ? smv / shareFactor : smv,
       serviceDist,
       capacity,
+      servers,
+      discipline,
+      notation: classify(serviceDist, servers, capacity, discipline),
     });
     twinMetaStations.push({
       opId,
@@ -230,7 +284,7 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     garmentPinned: !!garment,
   };
 
-  return { stations, infrastructure, meta };
+  return { stations, infrastructure, meta, nonFifoStations };
 }
 
 /**
@@ -272,92 +326,259 @@ export function emptyPmlSimState(): SimState {
     history: [],
     stationHistory: [],
     events: [],
+    warnings: [],
   };
+}
+
+/** Neutral analytical result for a station whose λ/μ combination the
+ *  closed-form layer refuses (ρ ≥ 1 on an unbounded queue, μ = 0, …). */
+function unstableAnalytical(lambda: number): AnalyticalKpis {
+  return {
+    rho: 0,
+    P0: 1,
+    Pn: () => 0,
+    Lq: 0,
+    Wq: 0,
+    L: 0,
+    W: 0,
+    D: NaN,
+    isStable: false,
+    pWaitGreaterThan: () => 0,
+    lambdaEff: lambda,
+  };
+}
+
+function safeAnalytical(
+  notation: KendallNotation,
+  lambda: number,
+  dist: ServiceDist,
+): AnalyticalKpis {
+  try {
+    return analyticalKpis(notation, lambda, dist);
+  } catch {
+    return unstableAnalytical(lambda);
+  }
+}
+
+/** Zero row for a station the sample doesn't carry (defensive — only happens
+ *  if a twin and a run disagree about their workstation set). */
+function emptyStationView(st: StationStatic): StationView {
+  return {
+    wsId: st.wsId,
+    opId: st.opId,
+    opCode: st.opCode,
+    opName: st.opName,
+    machineCode: st.machineCode,
+    smv: st.smv,
+    serversTotal: st.servers,
+    busy: 0,
+    queueLen: 0,
+    blocked: 0,
+    produced: 0,
+    totalBusyTime: 0,
+    utilization: 0,
+    notation: st.notation,
+    serviceDist: st.serviceDist,
+    capacity: st.capacity,
+    arrivals: 0,
+    balked: 0,
+    lambda: 0,
+    analytical: unstableAnalytical(0),
+    isStable: false,
+    lambdaEff: 0,
+    LqObserved: 0,
+    LObserved: 0,
+    WqObservedMin: 0,
+    balkFraction: 0,
+    disciplineNotSimulated: st.discipline !== 'FCFS',
+  };
+}
+
+/**
+ * One line-level history point from ONE sample. O(stations), no history walk.
+ */
+export function historyPointFrom(view: PmlTwinView, sample: PmlSimSample): HistoryPoint {
+  const hr = sample.time / 60;
+  let wip = 0;
+  for (const st of view.stations) {
+    const snap = sample.blocks[st.wsId];
+    if (snap) wip += snap.queueLen + snap.busy;
+  }
+  return {
+    time: sample.time,
+    produced: sample.produced,
+    wip,
+    throughputPerHr: hr > 0 ? sample.produced / hr : 0,
+  };
+}
+
+/**
+ * One per-station history point. O(1).
+ *
+ * Every time-average is computed by DIFFERENCING the cumulative integrals
+ * against `warmupSample`, so the plotted curve is the post-transient estimate
+ * when a warm-up is in play and the whole-run estimate when it isn't.
+ */
+export function stationHistoryPointFrom(
+  st: StationStatic,
+  sample: PmlSimSample,
+  warmupSample?: PmlSimSample,
+): StationHistoryPoint {
+  const snap = sample.blocks[st.wsId];
+  const base = warmupSample?.blocks[st.wsId];
+  const t0 = warmupSample?.time ?? 0;
+  const win = Math.max(1e-9, sample.time - t0);
+  if (!snap) {
+    return {
+      time: sample.time,
+      utilization: 0,
+      inSystem: 0,
+      queueLen: 0,
+      meanWqMin: 0,
+      inSystemNow: 0,
+      queueLenNow: 0,
+    };
+  }
+  const dBusy = snap.areaBusy - (base?.areaBusy ?? 0);
+  const dAreaL = snap.areaL - (base?.areaL ?? 0);
+  const dAreaLq = snap.areaLq - (base?.areaLq ?? 0);
+  const dWaitSum = snap.waitSumMin - (base?.waitSumMin ?? 0);
+  const dWaitN = snap.waitStarts - (base?.waitStarts ?? 0);
+  const c = Math.max(1, snap.serversTotal);
+  return {
+    time: sample.time,
+    utilization: dBusy / (c * win),
+    inSystem: dAreaL / win,
+    queueLen: dAreaLq / win,
+    meanWqMin: dWaitN > 0 ? dWaitSum / dWaitN : 0,
+    inSystemNow: snap.queueLen + snap.busy,
+    queueLenNow: snap.queueLen,
+  };
+}
+
+/** Derive an event feed from what changed between two samples. */
+function eventsBetween(
+  view: PmlTwinView,
+  prev: PmlSimSample | undefined,
+  cur: PmlSimSample,
+): SimState['events'] {
+  const out: SimState['events'] = [];
+  if (!prev) return out;
+  const dProduced = cur.produced - prev.produced;
+  if (dProduced > 0) {
+    out.push({ time: cur.time, tag: 'OUT', msg: `${dProduced} pcs sunk` });
+  }
+  for (const st of view.stations) {
+    const a = prev.blocks[st.wsId];
+    const b = cur.blocks[st.wsId];
+    if (!a || !b) continue;
+    if (b.blocked > 0 && a.blocked === 0) {
+      out.push({ time: cur.time, tag: 'BLOCK', msg: `${st.opName} blocked — downstream buffer full` });
+    }
+    if (b.balked > a.balked) {
+      out.push({
+        time: cur.time,
+        tag: 'IN',
+        msg: `${st.opName} turned away ${b.balked - a.balked} arrival(s) — buffer full`,
+      });
+    }
+    if (b.busy === 0 && b.queueLen === 0 && a.busy > 0) {
+      out.push({ time: cur.time, tag: 'STARVE', msg: `${st.opName} starved — nothing to work on` });
+    }
+  }
+  return out.slice(0, 60);
+}
+
+export interface SampleToStateOpts {
+  /**
+   * Sample at the warm-up boundary. When supplied, every time-averaged
+   * observable is computed by differencing (`sample − warmupSample`), so the
+   * displayed ρ̂ / L̄q / Ŵq describe the post-transient regime only. Omit for
+   * whole-run figures.
+   */
+  warmupSample?: PmlSimSample;
 }
 
 /**
  * Convert one PML sample into a legacy `SimState`. The caller is expected
  * to memoize a `PmlTwinView` for the active twin and pass it in — it carries
- * everything that doesn't change frame-to-frame (opId / opName / smv etc.).
+ * everything that doesn't change frame-to-frame (opId / opName / smv, and now
+ * the Kendall classification too).
  *
- * `history` and `stationHistory` are built incrementally from `priorSamples`,
- * sampled at 5-minute intervals to match the legacy engine's cadence so
- * existing chart consumers (QueueAnalytics, KPI cards) work unchanged.
+ * `history` and `stationHistory` are still rebuilt from `priorSamples` here.
+ * That is O(frames × stations) per rendered frame and is replaced by an
+ * incremental append in the shared sim session; the pure per-point builders
+ * above (`historyPointFrom`, `stationHistoryPointFrom`) are what that will
+ * call, and are used below so both paths produce identical points.
  */
 export function pmlSampleToSimState(
   view: PmlTwinView,
   sample: PmlSimSample,
   result: PmlSimResult | null,
   priorSamples: PmlSimSample[],
+  opts?: SampleToStateOpts,
 ): SimState {
   const t = sample.time;
-  const elapsedHr = t / 60;
+  const warm = opts?.warmupSample;
+  const t0 = warm?.time ?? 0;
+  // The observation window. Everything below is measured across it, so a
+  // caller can discard the start-up transient without the engine or the
+  // charts having to know where the boundary is.
+  const win = Math.max(1e-9, t - t0);
+  const winHr = win / 60;
+
   const stations: StationView[] = view.stations.map((st) => {
-    const snap = sample.blocks.get(st.wsId);
-    const busy = snap?.busy ?? 0;
-    const queueLen = snap?.queueLen ?? 0;
-    const blocked = snap?.blocked ?? 0;
-    const produced = snap?.producedPieces ?? 0;
-    const serversTotal = snap?.serversTotal ?? 1;
-    // Utilization shape matches the legacy engine's contract:
-    //   utilization = totalBusyTime / (serversTotal · time)
-    //
-    // When the PML run has finished, `result.blocks` carries the cumulative
-    // `busyMin` per Service block — use that directly, which matches the
-    // legacy "cumulative ρ̂" Reports / KPI tiles expect. Mid-run (no result
-    // yet) we approximate from the live `busy` slot count; both shapes
-    // overlap when the line is at steady state.
-    const observed = result?.blocks.get(st.wsId);
-    const cumulativeBusyMin = observed?.busyMin ?? 0;
-    const totalBusyTime = result ? cumulativeBusyMin : busy * t;
-    const utilization =
-      serversTotal > 0 && t > 0
-        ? totalBusyTime / (serversTotal * t)
-        : 0;
-    const lambda = elapsedHr > 0 ? produced / elapsedHr : 0;
-    const notation = classify(st.serviceDist, serversTotal, st.capacity, 'FCFS');
-    let analytical: AnalyticalKpis;
-    try {
-      analytical = analyticalKpis(notation, lambda, st.serviceDist);
-    } catch {
-      analytical = {
-        rho: 0,
-        P0: 1,
-        Pn: () => 0,
-        Lq: 0,
-        Wq: 0,
-        L: 0,
-        W: 0,
-        D: NaN,
-        isStable: false,
-        pWaitGreaterThan: () => 0,
-        lambdaEff: lambda,
-      };
-    }
+    const snap = sample.blocks[st.wsId];
+    if (!snap) return emptyStationView(st);
+    const base = warm?.blocks[st.wsId];
+
+    // Windowed deltas. With no warm-up these equal the raw cumulative values,
+    // so behaviour is unchanged for callers that don't pass one.
+    const dArr = snap.arrivals - (base?.arrivals ?? 0);
+    const dBalk = snap.balked - (base?.balked ?? 0);
+    const dAreaLq = snap.areaLq - (base?.areaLq ?? 0);
+    const dAreaL = snap.areaL - (base?.areaL ?? 0);
+    const dBusy = snap.areaBusy - (base?.areaBusy ?? 0);
+    const dWaitSum = snap.waitSumMin - (base?.waitSumMin ?? 0);
+    const dWaitN = snap.waitStarts - (base?.waitStarts ?? 0);
+
+    const serversTotal = Math.max(1, snap.serversTotal);
+    const offered = dArr + dBalk;
+    // λ is the OFFERED ARRIVAL rate. Feeding the departure rate here made
+    // ρ → 1 by construction at any saturated station.
+    const lambda = offered / winHr;
+    // Cumulative ρ̂ over the window, from the productive-service integral.
+    const utilization = dBusy / (serversTotal * win);
+    const analytical = safeAnalytical(st.notation, lambda, st.serviceDist);
+
     return {
+      wsId: st.wsId,
       opId: st.opId,
       opCode: st.opCode,
       opName: st.opName,
       machineCode: st.machineCode,
       smv: st.smv,
       serversTotal,
-      busy,
-      queueLen,
-      blocked,
-      produced,
-      totalBusyTime,
+      busy: snap.busy,
+      queueLen: snap.queueLen,
+      blocked: snap.blocked,
+      produced: snap.producedPieces,
+      totalBusyTime: dBusy,
       utilization,
-      notation,
+      notation: st.notation,
       serviceDist: st.serviceDist,
       capacity: st.capacity,
-      // Without per-station arrival accounting in PML samples, the best
-      // proxy is the cumulative pieces processed plus what's currently
-      // queued or in service — the offered count to this block over the run.
-      arrivals: produced + queueLen + busy,
-      balked: 0,
+      arrivals: offered,
+      balked: dBalk,
       lambda,
       analytical,
       isStable: analytical.isStable,
+      lambdaEff: dArr / winHr,
+      LqObserved: dAreaLq / win,
+      LObserved: dAreaL / win,
+      WqObservedMin: dWaitN > 0 ? dWaitSum / dWaitN : 0,
+      balkFraction: offered > 0 ? dBalk / offered : 0,
+      disciplineNotSimulated: st.discipline !== 'FCFS',
     };
   });
 
@@ -368,60 +589,31 @@ export function pmlSampleToSimState(
     ? view.stations.findIndex((s) => s.wsId === sample.bottleneckWsId)
     : -1;
 
-  // History: rebuild incrementally from priorSamples, downsampled to one
-  // point per 5 sim-minutes so the chart cadence matches legacy.
+  // History: rebuild from priorSamples, downsampled to one point per 5 sim
+  // minutes so the chart cadence matches what existing consumers expect.
   const history: HistoryPoint[] = [];
   const stationHistory: StationHistoryPoint[][] = view.stations.map(() => []);
   let lastHistTime = -Infinity;
   for (const s of priorSamples) {
     if (s.time - lastHistTime < 5 && s.time !== t) continue;
     lastHistTime = s.time;
-    const hr = s.time / 60;
-    const tputPerHr = hr > 0 ? s.produced / hr : 0;
-    // WIP = sum of (queueLen + inService) across stations at this sample.
-    let wip = 0;
-    for (const st of view.stations) {
-      const snap = s.blocks.get(st.wsId);
-      if (snap) wip += snap.queueLen + snap.busy;
-    }
-    history.push({
-      time: s.time,
-      produced: s.produced,
-      wip,
-      throughputPerHr: tputPerHr,
-    });
+    history.push(historyPointFrom(view, s));
     view.stations.forEach((st, i) => {
-      const snap = s.blocks.get(st.wsId);
-      const busy = snap?.busy ?? 0;
-      const qL = snap?.queueLen ?? 0;
-      const sv = snap?.serversTotal ?? 1;
-      stationHistory[i].push({
-        time: s.time,
-        utilization: sv > 0 ? busy / sv : 0,
-        inSystem: busy + qL,
-        queueLen: qL,
-        // Running Wq is approximated by Little's law on the current snapshot:
-        // Wq ≈ Lq / λ. Approximate because we lack the per-bundle wait sum
-        // in PML samples — accurate over the long run for stable stations.
-        meanWqMin: (() => {
-          const elapsedH = s.time / 60;
-          const produced = snap?.producedPieces ?? 0;
-          const lam = elapsedH > 0 ? produced / elapsedH : 0;
-          return lam > 0 ? (qL / lam) * 60 : 0;
-        })(),
-      });
+      stationHistory[i].push(stationHistoryPointFrom(st, s, warm));
     });
   }
 
-  // Aggregate utilization across all stations — average ρ̂ at this moment.
-  const utilization =
-    stations.length > 0
-      ? stations.reduce((s, st) => s + st.utilization, 0) / stations.length
-      : 0;
+  // Line-level utilisation, weighted by servers rather than an unweighted mean
+  // of per-station percentages — a 3-server station at 90 % and a 1-server
+  // station at 30 % is not "60 % utilised".
+  let busyNumer = 0;
+  let busyDenom = 0;
+  for (const st of stations) {
+    busyNumer += st.totalBusyTime;
+    busyDenom += st.serversTotal * win;
+  }
+  const utilization = busyDenom > 0 ? busyNumer / busyDenom : 0;
 
-  // Total arrivals across the line: every Source block's outflow up to `t`.
-  // Approximated by max(produced + WIP) across the line — the bound is
-  // tight when there are no losses, which PML guarantees today.
   const wipNow = stations.reduce((s, st) => s + st.queueLen + st.busy, 0);
 
   return {
@@ -435,13 +627,14 @@ export function pmlSampleToSimState(
     stations,
     history,
     stationHistory,
-    // Event log is not yet emitted from PML samples — keep empty so consumers
-    // that read `state.events[]` don't crash. Follow-up ticket: stream sink
-    // / starve / block events from the engine into the sample.
-    events: result?.warnings.slice(0, 60).map((msg, i) => ({
-      time: t,
-      tag: 'BLOCK' as const,
-      msg: `${i + 1}. ${msg}`,
-    })) ?? [],
+    // Real events derived from what changed since the previous sample. This
+    // used to be `result.warnings` re-tagged as BLOCK and stamped with the
+    // current frame time, so a configuration diagnostic read as a floor event.
+    events: eventsBetween(
+      view,
+      priorSamples.length >= 2 ? priorSamples[priorSamples.length - 2] : undefined,
+      sample,
+    ),
+    warnings: result?.warnings ?? [],
   };
 }

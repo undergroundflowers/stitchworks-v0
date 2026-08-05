@@ -63,7 +63,16 @@ import {
 import type { PmlBlockOverride, PmlBlockParams } from '../domain/pml';
 import { getBlockSpec } from '../domain/pml';
 
-export const TWIN_STORE_SCHEMA_VERSION = 5 as const;
+/**
+ * v6 — the queueing pivot changed what `Workstation.kpiObserved.utilizationPct`
+ * MEANS. It used to be `busyMin / (departmentPoolCapacity · duration)`, which
+ * on a 20-operator line reported ~4 % for a station busy 83 % of the shift.
+ * It is now the station's own ρ̂. Persisted values written under the old
+ * definition are off by roughly the pool size, so the migration clears them
+ * rather than letting a stale 4 % sit next to a fresh 83 % in the Inspector.
+ * They are re-derived by the next run.
+ */
+export const TWIN_STORE_SCHEMA_VERSION = 6 as const;
 
 /** Maximum number of pre-mutation snapshots kept in the undo stack.
  *  Each snapshot is a structural clone of the full twin tree, so the cap
@@ -1211,7 +1220,7 @@ export const useTwin = create<TwinState>()(
       // v1 → v2: add `connectors: []` to canonical and every scenario's twin.
       // v2 → v4: drop the now-removed CAD underlay field (handled by
       // normalizeTwin, which simply ignores it on load).
-      // All upgrades are pure additions; existing factory data is unchanged.
+      // v5 → v6: clear `kpiObserved` — its utilizationPct changed meaning.
       migrate: (persisted, fromVersion) => {
         const s = (persisted ?? {}) as {
           canonical?: unknown;
@@ -1219,12 +1228,21 @@ export const useTwin = create<TwinState>()(
           activeScenarioId?: string | null;
         };
         if (fromVersion < TWIN_STORE_SCHEMA_VERSION) {
+          const clearStaleKpis = (t: Twin): Twin =>
+            fromVersion >= 6
+              ? t
+              : {
+                  ...t,
+                  workstations: t.workstations.map((ws) =>
+                    ws.kpiObserved ? { ...ws, kpiObserved: undefined } : ws,
+                  ),
+                };
           return {
             schemaVersion: TWIN_STORE_SCHEMA_VERSION,
-            canonical: normalizeTwin(s.canonical),
+            canonical: clearStaleKpis(normalizeTwin(s.canonical)),
             scenarios: (s.scenarios ?? []).map((scn) => ({
               ...scn,
-              twin: normalizeTwin(scn.twin),
+              twin: clearStaleKpis(normalizeTwin(scn.twin)),
               runs: scn.runs ?? [],
             })),
             activeScenarioId: s.activeScenarioId ?? null,
