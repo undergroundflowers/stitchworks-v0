@@ -1,8 +1,12 @@
 /**
- * Queue Analysis index — table of every workstation in the active garment,
- * one row per operation, showing Kendall–Lee classification, observed ρ,
- * Lq, L (WIP), and a click-through to the per-station inspector at
- * /workstation/:deptId/:wsId.
+ * Queue Analysis index — one row per workstation on the sewing lines in
+ * scope, showing the Kendall–Lee classification and the measured ρ̂ / L̄q
+ * beside the closed-form ρ / Lq they should converge to.
+ *
+ * Sim and theory sit in ADJACENT columns on purpose. The table used to print
+ * only the analytical values under bare "ρ" and "Lq" headers, which read as
+ * observations — so a station could look perfectly healthy while the run
+ * disagreed, and nothing on screen would say so.
  *
  * This is the top-level entry point for the queueing-theory module: pick a
  * station here, drill in for the deep view.
@@ -15,6 +19,7 @@ import {
   LineSimEmpty,
   QueueDiagram,
   SectionHeader,
+  SimTransportBar,
   WipSparkline,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
@@ -93,7 +98,8 @@ export function QueueIndexPage() {
             inspector.
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <SimTransportBar />
           <button
             type="button"
             onClick={() => reset()}
@@ -239,13 +245,16 @@ function StationTable({
           λ /hr
         </Col>
         <Col w="80px" right>
-          ρ
+          ρ̂ sim
         </Col>
         <Col w="70px" right>
-          Lq
+          ρ theory
         </Col>
         <Col w="70px" right>
-          L (WIP)
+          L̄q sim
+        </Col>
+        <Col w="70px" right>
+          Lq theory
         </Col>
         <Col w="100px">Flags</Col>
         <Col w="100px" />
@@ -271,13 +280,16 @@ function StationTable({
             {fmt2(s.lambda)}
           </Col>
           <Col w="80px" right mono>
-            <RhoCell value={s.analytical.rho} stable={s.isStable} />
+            <RhoCell value={s.utilization} stable={s.isStable} />
+          </Col>
+          <Col w="70px" right mono>
+            {fmt2(s.analytical.rho)}
+          </Col>
+          <Col w="70px" right mono>
+            {fmt2(s.LqObserved)}
           </Col>
           <Col w="70px" right mono>
             {fmt2(s.analytical.Lq)}
-          </Col>
-          <Col w="70px" right mono>
-            {fmt2(s.analytical.L)}
           </Col>
           <Col w="100px">
             {i === bottleneckIdx && <Tag color={SW_COLORS.alarm}>BOTTLENECK</Tag>}

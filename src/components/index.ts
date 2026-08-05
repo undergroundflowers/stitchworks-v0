@@ -13,6 +13,7 @@ export { HudSelect, type HudSelectOption, type HudSelectProps } from './HudSelec
 export { Slider } from './Slider';
 export { Yamazumi, autoAssign, type OperatorAssignment } from './Yamazumi';
 export { LineScopePicker, type LineScopePickerProps } from './LineScopePicker';
+export { SimTransportBar } from './SimTransportBar';
 export { LineSimEmpty, type LineSimEmptyProps } from './LineSimEmpty';
 export { QueueDiagram, type QueueDiagramProps } from './QueueDiagram';
 export { WipSparkline, type WipSparklineProps } from './WipSparkline';

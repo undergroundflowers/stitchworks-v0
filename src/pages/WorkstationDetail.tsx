@@ -14,7 +14,14 @@
 
 import { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Card, LineSimEmpty, SectionHeader, StationTimeseriesGrid } from '../components';
+import {
+  Card,
+  LineSimEmpty,
+  SectionHeader,
+  SimTransportBar,
+  StationTimeseriesGrid,
+} from '../components';
+import { BalkRatePanel, ConvergenceChart, LittlesLawCheck } from '../components/charts';
 import { QueueAnalysisPanel, type QueueAnalysisChange } from '../components/QueueAnalysisPanel';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
@@ -167,6 +174,47 @@ export function WorkstationDetailPage() {
       ) : (
         <Card>
           <p style={{ fontSize: 13, color: SW_COLORS.muted }}>Warming up the simulator…</p>
+        </Card>
+      )}
+
+      {/*
+        Sim-versus-theory convergence.
+
+        This section is the payoff of instrumenting the engine. Until ρ̂ was a
+        cumulative time-average from ∫busy dt, the "observed" line here was an
+        instantaneous 0/1 square wave that could never settle onto the analytical
+        target beside it — so drawing them together was actively misleading.
+        Watching them meet is the clearest evidence the model is sound, and a gap
+        that refuses to close is itself the finding.
+      */}
+      {station && (
+        <Card>
+          <SectionHeader
+            title="Simulated vs. theory"
+            sub="Solid = measured from the run. Dashed = the closed-form steady state for this station's Kendall–Lee class. They should converge as the shift plays."
+            right={<SimTransportBar />}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <ConvergenceChart
+              station={station}
+              history={state.stationHistory[stationIdx] ?? []}
+              metric="rho"
+            />
+            <ConvergenceChart
+              station={station}
+              history={state.stationHistory[stationIdx] ?? []}
+              metric="Lq"
+            />
+            <div style={{ borderTop: `1px solid ${SW_COLORS.line}`, paddingTop: 12 }}>
+              <LittlesLawCheck station={station} />
+            </div>
+            <div style={{ borderTop: `1px solid ${SW_COLORS.line}`, paddingTop: 12 }}>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.12em', marginBottom: 6 }}>
+                BALKING
+              </div>
+              <BalkRatePanel station={station} />
+            </div>
+          </div>
         </Card>
       )}
 

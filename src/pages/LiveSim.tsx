@@ -13,8 +13,14 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
+import {
+  CumulativeOutputChart,
+  ThroughputChart,
+  UtilizationBarChart,
+  WipChart,
+} from '../components/charts';
 import { Button, ToggleGroup, HudSelect, TimeDisplay, ViewTitle, EmptyState, type HudSelectOption } from '../components';
 import { SimStationDetail } from '../components/SimStationDetail';
 import {
@@ -1127,6 +1133,14 @@ export function LiveSimPage() {
               alignItems: 'flex-start',
               gap: 6,
               zIndex: 5,
+              // Bounded and scrollable: the curve rail can make this column
+              // taller than the viewport, and without a cap it ran underneath
+              // the floor legend. The reserve leaves that bottom-left corner
+              // free rather than relying on z-order to hide the collision.
+              maxHeight: 'calc(100% - 108px)',
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              paddingRight: 4,
             }}
           >
             <button
@@ -1309,6 +1323,22 @@ export function LiveSimPage() {
                     states={multiSim.states}
                   />
                 )}
+
+                {/*
+                  Live curves, directly under the tiles they belong to.
+
+                  The data was always here — `state.history` grows causally as
+                  playback advances — but this page read only its LAST element
+                  for the tiles and threw the rest away, so the only way to see
+                  a production curve was to leave the run and open Reports. The
+                  chart components were module-private inside Reports.tsx, which
+                  is why nobody had wired them up: they were unreachable.
+
+                  A tile answers "what is it now"; the curve answers "is it
+                  settling, climbing, or stalled", which is the question an IE is
+                  actually asking while watching a shift.
+                */}
+                <SimChartRail history={state.history} stations={state.stations} />
               </div>
             )}
           </div>
@@ -2218,7 +2248,7 @@ function PanZoomViewport({ viewKey, children }: { viewKey: string; children: Rea
             fontFamily: SW_FONTS.mono,
             fontSize: 10,
             fontWeight: 800,
-            color: '#ffffffcc',
+            color: alpha(SW_COLORS.ink, 0.8),
             letterSpacing: '0.1em',
           }}
         >
@@ -4983,3 +5013,102 @@ const DEPT_LINE_COLORS: Record<string, string> = {
 
 
 
+
+/**
+ * Collapsible strip of live curves inside the sim HUD.
+ *
+ * Dark-surface framing rather than the light `Card` the Reports grid uses, so
+ * it sits on the floor view without fighting it. The charts themselves are the
+ * same components Reports mounts — they take plain arrays and don't care
+ * whether the series came from a completed replication set or a run that is
+ * still playing.
+ */
+function SimChartRail({
+  history,
+  stations,
+}: {
+  history: SimState['history'];
+  stations: SimState['stations'];
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Nothing to draw before the clock has moved. Say so rather than rendering an
+  // empty frame that reads like a broken chart.
+  const ready = history.length >= 2;
+
+  return (
+    <div style={{ marginTop: 12, order: 3 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          ...SW_TYPE.micro,
+          width: '100%',
+          textAlign: 'left',
+          padding: '5px 8px',
+          borderRadius: SW_RADIUS.sm,
+          border: `1px solid ${alpha(SW_COLORS.ink, 0.14)}`,
+          background: alpha(SW_COLORS.ink, 0.05),
+          color: alpha(SW_COLORS.ink, 0.8),
+          cursor: 'pointer',
+          fontFamily: SW_FONTS.mono,
+        }}
+        title="Live curves for this run"
+      >
+        {open ? '▾' : '▸'} CURVES {ready ? '' : '· press play'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {ready ? (
+            <>
+              <MiniChartFrame label="CUMULATIVE OUTPUT">
+                <CumulativeOutputChart history={history} />
+              </MiniChartFrame>
+              <MiniChartFrame label="THROUGHPUT / HR">
+                <ThroughputChart history={history} />
+              </MiniChartFrame>
+              <MiniChartFrame label="WIP">
+                <WipChart
+                  history={history}
+                  meanWip={history.reduce((s, h) => s + h.wip, 0) / history.length}
+                />
+              </MiniChartFrame>
+              <MiniChartFrame label="STATION UTILISATION">
+                <UtilizationBarChart stations={stations.map((s) => ({ ...s, lineName: '' }))} />
+              </MiniChartFrame>
+            </>
+          ) : (
+            <div style={{ ...SW_TYPE.caption, color: alpha(SW_COLORS.ink, 0.4) }}>
+              Curves draw as the shift plays — hit ▶ PLAY, or ⏭ +1h to jump ahead.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniChartFrame({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        background: alpha(SW_COLORS.ink, 0.04),
+        border: `1px solid ${alpha(SW_COLORS.ink, 0.12)}`,
+        borderRadius: SW_RADIUS.sm,
+        padding: 8,
+      }}
+    >
+      <div
+        style={{
+          ...SW_TYPE.overline,
+          color: alpha(SW_COLORS.ink, 0.53),
+          marginBottom: 4,
+          fontFamily: SW_FONTS.mono,
+        }}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}

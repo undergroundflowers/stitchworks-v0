@@ -237,18 +237,29 @@ function StabilityDot({ color, label }: { color: string; label: string }) {
 
 function KpiTable({ station }: { station: StationView }) {
   const a = station.analytical;
-  // Sim ρ = totalBusyTime / (servers · time). We already exposed utilization on StationView.
-  const simRho = station.utilization;
-  // Sim instantaneous WIP at this station: busy + queueLen.
-  const simWip = station.busy + station.queueLen;
+  // Every SIM column is a TIME-AVERAGE, because that is the only thing
+  // comparable to a steady-state closed form.
+  //
+  // Lq and L used to read `station.queueLen` and `busy + queueLen` — the
+  // INSTANTANEOUS counts at the displayed frame. So this panel reported Lq =
+  // 0.00 for the bottleneck station at the same moment the queue table two
+  // clicks away reported 2.10, and neither number was wrong: they were
+  // answering different questions under the same label. Wq was simply blank.
   const rows: KpiRow[] = [
-    { label: 'ρ (utilization)', sim: simRho, theory: a.rho, format: pct },
-    { label: 'Lq (queue length)', sim: station.queueLen, theory: a.Lq, format: num2 },
-    { label: 'L (in system, WIP)', sim: simWip, theory: a.L, format: num2 },
-    { label: 'Wq (queue wait, min)', sim: NaN, theory: hoursToMin(a.Wq), format: num2 },
-    { label: 'W (system time, min)', sim: NaN, theory: hoursToMin(a.W), format: num2 },
-    { label: 'P₀ (idle prob)', sim: NaN, theory: a.P0, format: pct },
-    { label: 'λ observed (/hr)', sim: station.lambda, theory: a.lambdaEff, format: num2 },
+    { label: 'ρ (utilization)', sim: station.utilization, theory: a.rho, format: pct },
+    { label: 'Lq (avg queue length)', sim: station.LqObserved, theory: a.Lq, format: num2 },
+    { label: 'L (avg in system, WIP)', sim: station.LObserved, theory: a.L, format: num2 },
+    { label: 'Wq (avg queue wait, min)', sim: station.WqObservedMin, theory: hoursToMin(a.Wq), format: num2 },
+    // W = Wq + service time. The engine measures the wait; adding the mean
+    // service time is exact for a single server and the right first-cut for c>1.
+    {
+      label: 'W (avg system time, min)',
+      sim: station.WqObservedMin + station.smv,
+      theory: hoursToMin(a.W),
+      format: num2,
+    },
+    { label: 'P₀ (idle prob)', sim: 1 - station.utilization, theory: a.P0, format: pct },
+    { label: 'λ offered (/hr)', sim: station.lambda, theory: a.lambdaEff, format: num2 },
     { label: 'Balked', sim: station.balked, theory: NaN, format: intFmt },
   ];
   return (

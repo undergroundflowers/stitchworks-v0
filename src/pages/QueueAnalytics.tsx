@@ -21,6 +21,7 @@ import {
   LineScopePicker,
   LineSimEmpty,
   SectionHeader,
+  SimTransportBar,
   StationTimeseriesChart,
   StationTimeseriesGrid,
   ToggleGroup,
@@ -104,7 +105,8 @@ export function QueueAnalyticsPage() {
             dashed — those stations are the ones to tune first.
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <SimTransportBar />
           <button
             type="button"
             onClick={() => reset()}
