@@ -875,10 +875,55 @@ const FIELD_PIECES_PER_AGENT: ParamFieldSpec = {
   resolveDefault: (r) => r.piecesPerAgent,
 };
 
+/**
+ * Parallel servers c at a station.
+ *
+ * The engine and the analytical layer have always read this (via `serversFor`),
+ * but it was absent from the Inspector, so the only way to change c was to edit
+ * the shared garment operation — which retuned every station running that
+ * operation. On a balanced line that is most of the floor.
+ */
+const FIELD_SERVERS: ParamFieldSpec = {
+  id: 'servers',
+  label: 'Servers (c)',
+  unit: '',
+  step: 1,
+  hint:
+    'Operators or machines working this station in parallel. c = 2 means two '
+    + 'people doing the same operation side by side, which halves the queue but '
+    + 'costs an operator. Overrides the garment operation for THIS station only.',
+  resolveDefault: (r) => r.servers,
+};
+
+/**
+ * System capacity N — the M/M/c/N knob.
+ *
+ * Physically this is how much WIP can sit at a station: the cart, the rack, the
+ * hanger rail. Capping it is how a real floor stops a bottleneck from
+ * accumulating a mountain of bundles, and the engine models the consequence
+ * honestly — arrivals that find it full are turned away and counted.
+ */
+const FIELD_QUEUE_CAPACITY: ParamFieldSpec = {
+  id: 'queueCapacity',
+  label: 'Buffer (N)',
+  unit: ' max at station',
+  step: 1,
+  hint:
+    'Most bundles allowed at this station at once, waiting plus in service — '
+    + 'the cart or rack size. 0 = unbounded (M/M/c). Any positive value makes '
+    + 'it M/M/c/N: arrivals that find it full are turned away and counted as '
+    + 'balks, and the upstream station blocks rather than piling up. Note that '
+    + 'rework re-entry bypasses this cap.',
+  resolveDefault: (r) => r.queueCapacity,
+};
+
 /** Per-kind list of authored fields, in the order the Inspector renders. */
 export const PARAM_FIELDS_BY_KIND: Partial<Record<PmlBlockKind, ParamFieldSpec[]>> = {
   Source: [FIELD_SOURCE_RATE, FIELD_PIECES_PER_AGENT],
-  Service: [FIELD_CYCLE_S],
+  Service: [FIELD_CYCLE_S, FIELD_SERVERS, FIELD_QUEUE_CAPACITY],
+  // A Queue has no servers, but it does have a capacity, and the engine
+  // enforces it (`canAcceptAt`). It previously had no fields at all.
+  Queue: [FIELD_QUEUE_CAPACITY],
   Delay: [FIELD_CYCLE_S],
   Hold: [FIELD_CYCLE_S],
   Conveyor: [FIELD_CYCLE_S],

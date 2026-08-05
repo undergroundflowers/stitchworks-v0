@@ -422,9 +422,14 @@ export function historyPointFrom(view: PmlTwinView, sample: PmlSimSample): Histo
 export function stationHistoryPointFrom(
   st: StationStatic,
   sample: PmlSimSample,
-  warmupSample?: PmlSimSample,
+  warmupSampleIn?: PmlSimSample,
 ): StationHistoryPoint {
   const snap = sample.blocks[st.wsId];
+  // Same guard as `pmlSampleToSimState`: no post-warm-up window exists until
+  // the clock is past the boundary, so points before it are measured from t=0.
+  // Without this the first stretch of every curve is pinned to zero.
+  const warmupSample =
+    warmupSampleIn && warmupSampleIn.time < sample.time ? warmupSampleIn : undefined;
   const base = warmupSample?.blocks[st.wsId];
   const t0 = warmupSample?.time ?? 0;
   const win = Math.max(1e-9, sample.time - t0);
@@ -519,7 +524,13 @@ export function pmlSampleToSimState(
   opts?: SampleToStateOpts,
 ): SimState {
   const t = sample.time;
-  const warm = opts?.warmupSample;
+  // A warm-up window only exists once the clock is PAST the boundary. At or
+  // before it, differencing would give a zero-length window and every
+  // observable would come out 0/0 — which looked exactly like the bug this
+  // whole phase is about ("the table lists my line but all the numbers are
+  // zero"). Measuring from t=0 instead is the honest reading: you cannot yet
+  // report a post-transient average, so report what has actually happened.
+  const warm = opts?.warmupSample && opts.warmupSample.time < t ? opts.warmupSample : undefined;
   const t0 = warm?.time ?? 0;
   // The observation window. Everything below is measured across it, so a
   // caller can discard the start-up transient without the engine or the

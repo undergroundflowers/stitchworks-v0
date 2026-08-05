@@ -14,10 +14,12 @@
  * instead of the snapshot table.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Card,
+  LineScopePicker,
+  LineSimEmpty,
   SectionHeader,
   StationTimeseriesChart,
   StationTimeseriesGrid,
@@ -25,44 +27,36 @@ import {
   type StationMetric,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import {
-  meanOf,
-  usePmlSim,
-  EMPTY_TWIN,
-  type QueueDiscipline,
-  type StationView,
-} from '../simulation';
-import { buildGarmentTwin } from '../domain/reference-twin';
-import { useGarments } from '../store/garments';
-import { useProject } from '../store/project';
+import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
+import { useLineSim } from '../simulation/useLineSim';
+import { useSimSession } from '../simulation/useSimSession';
 import { DRILL_PATHS } from '../lib/routes';
-
-const WARMUP_MINUTES = 480;
 
 type ViewMode = 'strip' | 'compare';
 
 export function QueueAnalyticsPage() {
   const navigate = useNavigate();
-  const selectedGarmentId = useProject((s) => s.selectedGarmentId);
-  const defaultOperators = useProject((s) => s.defaultOperators);
-  const garments = useGarments();
-  const garment = garments.byId[selectedGarmentId] ?? garments.all[0];
-
-  // Synthesise a single-line twin from the garment so PML has a graph to run.
-  const twin = useMemo(
-    () => buildGarmentTwin(garment, defaultOperators) ?? EMPTY_TWIN,
-    [garment, defaultOperators],
-  );
-
-  const { state, step, reset } = usePmlSim(twin, { garment });
-
-  useEffect(() => {
-    if (state.time === 0) step(WARMUP_MINUTES);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Real lines through the shared session; see useLineSim for what this
+  // replaced.
+  const { state, lines, allLines, emptyReason, unassignedStationCount } = useLineSim();
+  const step = useSimSession((s) => s.step);
+  const reset = useSimSession((s) => s.reset);
+  const subject = lines.length === 1 ? lines[0].name : `${lines.length} sewing lines`;
 
   const [view, setView] = useState<ViewMode>('strip');
   const [metric, setMetric] = useState<StationMetric>('rho');
+
+  if (emptyReason) {
+    return (
+      <div style={{ padding: '20px 24px', height: '100%' }}>
+        <LineSimEmpty
+          reason={emptyReason}
+          unassignedStationCount={unassignedStationCount}
+          what="Queue analytics"
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -88,6 +82,9 @@ export function QueueAnalyticsPage() {
           >
             Σ · Queue analytics · time-series
           </div>
+          <div style={{ marginTop: 6 }}>
+            <LineScopePicker lines={allLines} />
+          </div>
           <h1
             style={{
               fontFamily: SW_FONTS.display,
@@ -98,7 +95,7 @@ export function QueueAnalyticsPage() {
               margin: '6px 0 0 0',
             }}
           >
-            How every station is moving
+            How {subject} is moving
           </h1>
           <div style={{ fontSize: 13, color: SW_COLORS.muted, marginTop: 4 }}>
             Four observables per station over simulated time. Solid line = what
@@ -110,14 +107,11 @@ export function QueueAnalyticsPage() {
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             type="button"
-            onClick={() => {
-              reset();
-              step(WARMUP_MINUTES);
-            }}
+            onClick={() => reset()}
             style={navBtn()}
-            title="Re-run the 8-hour warm-up"
+            title="Rewind the shared sim clock to the start of the shift"
           >
-            ⟲ Re-run sim
+            ⟲ Rewind
           </button>
           <button
             type="button"
@@ -183,7 +177,7 @@ export function QueueAnalyticsPage() {
           stations={state.stations}
           stationHistory={state.stationHistory}
           bottleneckIdx={state.bottleneckOpIndex}
-          onDrill={(opId) => navigate(DRILL_PATHS.workstation('sewing', opId))}
+          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
         />
       ) : (
         <CompareView
@@ -191,7 +185,7 @@ export function QueueAnalyticsPage() {
           stationHistory={state.stationHistory}
           bottleneckIdx={state.bottleneckOpIndex}
           metric={metric}
-          onDrill={(opId) => navigate(DRILL_PATHS.workstation('sewing', opId))}
+          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
         />
       )}
     </div>
@@ -211,7 +205,8 @@ function StripView({
   stations: StationView[];
   stationHistory: import('../simulation').StationHistoryPoint[][];
   bottleneckIdx: number;
-  onDrill: (opId: string) => void;
+  /** Receives a WORKSTATION id — two stations can share an operation. */
+  onDrill: (wsId: string) => void;
 }) {
   return (
     <Card>
@@ -222,11 +217,11 @@ function StripView({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {stations.map((s, i) => (
           <StationRow
-            key={s.opId}
+            key={s.wsId}
             station={s}
             history={stationHistory[i] ?? []}
             isBottleneck={i === bottleneckIdx}
-            onDrill={() => onDrill(s.opId)}
+            onDrill={() => onDrill(s.wsId)}
           />
         ))}
       </div>
@@ -273,7 +268,8 @@ function CompareView({
   stationHistory: import('../simulation').StationHistoryPoint[][];
   bottleneckIdx: number;
   metric: StationMetric;
-  onDrill: (opId: string) => void;
+  /** Receives a WORKSTATION id — two stations can share an operation. */
+  onDrill: (wsId: string) => void;
 }) {
   return (
     <Card>
@@ -287,7 +283,7 @@ function CompareView({
           const isBottleneck = i === bottleneckIdx;
           return (
             <div
-              key={s.opId}
+              key={s.wsId}
               style={{
                 padding: 10,
                 border: `1px solid ${isBottleneck ? SW_COLORS.alarm : SW_COLORS.line}`,
@@ -295,7 +291,7 @@ function CompareView({
                 background: isBottleneck ? `${SW_COLORS.alarm}08` : SW_COLORS.paper,
               }}
             >
-              <RowHeader station={s} isBottleneck={isBottleneck} onDrill={() => onDrill(s.opId)} />
+              <RowHeader station={s} isBottleneck={isBottleneck} onDrill={() => onDrill(s.wsId)} />
               <div style={{ marginTop: 8 }}>
                 <StationTimeseriesChart
                   history={stationHistory[i] ?? []}

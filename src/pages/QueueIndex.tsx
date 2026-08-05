@@ -8,43 +8,44 @@
  * station here, drill in for the deep view.
  */
 
-import { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, QueueDiagram, SectionHeader, WipSparkline } from '../components';
+import {
+  Card,
+  LineScopePicker,
+  LineSimEmpty,
+  QueueDiagram,
+  SectionHeader,
+  WipSparkline,
+} from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { usePmlSim, EMPTY_TWIN, type StationView } from '../simulation';
-import { buildGarmentTwin } from '../domain/reference-twin';
-import { useGarments } from '../store/garments';
-import { useProject } from '../store/project';
+import { type StationView } from '../simulation';
+import { useLineSim } from '../simulation/useLineSim';
+import { useSimSession } from '../simulation/useSimSession';
 import { DRILL_PATHS } from '../lib/routes';
-
-const WARMUP_MINUTES = 480; // 8-hour shift warm-up
 
 export function QueueIndexPage() {
   const navigate = useNavigate();
-  const selectedGarmentId = useProject((s) => s.selectedGarmentId);
-  const defaultOperators = useProject((s) => s.defaultOperators);
-  const garments = useGarments();
-  const garment = garments.byId[selectedGarmentId] ?? garments.all[0];
-
-  // Synthesise a single-line twin from the garment so PML has a graph to run.
-  // The page lists stations against the bulletin; this twin lays out the same
-  // ops in the same order and the adapter surfaces them in state.stations[].
-  // Falls back to an empty twin so the hook call stays unconditional even when
-  // the garment carries no ops (corner case — UI shows the empty-state below).
-  const twin = useMemo(
-    () => buildGarmentTwin(garment, defaultOperators) ?? EMPTY_TWIN,
-    [garment, defaultOperators],
-  );
-
-  const { state, step, reset } = usePmlSim(twin, { garment });
-
-  useEffect(() => {
-    if (state.time === 0) step(WARMUP_MINUTES);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The user's OWN lines, through the shared session — not a throwaway line
+  // synthesised from the selected garment template, which is what this page
+  // used to analyse.
+  const { state, lines, allLines, emptyReason, unassignedStationCount } = useLineSim();
+  const step = useSimSession((s) => s.step);
+  const reset = useSimSession((s) => s.reset);
 
   const bottleneckIdx = state.bottleneckOpIndex;
+  const subject = lines.length === 1 ? lines[0].name : `${lines.length} sewing lines`;
+
+  if (emptyReason) {
+    return (
+      <div style={{ padding: '20px 24px', height: '100%' }}>
+        <LineSimEmpty
+          reason={emptyReason}
+          unassignedStationCount={unassignedStationCount}
+          what="Queueing analysis"
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -70,6 +71,9 @@ export function QueueIndexPage() {
           >
             Σ · Queueing-theory analysis
           </div>
+          <div style={{ marginTop: 6 }}>
+            <LineScopePicker lines={allLines} />
+          </div>
           <h1
             style={{
               fontFamily: SW_FONTS.display,
@@ -80,7 +84,7 @@ export function QueueIndexPage() {
               margin: '6px 0 0 0',
             }}
           >
-            Stations on {garment?.name ?? '—'}
+            Stations on {subject}
           </h1>
           <div style={{ fontSize: 13, color: SW_COLORS.muted, marginTop: 4 }}>
             One row per workstation, classified in Kendall–Lee notation and
@@ -92,14 +96,11 @@ export function QueueIndexPage() {
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             type="button"
-            onClick={() => {
-              reset();
-              step(WARMUP_MINUTES);
-            }}
+            onClick={() => reset()}
             style={navBtn()}
-            title="Re-run 8-hour warm-up"
+            title="Rewind the shared sim clock to the start of the shift"
           >
-            ⟲ Re-run sim
+            ⟲ Rewind
           </button>
           <button
             type="button"
@@ -125,7 +126,7 @@ export function QueueIndexPage() {
         <StationTable
           stations={state.stations}
           bottleneckIdx={bottleneckIdx}
-          onPick={(opId) => navigate(DRILL_PATHS.workstation('sewing', opId))}
+          onPick={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
         />
       </Card>
 
@@ -164,10 +165,10 @@ export function QueueIndexPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {state.stations.map((s, i) => (
             <QueueDiagram
-              key={s.opId}
+              key={s.wsId}
               station={s}
               isBottleneck={i === bottleneckIdx}
-              onClick={() => navigate(DRILL_PATHS.workstation('sewing', s.opId))}
+              onClick={() => navigate(DRILL_PATHS.workstation('sewing', s.wsId))}
             />
           ))}
           {state.stations.length === 0 && (
@@ -212,7 +213,8 @@ function StationTable({
 }: {
   stations: StationView[];
   bottleneckIdx: number;
-  onPick: (opId: string) => void;
+  /** Receives a WORKSTATION id — two stations can share an operation. */
+  onPick: (wsId: string) => void;
 }) {
   if (stations.length === 0) {
     return <p style={{ color: SW_COLORS.muted, fontSize: 13 }}>Warming up the simulator…</p>;
@@ -249,7 +251,7 @@ function StationTable({
         <Col w="100px" />
       </Row>
       {stations.map((s, i) => (
-        <Row key={s.opId} alt={i % 2 === 1} highlight={i === bottleneckIdx}>
+        <Row key={s.wsId} alt={i % 2 === 1} highlight={i === bottleneckIdx}>
           <Col w="40px" mono>
             {i + 1}
           </Col>
@@ -285,7 +287,7 @@ function StationTable({
           <Col w="100px" right>
             <button
               type="button"
-              onClick={() => onPick(s.opId)}
+              onClick={() => onPick(s.wsId)}
               style={analyzeBtn()}
             >
               Analyze →

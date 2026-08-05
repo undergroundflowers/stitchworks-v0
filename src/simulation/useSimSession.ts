@@ -97,9 +97,19 @@ export interface SimSessionState {
   status: 'idle' | 'running' | 'ready' | 'error';
   error: string | null;
 
-  /** Register (or reuse) a session for this spec. Idempotent and cheap when
-   *  the spec is structurally unchanged. Returns the session key. */
-  ensure: (spec: SimSpec) => string;
+  /**
+   * Register (or reuse) a session for this spec. Idempotent and cheap when the
+   * spec is structurally unchanged. Returns the session key.
+   *
+   * `parkAt` says where the clock should sit when this is the FIRST session to
+   * load, and exists because the two kinds of surface want opposite things. An
+   * analysis table wants the settled shift on arrival — that was the whole
+   * complaint, metrics reading zero until something advanced the clock. The
+   * animated floor wants to start at the beginning so there is something to
+   * watch. It is not part of the session key: it changes nothing about the run,
+   * only where playback begins.
+   */
+  ensure: (spec: SimSpec, opts?: { parkAt?: 'start' | 'steady' }) => string;
   setFrame: (f: number) => void;
   step: (frames: number) => void;
   reset: () => void;
@@ -278,7 +288,7 @@ export const useSimSession = create<SimSessionState>()((set, get) => ({
   status: 'idle',
   error: null,
 
-  ensure: (spec) => {
+  ensure: (spec, opts) => {
     // A spec with no lines has nothing to run. Returning early keeps an
     // inactive caller (a page that renders the multi-line hook with an empty
     // input while it's in single-line scope) from disturbing anything.
@@ -309,13 +319,20 @@ export const useSimSession = create<SimSessionState>()((set, get) => ({
       };
 
       set((prev) => {
-        // Park the clock past the warm-up on the FIRST session to load, so a
-        // surface that reads steady-state numbers on mount has real values
-        // immediately. Previously a mount-only warm-up effect raced a re-run
-        // that slammed the pointer back to zero, and every metric then read
-        // zero permanently.
+        // Only the FIRST session to load positions the clock; after that the
+        // shared pointer is wherever the user left it.
+        //
+        // 'steady' parks at the end of the run rather than at the warm-up
+        // boundary. Parking exactly ON the boundary makes the post-warm-up
+        // window zero-length, so every windowed observable reads 0 — which is
+        // indistinguishable from the "no numbers" bug it was meant to fix.
+        const parkAt = opts?.parkAt ?? 'steady';
         const frame =
-          prev.frame > 0 ? prev.frame : Math.min(warmupFrame, maxFrame);
+          prev.frame > 0
+            ? prev.frame
+            : parkAt === 'start'
+              ? 0
+              : maxFrame;
         for (const r of runs) advanceSlot(r, frame);
         return {
           sessions: prune({ ...prev.sessions, [key]: session }, key),

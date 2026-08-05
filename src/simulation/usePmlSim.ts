@@ -120,7 +120,10 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
 
   const ensure = useSimSession((s) => s.ensure);
   useEffect(() => {
-    if (key) ensure(spec);
+    // 'start': these hooks drive the animated floor, where opening the screen
+    // to an already-finished shift would be useless. The analysis surfaces go
+    // through `useLineSim`, which parks at the settled end instead.
+    if (key) ensure(spec, { parkAt: 'start' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 

@@ -26,7 +26,8 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
+import { alpha } from '../design/color-utils';
 import { HudSelect, StageOverlay, ViewTitle, useConfirm } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { ServiceQueueParams } from '../components/ServiceQueueParams';
@@ -87,7 +88,14 @@ import {
   type ApparelBlockPreset,
   type ApparelPresetId,
 } from '../domain/apparelPresets';
-import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
+import {
+  serversFor,
+  systemCapacityFor,
+  validatePmlGraph,
+  type PmlIssue,
+} from '../simulation/pml-engine';
+import { classify } from '../simulation/queueing';
+import { defaultDist } from '../simulation/distributions';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { computeProcessSeedLayout } from '../domain/processLayout';
 
@@ -6776,7 +6784,66 @@ function BlockParamFields({
           );
         })}
       </div>
+      <KendallReadout ws={ws} kind={block.kind} />
     </>
+  );
+}
+
+/**
+ * The station's Kendall–Lee classification, live, under the c and N fields.
+ *
+ * The point is to make the queueing model tangible while authoring rather than
+ * something the user only meets on an analysis page: type 2 into Servers and
+ * watch `M/M/1 : ∞/FCFS` become `M/M/2 : ∞/FCFS`; cap the buffer at 8 and watch
+ * it become `M/M/2 : 8/FCFS`. Resolved through the same `serversFor` /
+ * `systemCapacityFor` the engine uses, so the label can't disagree with what
+ * will actually be simulated.
+ */
+function KendallReadout({ ws, kind }: { ws: Workstation; kind: PmlBlockKind }) {
+  if (kind !== 'Service' && kind !== 'Queue') return null;
+  const servers = kind === 'Queue' ? 1 : serversFor(ws);
+  const capacity = systemCapacityFor(ws);
+  const smv = getBlockParams(ws).cycleS / 60;
+  const notation = classify(defaultDist(Math.max(0.001, smv)), servers, capacity, 'FCFS');
+  const finite = Number.isFinite(capacity);
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: '6px 8px',
+        borderRadius: SW_RADIUS.sm,
+        border: `1px solid ${alpha(SW_COLORS.bobbin, 0.35)}`,
+        background: alpha(SW_COLORS.bobbin, 0.08),
+      }}
+    >
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 800,
+          color: SW_COLORS.muted,
+          letterSpacing: '0.12em',
+        }}
+      >
+        QUEUEING MODEL
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 13,
+          fontWeight: 800,
+          color: SW_COLORS.bobbin,
+          marginTop: 2,
+        }}
+      >
+        {notation.label}
+      </div>
+      <div style={{ fontSize: 10, color: SW_COLORS.muted, marginTop: 2 }}>
+        {finite
+          ? `Finite buffer — arrivals that find ${capacity} bundles here are turned away and counted as balks.`
+          : 'Unbounded buffer — the queue can grow without limit if ρ reaches 1.'}
+      </div>
+    </div>
   );
 }
 

@@ -12,110 +12,98 @@
  *   a positional index into the operations array.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Card, SectionHeader, StationTimeseriesGrid } from '../components';
+import { Card, LineSimEmpty, SectionHeader, StationTimeseriesGrid } from '../components';
 import { QueueAnalysisPanel, type QueueAnalysisChange } from '../components/QueueAnalysisPanel';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import {
-  meanOf,
-  usePmlSim,
-  EMPTY_TWIN,
-  type QueueDiscipline,
-  type ServiceDist,
-  type StationView,
-} from '../simulation';
-import { buildGarmentTwin } from '../domain/reference-twin';
-import { useGarments } from '../store/garments';
-import { useProject } from '../store/project';
-import { GARMENT_TEMPLATES } from '../domain';
-
-const WARMUP_MINUTES = 480; // 8-hour shift — long enough for KPIs to stabilise.
+import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
+import { useLineSim } from '../simulation/useLineSim';
+import { useSimSession } from '../simulation/useSimSession';
+import { useTwin } from '../store/twin';
+import { getBlockKind } from '../domain/pml';
 
 export function WorkstationDetailPage() {
   const { deptId, wsId } = useParams();
   const navigate = useNavigate();
 
-  // Project + garment + skill matrix → synthetic twin → PML
-  const project = useProject();
-  const selectedGarmentId = useProject((s) => s.selectedGarmentId);
-  const defaultOperators = useProject((s) => s.defaultOperators);
-  const updateOperation = useProject((s) => s.updateOperation);
-  const garments = useGarments();
-  const garment = garments.byId[selectedGarmentId] ?? garments.all[0];
+  const { state, twin, emptyReason, unassignedStationCount } = useLineSim();
+  const reset = useSimSession((s) => s.reset);
+  const step = useSimSession((s) => s.step);
+  const setBlock = useTwin((s) => s.setBlock);
 
-  const opIndex = useMemo(() => {
-    if (!garment) return -1;
-    // Try direct match by id, then fall back to numeric index.
-    const byId = garment.operations.findIndex((o) => o.id === wsId);
-    if (byId >= 0) return byId;
-    const n = Number(wsId);
-    if (Number.isFinite(n) && n >= 0 && n < garment.operations.length) return n;
-    return -1;
-  }, [garment, wsId]);
+  /**
+   * Resolve the route parameter to a station.
+   *
+   * `wsId` is a WORKSTATION id. It used to be read as an operation id, which
+   * cannot address a station at all on a balanced line: two stations running
+   * the same operation are indistinguishable that way, and the first one always
+   * won. The opId lookup is kept as a fallback so links saved before the change
+   * still land somewhere sensible.
+   */
+  const stationIdx = useMemo(() => {
+    if (!wsId) return -1;
+    const byWs = state.stations.findIndex((s) => s.wsId === wsId);
+    if (byWs >= 0) return byWs;
+    return state.stations.findIndex((s) => s.opId === wsId);
+  }, [state.stations, wsId]);
 
-  const op = opIndex >= 0 ? garment.operations[opIndex] : undefined;
+  const station: StationView | undefined = stationIdx >= 0 ? state.stations[stationIdx] : undefined;
 
-  // Synthesise a single-line twin from the garment so PML has a graph to run.
-  // Empty-twin fallback keeps the hook call unconditional in the corner case
-  // where the garment carries no ops (the page renders an empty state below).
-  const twin = useMemo(
-    () => buildGarmentTwin(garment, defaultOperators) ?? EMPTY_TWIN,
-    [garment, defaultOperators],
-  );
+  /**
+   * Persist an edit onto the WORKSTATION, not the shared garment operation.
+   *
+   * Writing to the operation changed every station running it — on a balanced
+   * line that is most of the floor — so tuning one station's buffer silently
+   * retuned its neighbours. Block params are also what the engine and the
+   * analytical layer both resolve through (`serversFor` / `systemCapacityFor`),
+   * so a workstation-level write is what actually takes effect.
+   */
+  const handleChange = (patch: QueueAnalysisChange) => {
+    if (!station) return;
+    const ws = twin.workstations.find((w) => w.id === station.wsId);
+    if (!ws) return;
+    const params: Record<string, unknown> = { ...(ws.block?.params ?? {}) };
+    if (patch.serviceDistribution) params.cycleDist = patch.serviceDistribution;
+    if (patch.servers != null) params.servers = patch.servers;
+    // `in` rather than a null check: `undefined` MEANS unbounded here, and a
+    // null check made "set the buffer back to ∞" a silent no-op — the user
+    // could cap a station but never uncap it. PmlBlockParams encodes unbounded
+    // as 0, while Operation.queueCapacity encodes it as undefined.
+    if ('queueCapacity' in patch) params.queueCapacity = patch.queueCapacity ?? 0;
+    setBlock(ws.id, {
+      ...(ws.block ?? {}),
+      kind: getBlockKind(ws),
+      params: params as never,
+    });
+  };
 
-  const { state, step, reset } = usePmlSim(twin, { garment });
+  if (emptyReason) {
+    return (
+      <div style={{ padding: '20px 24px' }}>
+        <LineSimEmpty
+          reason={emptyReason}
+          unassignedStationCount={unassignedStationCount}
+          what="Station analysis"
+        />
+      </div>
+    );
+  }
 
-  // Auto-warm the sim once on mount so KPIs aren't all zeros.
-  useEffect(() => {
-    if (state.time === 0) step(WARMUP_MINUTES);
-    // We deliberately don't depend on `step` here — useSim provides a stable
-    // reference, and we want this effect to run exactly once per mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  if (!op || opIndex < 0) {
+  if (!station) {
     return (
       <Card>
-        <SectionHeader title="Workstation not found" />
+        <SectionHeader title="Station not found" />
         <p style={{ fontSize: 13, color: SW_COLORS.muted }}>
-          No operation with id <code>{wsId}</code> in {garment?.name ?? 'this garment'}.
+          No station <code>{wsId}</code> on the line currently in scope. It may belong to a
+          different line — switch scope on the Queue Analysis page and try again.
         </p>
-        <button
-          type="button"
-          onClick={() => navigate('/factory')}
-          style={navBtn()}
-        >
-          Back to factory
+        <button type="button" onClick={() => navigate('/queues')} style={navBtn()}>
+          Back to queue analysis
         </button>
       </Card>
     );
   }
-
-  // Lookup by opId — robust to the adapter's ordering (which mirrors the
-  // synthesised twin's workstation order, not the garment's operation index).
-  const station = state.stations.find((s) => s.opId === op.id);
-
-  // Save the change back to the operation in the project store so it
-  // persists and re-flows through buildSimConfig on the next run.
-  const handleChange = (patch: QueueAnalysisChange) => {
-    if (!garment) return;
-    const opPatch: Partial<{
-      serviceDistribution: ServiceDist;
-      queueCapacity: number;
-      queueDiscipline: typeof patch.queueDiscipline;
-      servers: number;
-    }> = {};
-    if (patch.serviceDistribution) opPatch.serviceDistribution = patch.serviceDistribution;
-    if (patch.queueCapacity != null) opPatch.queueCapacity = patch.queueCapacity;
-    if (patch.queueDiscipline) opPatch.queueDiscipline = patch.queueDiscipline;
-    if (patch.servers != null) opPatch.servers = patch.servers;
-    if (Object.keys(opPatch).length === 0) return;
-    updateOperation(garment.id, GARMENT_TEMPLATES[garment.id], op.id, opPatch);
-  };
-
-  // Keep a reference to the project for future hooks (factory tree etc.).
-  void project;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -130,7 +118,7 @@ export function WorkstationDetailPage() {
               textTransform: 'uppercase',
             }}
           >
-            Workstation · {deptId ?? '—'} / {wsId ?? '—'}
+            Workstation · {deptId ?? '—'} / {station.opCode ?? station.opId}
           </div>
           <h1
             style={{
@@ -142,23 +130,21 @@ export function WorkstationDetailPage() {
               margin: '6px 0 0 0',
             }}
           >
-            {op.name}
+            {station.opName}
           </h1>
           <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4 }}>
-            {garment.name} · op #{opIndex + 1} of {garment.operations.length} · SMV {op.smv.toFixed(2)} min
+            {station.machineCode} · station {stationIdx + 1} of {state.stations.length} ·
+            {' '}SMV {station.smv.toFixed(2)} min · {station.notation.label}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             type="button"
-            onClick={() => {
-              reset();
-              step(WARMUP_MINUTES);
-            }}
+            onClick={() => reset()}
             style={navBtn()}
-            title="Re-run the 8-hour warm-up"
+            title="Rewind the shared sim clock to the start of the shift"
           >
-            ⟲ Re-run sim
+            ⟲ Rewind
           </button>
           <button
             type="button"
@@ -188,13 +174,13 @@ export function WorkstationDetailPage() {
         <Card>
           <SectionHeader
             title="How this station is doing — live"
-            sub={`Last ${(state.stationHistory[opIndex] ?? []).length * 5} sim-min. Solid line = what the simulator saw. Dashed line = the steady-state target from queueing theory.`}
+            sub={`Last ${(state.stationHistory[stationIdx] ?? []).length * 5} sim-min. Solid line = what the simulator saw. Dashed line = the steady-state target from queueing theory.`}
           />
           <FloorLine station={station} />
           <div style={{ marginTop: 12 }}>
             <StationTimeseriesGrid
               station={station}
-              history={state.stationHistory[opIndex] ?? []}
+              history={state.stationHistory[stationIdx] ?? []}
             />
           </div>
         </Card>

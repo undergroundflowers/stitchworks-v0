@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, HudSelect, Tag, type OperatorAssignment } from '../components';
+import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, HudSelect, LineScopePicker, LineSimEmpty, Tag, type OperatorAssignment } from '../components';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ScenariosPanel } from './Scenarios';
@@ -25,6 +25,7 @@ import {
 } from '../simulation';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
+import { useSimScope } from '../store/simScope';
 import { lineSystemBadge, shareDebtForLine } from '../domain/twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { buildGarmentTwin } from '../domain/reference-twin';
@@ -317,6 +318,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   // wired line's config so the Performance tab can show a per-line table
   // alongside the aggregate Yamazumi-driven tiles.
   const reportsTwin = useTwin(selectActiveTwin);
+  const reportScope = useSimScope((s) => s.scope);
   const lineBuildsForReports: LineBuild[] = useMemo(() => {
     if ((reportsTwin.lines ?? []).length === 0) return [];
     return buildLinesFromTwin({
@@ -333,6 +335,10 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const perLineAggs = useMemo(() => {
     return lineBuildsForReports
       .filter((lb) => lb.ok)
+      // Honour the shared scope so the picker in the header actually narrows
+      // the report, and so this page agrees with the Sim screen and the
+      // queueing tables about what "the line" currently means.
+      .filter((lb) => (reportScope.kind === 'line' ? lb.line.id === reportScope.id : true))
       .map((lb) => {
         // Scope the active twin to this line's workstations so PML treats
         // each sewing line as an independent run — different garments and
@@ -358,7 +364,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           }),
         };
       });
-  }, [lineBuildsForReports, reportsTwin, runs]);
+  }, [lineBuildsForReports, reportsTwin, runs, reportScope]);
 
   // ── Factory-level aggregate across wired lines ──────────────────────────
   // When the twin has ≥1 wired line, the top KPI tiles (and the FACTORY
@@ -510,6 +516,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* Bound to the shared scope, so picking a line here also moves the
+                Sim screen and the queueing pages. */}
+            <LineScopePicker lines={reportsTwin.lines ?? []} />
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
               <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing:'0.5px' }}>RUNS</span>
               <ToggleGroup value={String(runs)} onChange={(v) => setRuns(parseInt(v))} options={[
@@ -1275,18 +1284,30 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       </HideableBox>
       )}
 
-      {tab === 'performance' && (() => {
-        // Build the time-series + station data once so the chart grid can
-        // share a consistent dataset. Factory scope sums all wired lines;
-        // single-config falls back to the Yamazumi-driven `agg`.
-        const history = factoryScope
-          ? sumHistories(perLineAggs.map((r) => r.agg.firstHistory))
-          : agg.firstHistory;
-        const stations = factoryScope
-          ? perLineAggs.flatMap((r) =>
-              r.agg.firstStations.map((s) => ({ ...s, lineName: r.line.name })),
-            )
-          : agg.firstStations.map((s) => ({ ...s, lineName: '' }));
+      {tab === 'performance' && !factoryScope && (
+        // No wired line means there is nothing real to report on. This used to
+        // fall back to `agg` — a replication of a line synthesised from the
+        // selected garment template — so the Performance tab showed confident
+        // KPIs for a factory the user had never built. An empty state that says
+        // what to do is worth more than a plausible number about nothing.
+        <LineSimEmpty
+          reason={
+            reportsTwin.workstations.length === 0 ? 'no-stations' : 'stations-not-in-a-line'
+          }
+          unassignedStationCount={
+            reportsTwin.workstations.filter((ws) => !ws.lineId).length
+          }
+          what="Performance reporting"
+        />
+      )}
+
+      {tab === 'performance' && factoryScope && (() => {
+        // Time-series + station data, built once so the whole chart grid shares
+        // one dataset. Sums every wired line in the factory.
+        const history = sumHistories(perLineAggs.map((r) => r.agg.firstHistory));
+        const stations = perLineAggs.flatMap((r) =>
+          r.agg.firstStations.map((s) => ({ ...s, lineName: r.line.name })),
+        );
 
         // Theoretical max throughput (pcs/hr) at the line's bottleneck SMV.
         // For factory scope, sum across each line's own ceiling. This is
