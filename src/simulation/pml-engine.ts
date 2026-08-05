@@ -228,22 +228,6 @@ export interface ChangeoverSpec {
   durationMin: number;
 }
 
-/**
- * Per-machine breakdown sampling. When set on a machine code, every
- * workstation using that machine samples MTBF / MTTR exponentials and
- * goes offline for the sampled MTTR period whenever a breakdown lands.
- *
- * Both values are in MINUTES. Omitting either disables breakdowns for
- * that machine. Use this to model "the SNL bench at op 3 fails on
- * average every 4 hours and takes 12 min to restart."
- */
-export interface MachineBreakdownSpec {
-  /** Mean time between failures (minutes). */
-  mtbfMin: number;
-  /** Mean time to repair (minutes). */
-  mttrMin: number;
-}
-
 export interface PmlSimOpts {
   twin: Twin;
   /** Simulated duration in MINUTES. Tier-1 default: 480 (= one 8h shift). */
@@ -258,10 +242,6 @@ export interface PmlSimOpts {
    *  the stated duration. Omit / empty array ⇒ no changeovers (today's
    *  behaviour). */
   changeovers?: ChangeoverSpec[];
-  /** Optional per-machine MTBF / MTTR — keyed by MachineCode (e.g. 'SNL'
-   *  → { mtbfMin: 240, mttrMin: 12 }). Sampling is exponential. Empty
-   *  / omitted ⇒ no breakdowns. */
-  machineBreakdowns?: Record<string, MachineBreakdownSpec>;
   /** Per-op skill-efficiency multipliers keyed by Operation.id. Drives
    *  the cycle-time adjustment: effective cycle = nominal / efficiency.
    *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
@@ -423,8 +403,6 @@ export interface PmlSimResult {
   piecesLost: number;
   /** Cumulative minutes lost to changeover events during the run. P2 default 0. */
   changeoverMin: number;
-  /** Cumulative minutes lost to machine downtime (MTBF/MTTR) during the run. P2 default 0. */
-  downtimeMin: number;
   /** Per-order completion time keyed by Order.id (minutes from the first
    *  piece emitted by the Source to the last piece reaching the Sink).
    *  Populated when a Source ran an OrderSequence. Empty otherwise. */
@@ -502,8 +480,6 @@ type Event =
   | { time: number; kind: 'serviceEnd'; wsId: string; agentId: number }
   | { time: number; kind: 'changeoverBegin'; lineId: string; durationMin: number }
   | { time: number; kind: 'changeoverEnd'; lineId: string }
-  | { time: number; kind: 'breakdownBegin'; wsId: string }
-  | { time: number; kind: 'breakdownEnd'; wsId: string; mtbfMin: number; mttrMin: number }
   // P2 — a downstream buffer freed a slot; re-attempt the forward that a
   // blocked holder (Service/Delay/Conveyor) or a stalled Queue was waiting on.
   // Zero-delay (fires at the same sim time) so back-pressure relief cascades
@@ -1061,16 +1037,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let piecesLost = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
-  // P2 — line-blocking accumulators. Updated when CHANGEOVER_BEGIN /
-  // CHANGEOVER_END / BREAKDOWN_BEGIN / BREAKDOWN_END events fire.
+  // P2 — line-blocking accumulator. Updated when CHANGEOVER_BEGIN /
+  // CHANGEOVER_END events fire.
   let changeoverMinAccum = 0;
-  let downtimeMinAccum = 0;
   /** Lines currently frozen for changeover — tryStartService refuses to
    *  start new service for workstations whose lineId is in this set. */
   const frozenLines = new Set<string>();
-  /** Workstations currently down for repair — tryStartService refuses
-   *  service while the ws id is in this set. */
-  const frozenWorkstations = new Set<string>();
 
   // ── P4 order-sequence state ──────────────────────────────────────────────
   /** Per-order completion tracking. Populated as agents flow through:
@@ -1133,39 +1105,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     });
   }
 
-  // P2: schedule first breakdown for every workstation that maps to a
-  // machine code with an MTBF/MTTR entry. Exponential sampling matches the
-  // typical OEE assumption (memoryless failures); the BREAKDOWN_END
-  // handler reschedules the next BREAKDOWN_BEGIN, so this only seeds one
-  // event per workstation.
-  const breakdownByMachine = opts.machineBreakdowns ?? {};
-  /** Resolve the apparel `MachineCode` for a workstation by looking up the
-   *  bound op in its garment bulletin. Returns null when the workstation
-   *  isn't bound to an op (e.g. Source / Sink / buffer). */
-  const machineCodeFor = (ws: Workstation): string | null => {
-    const opId = ws.operation?.opId;
-    const garmentId = ws.operation?.garmentId;
-    if (!opId || !garmentId) return null;
-    const garment = GARMENT_TEMPLATES[garmentId];
-    if (!garment) return null;
-    const op = garment.operations.find((o) => o.id === opId);
-    return op?.machineCode ?? null;
-  };
-  if (Object.keys(breakdownByMachine).length > 0) {
-    for (const ws of twin.workstations) {
-      const code = machineCodeFor(ws);
-      if (!code) continue;
-      const spec = breakdownByMachine[code];
-      if (!spec || !(spec.mtbfMin > 0) || !(spec.mttrMin > 0)) continue;
-      // Exponential draw with mean = mtbf, using the engine's RNG so seeds
-      // remain reproducible.
-      const u = Math.max(1e-9, rng());
-      const firstFailAt = -Math.log(u) * spec.mtbfMin;
-      if (firstFailAt < durationMin) {
-        pq.push({ time: firstFailAt, kind: 'breakdownBegin', wsId: ws.id });
-      }
-    }
-  }
   // Schedule periodic snapshot events so we can hand LiveSim a timeseries
   // it can play back. Sampling at t=0 is recorded synchronously below.
   if (samplePeriodMin > 0) {
@@ -1273,11 +1212,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function tryStartService(b: BlockState, now: number): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
-    // P2: don't start service while the workstation is down or its line
-    // is in changeover. Pieces already in service complete normally;
-    // only new starts are blocked, which matches a real floor (operators
-    // finish the current bundle before the changeover begins).
-    if (frozenWorkstations.has(b.ws.id)) return false;
+    // P2: don't start service while the workstation's line is in changeover.
+    // Pieces already in service complete normally; only new starts are
+    // blocked, which matches a real floor (operators finish the current
+    // bundle before the changeover begins).
     if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
     // Per-station server cap: cannot exceed the configured `servers` count
     // even when the dept's pool has spare units. Matches "one machine =
@@ -2021,41 +1959,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       continue;
     }
 
-    // ── P2 breakdown events ───────────────────────────────────────────────
-    if (e.kind === 'breakdownBegin') {
-      const ws = twin.workstations.find((w) => w.id === e.wsId);
-      if (!ws) continue;
-      const code = machineCodeFor(ws);
-      const spec = code ? breakdownByMachine[code] : undefined;
-      if (!spec) continue;
-      frozenWorkstations.add(e.wsId);
-      // Sample MTTR (repair time) from an exponential with mean = mttrMin.
-      const u = Math.max(1e-9, rng());
-      const repair = -Math.log(u) * spec.mttrMin;
-      downtimeMinAccum += repair;
-      pq.push({
-        time: now + repair,
-        kind: 'breakdownEnd',
-        wsId: e.wsId,
-        mtbfMin: spec.mtbfMin,
-        mttrMin: spec.mttrMin,
-      });
-      continue;
-    }
-    if (e.kind === 'breakdownEnd') {
-      frozenWorkstations.delete(e.wsId);
-      // Resume any queued service at this workstation.
-      const b = blocks.get(e.wsId);
-      if (b && b.kind === 'Service') tryStartService(b, now);
-      // Sample next time-to-failure for this workstation.
-      const u = Math.max(1e-9, rng());
-      const gap = -Math.log(u) * e.mtbfMin;
-      const nextFail = now + gap;
-      if (nextFail < durationMin) {
-        pq.push({ time: nextFail, kind: 'breakdownBegin', wsId: e.wsId });
-      }
-      continue;
-    }
   }
 
   // ── Final pool-utilisation flush ──────────────────────────────────────────
@@ -2152,7 +2055,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     piecesLost,
     firstPassYield,
     changeoverMin: changeoverMinAccum,
-    downtimeMin: downtimeMinAccum,
     perOrderCompletionTime,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
     throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,

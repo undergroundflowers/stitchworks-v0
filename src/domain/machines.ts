@@ -56,16 +56,8 @@ export interface MachineSpec {
   icon: string;
   /** Token-friendly accent colour. */
   color: string;
-  /** Typical procurement cost in USD. Mid-range new condition. */
-  costUsd: number;
-  /** Typical power draw in kW. */
-  powerKw: number;
-  /** Layout-grid footprint, in cells. */
-  footprintCells: { w: number; h: number };
   /** Relative speed for the same family of operations. */
   speedClass?: 'low' | 'mid' | 'high';
-  /** Common OEMs Stitchworks recognises in the catalog. */
-  brands?: string[];
   /** True when the "machine" is a person-only manual operation. */
   isManual?: boolean;
 }
@@ -74,133 +66,97 @@ export const MACHINE_CATALOG: Record<MachineCode, MachineSpec> = {
   SNL: {
     code: 'SNL', category: 'sewing', label: 'Single Needle Lockstitch', shortName: 'SNL',
     description: 'General-purpose sewing machine. Lockstitch, one needle. The workhorse.',
-    icon: '⌃', color: SW_COLORS.brand, costUsd: 1200, powerKw: 0.6,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Juki', 'Brother', 'Singer', 'Pegasus'],
+    icon: '⌃', color: SW_COLORS.brand, speedClass: 'mid',
   },
   DNL: {
     code: 'DNL', category: 'sewing', label: 'Double Needle Lockstitch', shortName: 'DNL',
     description: 'Two parallel rows of lockstitch. Used on hems, jeans, and decorative top-stitching.',
-    icon: '⌃⌃', color: SW_COLORS.brand, costUsd: 1800, powerKw: 0.7,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Juki', 'Brother'],
+    icon: '⌃⌃', color: SW_COLORS.brand, speedClass: 'mid',
   },
   '4OL': {
     code: '4OL', category: 'sewing', label: '4-thread Overlock', shortName: '4-OL',
     description: 'Edge-finish + seam in one pass. Knit garment seam workhorse.',
-    icon: '≋', color: SW_COLORS.bobbin, costUsd: 1600, powerKw: 0.7,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'high',
-    brands: ['Pegasus', 'Yamato', 'Juki'],
+    icon: '≋', color: SW_COLORS.bobbin, speedClass: 'high',
   },
   '5OL': {
     code: '5OL', category: 'sewing', label: '5-thread Safety Stitch Overlock', shortName: '5-OL',
     description: 'Overlock + chain stitch in parallel. Stronger seams for woven side seams.',
-    icon: '≋⏐', color: SW_COLORS.bobbin, costUsd: 2100, powerKw: 0.7,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'high',
-    brands: ['Pegasus', 'Yamato'],
+    icon: '≋⏐', color: SW_COLORS.bobbin, speedClass: 'high',
   },
   FL: {
     code: 'FL', category: 'sewing', label: 'Flatlock / Coverstitch', shortName: 'FL',
     description: 'Decorative top-stitch covering raw edges. Necks, hems, sleeve openings.',
-    icon: '⤴', color: SW_COLORS.bobbin, costUsd: 2200, powerKw: 0.8,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Yamato', 'Kansai', 'Pegasus'],
+    icon: '⤴', color: SW_COLORS.bobbin, speedClass: 'mid',
   },
   FB: {
     code: 'FB', category: 'sewing', label: 'Feed-of-the-arm', shortName: 'FB',
     description: 'Cylindrical bed for tubular work — sleeve underseams, side seams on jeans.',
-    icon: '◐', color: SW_COLORS.bobbin, costUsd: 2400, powerKw: 0.7,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Union Special', 'Juki'],
+    icon: '◐', color: SW_COLORS.bobbin, speedClass: 'mid',
   },
   KS: {
     code: 'KS', category: 'sewing', label: 'Kansai Special (multi-needle)', shortName: 'KS',
     description: 'Multi-needle chain stitch for waistbands, decorative rows.',
-    icon: '⩩', color: SW_COLORS.trim, costUsd: 3200, powerKw: 0.9,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Kansai Special'],
+    icon: '⩩', color: SW_COLORS.trim, speedClass: 'mid',
   },
   BH: {
     code: 'BH', category: 'sewing', label: 'Buttonhole Machine', shortName: 'BH',
     description: 'Cuts and stitches buttonholes. Straight or eyelet variants.',
-    icon: '◉', color: SW_COLORS.trim, costUsd: 2400, powerKw: 0.5,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'low',
-    brands: ['Juki', 'Brother', 'Reece'],
+    icon: '◉', color: SW_COLORS.trim, speedClass: 'low',
   },
   BS: {
     code: 'BS', category: 'sewing', label: 'Button Sewing Machine', shortName: 'BS',
     description: 'Sews buttons. Programmable stitch pattern.',
-    icon: '⊙', color: SW_COLORS.trim, costUsd: 1800, powerKw: 0.5,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'low',
-    brands: ['Juki', 'Brother'],
+    icon: '⊙', color: SW_COLORS.trim, speedClass: 'low',
   },
   BT: {
     code: 'BT', category: 'sewing', label: 'Bartack Machine', shortName: 'BT',
     description: 'Reinforcement tacks at stress points (pockets, fly).',
-    icon: '✕', color: SW_COLORS.trim, costUsd: 2200, powerKw: 0.5,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'low',
-    brands: ['Juki', 'Brother'],
+    icon: '✕', color: SW_COLORS.trim, speedClass: 'low',
   },
   EMB: {
     code: 'EMB', category: 'embroidery', label: 'Embroidery Machine', shortName: 'EMB',
     description: 'Multi-head embroidery. Logos, decorative stitching.',
-    icon: '✿', color: SW_COLORS.trim, costUsd: 18000, powerKw: 1.5,
-    footprintCells: { w: 2, h: 2 }, speedClass: 'mid',
-    brands: ['Tajima', 'Barudan', 'Brother'],
+    icon: '✿', color: SW_COLORS.trim, speedClass: 'mid',
   },
   CUT: {
     code: 'CUT', category: 'cutting', label: 'Straight Knife Cutter', shortName: 'Cut',
     description: 'Hand-pushed straight knife on a spread of fabric.',
-    icon: '✂', color: SW_COLORS.press, costUsd: 1400, powerKw: 0.7,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Eastman', 'KM'],
+    icon: '✂', color: SW_COLORS.press, speedClass: 'mid',
   },
   CAD: {
     code: 'CAD', category: 'cutting', label: 'CAD Auto Cutter', shortName: 'CAD',
     description: 'CNC-driven cutting head. Pattern from CAD, cuts accurately at scale.',
-    icon: '◈', color: SW_COLORS.press, costUsd: 95000, powerKw: 9,
-    footprintCells: { w: 4, h: 2 }, speedClass: 'high',
-    brands: ['Lectra', 'Gerber', 'Bullmer'],
+    icon: '◈', color: SW_COLORS.press, speedClass: 'high',
   },
   SPR: {
     code: 'SPR', category: 'spreading', label: 'Fabric Spreader', shortName: 'Spr',
     description: 'Lays multiple fabric layers flat for cutting.',
-    icon: '≡', color: SW_COLORS.fabric, costUsd: 8000, powerKw: 1.2,
-    footprintCells: { w: 4, h: 1 }, speedClass: 'mid',
-    brands: ['Lectra', 'Gerber'],
+    icon: '≡', color: SW_COLORS.fabric, speedClass: 'mid',
   },
   FUSE: {
     code: 'FUSE', category: 'fusing', label: 'Fusing Press', shortName: 'Fuse',
     description: 'Heat-fuses interlining onto collar / cuff / placket pieces.',
-    icon: '▦', color: SW_COLORS.press, costUsd: 9000, powerKw: 4,
-    footprintCells: { w: 2, h: 1 }, speedClass: 'mid',
-    brands: ['Hashima', 'Veit'],
+    icon: '▦', color: SW_COLORS.press, speedClass: 'mid',
   },
   PRESS: {
     code: 'PRESS', category: 'pressing', label: 'Pressing Table / Iron', shortName: 'Press',
     description: 'Steam iron station for inter-process and final pressing.',
-    icon: '▭', color: SW_COLORS.thread, costUsd: 1600, powerKw: 2.5,
-    footprintCells: { w: 1, h: 1 }, speedClass: 'mid',
-    brands: ['Veit', 'Naomoto'],
+    icon: '▭', color: SW_COLORS.thread, speedClass: 'mid',
   },
   STEAM: {
     code: 'STEAM', category: 'pressing', label: 'Steam Tunnel', shortName: 'Steam',
     description: 'Continuous-feed steamer for relax-pressing. High throughput.',
-    icon: '〜', color: SW_COLORS.thread, costUsd: 14000, powerKw: 12,
-    footprintCells: { w: 4, h: 2 }, speedClass: 'high',
-    brands: ['Veit', 'Sankosha'],
+    icon: '〜', color: SW_COLORS.thread, speedClass: 'high',
   },
   INSP: {
     code: 'INSP', category: 'inspection', label: 'Inspection Table', shortName: 'Insp',
     description: 'Light table for in-line / final visual inspection.',
-    icon: '◎', color: SW_COLORS.steel, costUsd: 800, powerKw: 0.2,
-    footprintCells: { w: 1, h: 1 },
+    icon: '◎', color: SW_COLORS.muted,
   },
   MNL: {
     code: 'MNL', category: 'manual', label: 'Manual (no machine)', shortName: 'Manual',
     description: 'Person-only operation: trim threads, button push, pair-match, label cut.',
-    icon: '✋', color: SW_COLORS.muted, costUsd: 0, powerKw: 0,
-    footprintCells: { w: 1, h: 1 }, isManual: true,
+    icon: '✋', color: SW_COLORS.muted, isManual: true,
   },
 };
 

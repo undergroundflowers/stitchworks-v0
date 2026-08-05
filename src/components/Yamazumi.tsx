@@ -280,7 +280,7 @@ export function Yamazumi({ assignments, taktMin, height = 300, onChange }: Yamaz
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            color: '#fff',
+                            color: SW_COLORS.paper,
                             fontFamily: SW_FONTS.mono,
                             fontSize: 8,
                             fontWeight: 700,

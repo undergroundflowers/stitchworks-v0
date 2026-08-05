@@ -65,7 +65,7 @@ const SKILL_OPTIONS: SkillId[] = [
   'buttonhole', 'button_sew', 'bartack', 'embroidery',
   'cutting_manual', 'cutting_cad', 'spreading', 'fusing',
   'pressing', 'inspection', 'packing', 'bundling',
-  'material_handling', 'mechanical_maint', 'supervision',
+  'material_handling', 'supervision',
 ];
 
 const PRODUCT_CATEGORIES: CustomProductSpec['category'][] = [
@@ -325,13 +325,6 @@ function MachineCard({
         <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink, minWidth: 0, overflowWrap: 'anywhere' }}>{spec.shortName}</div>
       </div>
       <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4, minHeight: 30, overflowWrap: 'anywhere' }}>{spec.label}</div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, flexWrap: 'wrap' }}>
-        <span>${spec.costUsd.toLocaleString()}</span>
-        <span>·</span>
-        <span>{spec.powerKw} kW</span>
-        <span>·</span>
-        <span>{spec.footprintCells.w}×{spec.footprintCells.h}</span>
-      </div>
     </button>
   );
 }
@@ -520,7 +513,7 @@ function WorkerCard({
         ))}
       </div>
       <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-        ${spec.baseCostHr}/hr · {Math.round(spec.baseEfficiency * 100)}% eff
+        {Math.round(spec.baseEfficiency * 100)}% eff
       </div>
     </button>
   );
@@ -776,29 +769,7 @@ function MachineEditor({ code, onClose }: { code: string; onClose: () => void })
           </Field>
         </Section>
 
-        <Section label="Procurement & footprint">
-          <NumPair>
-            <Field label="Cost (USD)">
-              <NumberInput value={spec.costUsd} step={50} min={0} onChange={(n) => apply({ costUsd: n })} />
-            </Field>
-            <Field label="Power (kW)">
-              <NumberInput value={spec.powerKw} step={0.1} min={0} onChange={(n) => apply({ powerKw: n })} />
-            </Field>
-          </NumPair>
-          <NumPair>
-            <Field label="Footprint W (cells)">
-              <NumberInput value={spec.footprintCells.w} step={1} min={1} onChange={(w) => apply({ footprintCells: { ...spec.footprintCells, w } })} />
-            </Field>
-            <Field label="Footprint H (cells)">
-              <NumberInput value={spec.footprintCells.h} step={1} min={1} onChange={(h) => apply({ footprintCells: { ...spec.footprintCells, h } })} />
-            </Field>
-          </NumPair>
-          <Field label="Brands (comma-separated)">
-            <TextInput
-              value={(spec.brands ?? []).join(', ')}
-              onChange={(v) => apply({ brands: v.split(',').map((x) => x.trim()).filter(Boolean) })}
-            />
-          </Field>
+        <Section label="Machine type">
           <Field label="Manual (person-only)">
             <Toggle
               value={!!spec.isManual}
@@ -881,14 +852,9 @@ function WorkerEditor({ role, onClose }: { role: string; onClose: () => void }) 
         </Section>
 
         <Section label="Performance">
-          <NumPair>
-            <Field label="Cost ($ / hr)">
-              <NumberInput value={spec.baseCostHr} step={1} min={0} onChange={(n) => apply({ baseCostHr: n })} />
-            </Field>
-            <Field label="Base efficiency">
-              <NumberInput value={spec.baseEfficiency} step={0.05} min={0} max={1.5} onChange={(n) => apply({ baseEfficiency: n })} />
-            </Field>
-          </NumPair>
+          <Field label="Base efficiency">
+            <NumberInput value={spec.baseEfficiency} step={0.05} min={0} max={1.5} onChange={(n) => apply({ baseEfficiency: n })} />
+          </Field>
           <NumPair>
             <Field label="Walk speed (m/s)">
               <NumberInput value={spec.walkSpeedMps} step={0.1} min={0} onChange={(n) => apply({ walkSpeedMps: n })} />
@@ -1020,11 +986,7 @@ function NewMachineEditor({ onClose }: { onClose: () => void }) {
     description: '',
     icon: '⌃',
     color: SW_COLORS.brand,
-    costUsd: 1000,
-    powerKw: 0.5,
-    footprintCells: { w: 1, h: 1 },
     speedClass: 'mid',
-    brands: [],
   }));
   const [err, setErr] = useState<string | null>(null);
 
@@ -1079,25 +1041,6 @@ function NewMachineEditor({ onClose }: { onClose: () => void }) {
           </Field>
         </Section>
 
-        <Section label="Procurement & footprint">
-          <NumPair>
-            <Field label="Cost (USD)">
-              <NumberInput value={draft.costUsd} step={50} min={0} onChange={(n) => update('costUsd', n)} />
-            </Field>
-            <Field label="Power (kW)">
-              <NumberInput value={draft.powerKw} step={0.1} min={0} onChange={(n) => update('powerKw', n)} />
-            </Field>
-          </NumPair>
-          <NumPair>
-            <Field label="Footprint W">
-              <NumberInput value={draft.footprintCells.w} step={1} min={1} onChange={(w) => update('footprintCells', { ...draft.footprintCells, w })} />
-            </Field>
-            <Field label="Footprint H">
-              <NumberInput value={draft.footprintCells.h} step={1} min={1} onChange={(h) => update('footprintCells', { ...draft.footprintCells, h })} />
-            </Field>
-          </NumPair>
-        </Section>
-
         {err && <div style={{ padding: '0 18px', color: SW_COLORS.alarm, fontSize: 12 }}>{err}</div>}
 
         <DrawerFooter>
@@ -1123,7 +1066,6 @@ function NewWorkerEditor({ onClose }: { onClose: () => void }) {
     primarySkills: [],
     secondarySkills: [],
     baseEfficiency: 0.85,
-    baseCostHr: 7,
     walkSpeedMps: 1.0,
     ownsStation: false,
   }));
@@ -1174,21 +1116,16 @@ function NewWorkerEditor({ onClose }: { onClose: () => void }) {
 
         <Section label="Performance">
           <NumPair>
-            <Field label="Cost ($ / hr)">
-              <NumberInput value={draft.baseCostHr} step={1} min={0} onChange={(n) => update('baseCostHr', n)} />
-            </Field>
             <Field label="Base efficiency">
               <NumberInput value={draft.baseEfficiency} step={0.05} min={0} max={1.5} onChange={(n) => update('baseEfficiency', n)} />
             </Field>
-          </NumPair>
-          <NumPair>
             <Field label="Walk speed (m/s)">
               <NumberInput value={draft.walkSpeedMps} step={0.1} min={0} onChange={(n) => update('walkSpeedMps', n)} />
             </Field>
-            <Field label="Owns a station">
-              <Toggle value={draft.ownsStation} onChange={(b) => update('ownsStation', b)} />
-            </Field>
           </NumPair>
+          <Field label="Owns a station">
+            <Toggle value={draft.ownsStation} onChange={(b) => update('ownsStation', b)} />
+          </Field>
         </Section>
 
         <Section label="Primary skills">

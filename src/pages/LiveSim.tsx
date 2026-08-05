@@ -11,9 +11,10 @@
  * efficiency); the views are pure visualisations of `SimState.stations`.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { alpha } from '../design/color-utils';
 import { Button, ToggleGroup, HudSelect, TimeDisplay, ViewTitle, EmptyState, type HudSelectOption } from '../components';
 import { SimStationDetail } from '../components/SimStationDetail';
 import {
@@ -43,6 +44,8 @@ import {
   simDayNumber,
   shiftProgressPct,
   unitToSeconds,
+  fmtMinutesAsHHMM,
+  parseHHMM,
 } from '../simulation/timeUnit';
 import { useProject, useGarments, type OrderDraft } from '../store';
 import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
@@ -573,6 +576,35 @@ export function LiveSimPage() {
   const [hudOpen, setHudOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
+  // TIME SETUP drawer — model-time semantics + calendar anchoring for the
+  // run. Relocated here from the old Settings page so the controls that
+  // define what the header clocks mean live next to those clocks. Execution
+  // mode + playback speed stay in the transport bar (they already lived
+  // there). Dark-surface styling below mirrors the Sim view's overlays;
+  // colours go through alpha()/tokens so no raw literals hit the ratchet.
+  const [setupOpen, setSetupOpen] = useState(false);
+  const setupLabel: CSSProperties = {
+    display: 'block',
+    fontFamily: SW_FONTS.mono,
+    fontSize: 9,
+    fontWeight: 800,
+    letterSpacing: '0.14em',
+    color: alpha(SW_COLORS.paper, 0.6),
+    marginBottom: 6,
+  };
+  const setupInput: CSSProperties = {
+    width: '100%',
+    padding: '7px 9px',
+    background: alpha(SW_COLORS.paper, 0.06),
+    border: `1px solid ${alpha(SW_COLORS.paper, 0.2)}`,
+    borderRadius: SW_RADIUS.sm,
+    color: SW_COLORS.paper,
+    fontFamily: SW_FONTS.mono,
+    fontSize: 13,
+    fontWeight: 700,
+    colorScheme: 'dark',
+  };
+
   // Throughput in pieces/hour. Single-line scope multiplies the engine's
   // bundle-throughput by the run's bundle size; multi-line scope sums the
   // per-line pieces/hour (each line has its own bundle size, so a single
@@ -691,6 +723,32 @@ export function LiveSimPage() {
         </div>
         <TimeDisplay kind="WALL" surface="dark" primarySize={12} primary={wallStr} compact />
 
+        {/* TIME SETUP toggle — sits with the clocks because it defines what
+            they mean. Opens the model-time / calendar drawer below the bar. */}
+        <button
+          onClick={() => setSetupOpen((o) => !o)}
+          title="Model time unit, shift length & calendar anchor for the run"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '5px 10px',
+            background: setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.08),
+            border: `1px solid ${setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.2)}`,
+            borderRadius: SW_RADIUS.sm,
+            color: setupOpen ? SW_COLORS.paper : alpha(SW_COLORS.paper, 0.8),
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.14em',
+            cursor: 'pointer',
+          }}
+        >
+          <span aria-hidden>⚙</span>
+          <span>TIME SETUP</span>
+          <span aria-hidden style={{ opacity: 0.7 }}>{setupOpen ? '▾' : '▸'}</span>
+        </button>
+
         <div style={{ flex: 1 }} />
 
         {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
@@ -783,6 +841,132 @@ export function LiveSimPage() {
           );
         })()}
       </div>
+
+      {/* TIME SETUP DRAWER ─────────────────────────────────────────────────
+          Model-time semantics + calendar anchoring for the run, relocated
+          from the old Settings page. Full-width dark strip under the header;
+          collapses to nothing when closed so it never steals canvas height.
+          Execution mode + speed are intentionally NOT duplicated here — they
+          live in the transport bar at the bottom. */}
+      {setupOpen && (
+        <div
+          style={{
+            padding: '12px 24px 14px',
+            background: alpha(SW_COLORS.paper, 0.03),
+            borderBottom: `1px solid ${alpha(SW_COLORS.paper, 0.12)}`,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              color: alpha(SW_COLORS.paper, 0.5),
+              letterSpacing: '0.04em',
+              marginBottom: 10,
+              lineHeight: 1.5,
+            }}
+          >
+            MODEL &amp; TIME — what one tick of{' '}
+            <b style={{ color: alpha(SW_COLORS.paper, 0.85) }}>t</b> means, and how it maps to
+            the calendar. Execution mode &amp; playback speed are in the transport bar below.
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, 1fr)',
+              gap: 18,
+              alignItems: 'start',
+            }}
+          >
+            {/* Model time unit — dark inline toggle (ToggleGroup is light-only). */}
+            <div>
+              <span style={setupLabel}>MODEL TIME UNIT</span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {(['second', 'minute', 'hour', 'day'] as const).map((u) => {
+                  const active = project.time.modelTimeUnit === u;
+                  return (
+                    <button
+                      key={u}
+                      onClick={() => project.setTime('modelTimeUnit', u)}
+                      style={{
+                        flex: 1,
+                        padding: '7px 4px',
+                        textTransform: 'capitalize',
+                        background: active ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.06),
+                        color: active ? SW_COLORS.paper : alpha(SW_COLORS.paper, 0.7),
+                        border: 'none',
+                        borderRadius: SW_RADIUS.sm,
+                        fontFamily: SW_FONTS.mono,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {u}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Shift duration (minutes). */}
+            <div>
+              <span style={setupLabel}>SHIFT DURATION</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="number"
+                  min={30}
+                  max={1440}
+                  step={30}
+                  value={project.time.shiftDurationMin}
+                  onChange={(e) =>
+                    project.setTime(
+                      'shiftDurationMin',
+                      Math.max(30, Math.min(1440, parseInt(e.target.value) || 480)),
+                    )
+                  }
+                  style={{ ...setupInput, width: 84 }}
+                />
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: alpha(SW_COLORS.paper, 0.55) }}>
+                  min · {(project.time.shiftDurationMin / 60).toFixed(1)} h
+                </span>
+              </div>
+            </div>
+
+            {/* Simulation start date — calendar anchor for t = 0. */}
+            <div>
+              <span style={setupLabel}>START DATE · t = 0</span>
+              <input
+                type="date"
+                value={project.time.startDate.slice(0, 10)}
+                onChange={(e) => {
+                  const day = e.target.value;
+                  if (!day) return;
+                  // Preserve the existing time-of-day portion of startDate.
+                  const existing = new Date(project.time.startDate);
+                  const next = new Date(day);
+                  if (!Number.isNaN(existing.getTime())) {
+                    next.setHours(existing.getHours(), existing.getMinutes(), 0, 0);
+                  }
+                  project.setTime('startDate', next.toISOString());
+                }}
+                style={setupInput}
+              />
+            </div>
+
+            {/* Shift start time-of-day. */}
+            <div>
+              <span style={setupLabel}>SHIFT START</span>
+              <input
+                type="time"
+                value={fmtMinutesAsHHMM(project.time.shiftStartMinuteOfDay)}
+                onChange={(e) => project.setTime('shiftStartMinuteOfDay', parseHHMM(e.target.value))}
+                style={setupInput}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* SEWING LINES STRIP ────────────────────────────────────────────────
           One card per sewing line in the active twin. Click a card to scope

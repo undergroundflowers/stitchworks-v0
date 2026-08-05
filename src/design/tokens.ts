@@ -7,62 +7,143 @@
 import type { CSSProperties } from 'react';
 
 export const SW_COLORS = {
-  // Surface
-  ink: '#0F1419',
-  paper: '#FFFFFF',
-  paperDeep: '#FFFFFF',
-  paperEdge: '#E8E2D0',
-  steel: '#2A3340',
-  steelLite: '#3D4856',
+  // Surface — "Control Room": a dark instrument ground. `paper` is the ground
+  // and `ink` the near-white foreground, so the two anchors swap job versus
+  // the old light system. Five surface values, each a real step apart (the old
+  // paper === paperDeep made every ghost/secondary hover invisible).
+  ink: '#E8EDF5',
+  paper: '#0B0F16',
+  paperDeep: '#131924',
+  paperEdge: '#1E2634',
+  steel: '#161D29',
+  steelLite: '#212B3A',
 
-  // Brand
-  brand: '#FF5B26',
-  brandDeep: '#D43E0F',
-  brandLite: '#FFE4D6',
+  // Brand — the one colour that means "act on this", lifted for legibility on
+  // a dark ground. brandLite inverts from a pale tint to a dark tinted well.
+  brand: '#FF6B35',
+  brandDeep: '#E04E18',
+  brandLite: '#2A1710',
 
-  // Data palette — named after garment-factory artefacts so they're memorable
-  thread: '#FFB800',
-  fabric: '#2BA88B',
-  bobbin: '#4F7CFF',
-  press: '#C73E5F',
-  trim: '#8B5CF6',
-  ship: '#0EA5A4',
+  // Data palette — named after garment-factory artefacts so they're memorable.
+  // Generated, not picked: oklch(0.74 0.145 H) with H stepping 36° from 170 to
+  // 350. Constant lightness and chroma means no hue shouts louder than another
+  // as adjacent solid fills, and confining the arc to the cool half makes
+  // collision with the green/amber/red status ramp structurally impossible.
+  thread: '#20C3AC', // H170 · QC, inspection
+  fabric: '#12B4DC', // H206 · cutting, spreading
+  bobbin: '#5AA2F0', // H242 · sewing floor, overlock
+  press: '#8E93F2', // H278 · finishing, pressing
+  trim: '#C685E4', // H314 · storage, materials
+  ship: '#F27FA8', // H350 · outbound, dispatch
 
-  // Status
-  ok: '#1FB36B',
-  warn: '#F5A623',
-  alarm: '#E74C3C',
+  // Status — the utilisation ramp. Warm on purpose: the data palette is cool,
+  // so status can never be mistaken for a department.
+  ok: '#2BD07E', // util < 60% · flowing
+  warn: '#FFB223', // 60–85% · warming
+  alarm: '#FF4D55', // >= 85% · choked
   // Pressed/hover shades of ok/alarm — mirrors brandDeep so Button hover
   // states retheme with vibes instead of hardcoding.
-  okDeep: '#199A5C',
-  alarmDeep: '#C0392B',
+  okDeep: '#1FA862',
+  alarmDeep: '#D63B44',
 
   // UI grays (alpha on ink) — recomputed from the vibe's ink by applyVibe
-  line: '#0F141930',
-  muted: '#0F141999',
-  faint: '#0F141950',
-  /** Modal/dialog backdrop (ink @ 45%). */
-  overlay: '#0F141973',
+  line: '#E8EDF566',
+  muted: '#E8EDF599',
+  faint: '#E8EDF54F',
+  /** Hairline for gridlines and disabled ticks — never text. */
+  lineSoft: '#E8EDF52E',
+  /**
+   * Modal/dialog backdrop. NOT ink-alpha: on a dark ground `ink` is the light
+   * end, so an ink-alpha scrim would be a white wash. Derived from the ground
+   * instead — see the carve-out in applyVibe.
+   */
+  overlay: '#04070CB8',
 } as const;
 
+/**
+ * Saira is a technical grotesk with a real weight axis, so the display slot
+ * finally gets a working 700 instead of asking Archivo Black for a 900 it does
+ * not ship. Plex Sans and Plex Mono were designed as one system, which is what
+ * a load-bearing mono slot needs.
+ */
 export const SW_FONTS = {
-  display: '"Archivo Black", "Inter", system-ui, sans-serif',
-  body: '"Inter", system-ui, sans-serif',
-  mono: '"JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace',
+  display: '"Saira", "Inter", system-ui, sans-serif',
+  body: '"IBM Plex Sans", "Inter", system-ui, sans-serif',
+  mono: '"IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace',
 } as const;
 
-export const SW_RADIUS = { sm: 6, md: 10, lg: 14, xl: 22 } as const;
+export const SW_RADIUS = { sm: 4, md: 8, lg: 12, xl: 18 } as const;
 
+/**
+ * Shadows barely read on a near-black ground, so separation is carried by a 1px
+ * hairline plus a real surface-value step. Cards lift with a 1px white-3% top
+ * inset rather than a blur; the heavier steps exist only to rank floating
+ * things above each other.
+ */
 export const SW_SHADOWS = {
-  card: '0 1px 0 rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06)',
-  pop: '0 4px 14px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06)',
-  hi: '0 12px 40px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08)',
+  card: 'inset 0 1px 0 rgba(255,255,255,0.03), 0 1px 2px rgba(0,0,0,0.40)',
+  pop: '0 2px 8px rgba(0,0,0,0.50)',
+  hi: '0 12px 32px rgba(0,0,0,0.65)',
   /** Floating popovers/tooltips anchored to content. */
-  float: '0 8px 24px rgba(0,0,0,0.12)',
+  float: '0 6px 18px rgba(0,0,0,0.55)',
   /** Modal/dialog panels above a backdrop. */
-  overlay: '0 18px 50px rgba(0,0,0,0.25)',
-  /** HUD dropdown panels (select menus, pickers). */
-  hud: '0 12px 32px rgba(15,20,25,0.18), 0 2px 6px rgba(15,20,25,0.1)',
+  overlay: '0 24px 64px rgba(0,0,0,0.70)',
+  /** HUD dropdown panels (select menus, pickers) and canvas panels. */
+  hud: '0 8px 24px rgba(0,0,0,0.60)',
+} as const;
+
+/**
+ * Spacing — base 4, with one sub-base step at 2 for hairline insets. Everything
+ * else is a multiple of 4. Before this the app had no scale at all: 2/4/6/8/10/
+ * 12/14/16/18/24/32 all appeared, chosen per call site by habit.
+ */
+export const SW_SPACE = {
+  xxs: 2,
+  xs: 4,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 24,
+  xxl: 32,
+  huge: 48,
+} as const;
+
+/**
+ * Border widths. `accent` is the 3px left bar, and is reserved for status cards
+ * and toasts — never a general-purpose edge.
+ */
+export const SW_BORDER = { hairline: 1, base: 1, thick: 2, accent: 3 } as const;
+
+/**
+ * Stacking order. Replaces an ad-hoc range that ran from 1 to 2147483646 —
+ * anything floating must pick a layer from here so two overlays can never be
+ * ambiguous about which wins.
+ */
+export const SW_Z = {
+  base: 0,
+  raised: 1,
+  sticky: 10,
+  canvasPanel: 20,
+  dropdown: 100,
+  drawer: 200,
+  modal: 300,
+  toast: 400,
+  tooltip: 500,
+} as const;
+
+/**
+ * Motion — four durations, three curves. `standard` for state changes, `enter`
+ * for things arriving, `exit` for things leaving (faster, so dismissal feels
+ * immediate). Respect `prefers-reduced-motion` at the call site.
+ */
+export const SW_MOTION = {
+  instant: 80, // hover, press, tooltip
+  fast: 140, // view switch, modal exit
+  base: 220, // panel, modal, toast enter
+  slow: 360, // drawer, canvas fly-to
+  standard: 'cubic-bezier(.2, 0, 0, 1)',
+  enter: 'cubic-bezier(.05, .7, .1, 1)',
+  exit: 'cubic-bezier(.3, 0, .8, .15)',
 } as const;
 
 export type SwColor = (typeof SW_COLORS)[keyof typeof SW_COLORS];
@@ -79,42 +160,65 @@ export type SwColor = (typeof SW_COLORS)[keyof typeof SW_COLORS];
 export const SW_TYPE = {
   /** Hero/stat numerals. */
   get display(): CSSProperties {
-    return { fontFamily: SW_FONTS.display, fontSize: 32, fontWeight: 900, letterSpacing: '-0.02em' };
+    return { fontFamily: SW_FONTS.display, fontSize: 40, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1 };
   },
-  /** Default stat value. */
+  /** Page titles, default stat value. */
   get displaySm(): CSSProperties {
-    return { fontFamily: SW_FONTS.display, fontSize: 24, fontWeight: 900, letterSpacing: '-0.02em' };
+    return { fontFamily: SW_FONTS.display, fontSize: 28, fontWeight: 700, letterSpacing: '-0.015em', lineHeight: 1.05 };
   },
-  /** Page/section title (SectionHeader). */
+  /** Card headings, dialog titles (SectionHeader). */
   get title(): CSSProperties {
-    return { fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, letterSpacing: '-0.01em', lineHeight: 1.1 };
+    return { fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 1.15 };
   },
-  /** Card/panel heading. */
+  /** Panel headers. Fills the 22 → 15 gap the old scale left open. */
+  get subhead(): CSSProperties {
+    return { fontFamily: SW_FONTS.display, fontSize: 17, fontWeight: 600, lineHeight: 1.25 };
+  },
+  /** Group headers inside panels. */
   get heading(): CSSProperties {
-    return { fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 };
+    return { fontFamily: SW_FONTS.body, fontSize: 15, fontWeight: 600, lineHeight: 1.3 };
   },
-  /** Default prose. */
+  /** Default prose, table cells. */
   get body(): CSSProperties {
-    return { fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 500 };
+    return { fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 400, lineHeight: 1.45 };
   },
-  /** Buttons, form labels. */
+  /** Buttons, field labels. */
   get label(): CSSProperties {
-    return { fontFamily: SW_FONTS.body, fontSize: 12, fontWeight: 600 };
+    return { fontFamily: SW_FONTS.body, fontSize: 12, fontWeight: 500, letterSpacing: '0.005em', lineHeight: 1.35 };
   },
-  /** Secondary metadata. */
+  /** Helper text. Floor raised from 11 to 12 — this is prose, so it must read. */
   get caption(): CSSProperties {
-    return { fontFamily: SW_FONTS.body, fontSize: 11, fontWeight: 600 };
+    return { fontFamily: SW_FONTS.body, fontSize: 12, fontWeight: 400, lineHeight: 1.4 };
   },
-  /** Dense metadata, rail labels. */
+  /**
+   * Every in-table number, so columns align. Tabular figures are the whole
+   * point — a right-aligned proportional numeral column still looks ragged.
+   */
+  get numeric(): CSSProperties {
+    return {
+      fontFamily: SW_FONTS.mono,
+      fontSize: 13,
+      fontWeight: 500,
+      lineHeight: 1.2,
+      fontVariantNumeric: 'tabular-nums',
+    };
+  },
+  /** Op codes, HUD readouts. */
   get micro(): CSSProperties {
-    return { fontFamily: SW_FONTS.body, fontSize: 10, fontWeight: 600 };
+    return {
+      fontFamily: SW_FONTS.mono,
+      fontSize: 11,
+      fontWeight: 500,
+      letterSpacing: '0.04em',
+      textTransform: 'uppercase',
+    };
   },
-  /** Uppercase mono kicker above titles (SectionHeader). */
+  /** Uppercase mono kicker above titles, column headers (SectionHeader). */
   get kicker(): CSSProperties {
-    return { fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase' };
+    return { fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', lineHeight: 1.1 };
   },
-  /** Uppercase mono table/HUD column headers. */
+  /** Uppercase mono table/HUD column headers — the only 10px left in the scale. */
   get overline(): CSSProperties {
-    return { fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' };
+    return { fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 500, letterSpacing: '0.18em', textTransform: 'uppercase', lineHeight: 1.1 };
   },
 } as const;

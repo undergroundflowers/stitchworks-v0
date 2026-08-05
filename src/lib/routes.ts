@@ -30,7 +30,6 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
   { path: '/',          id: 'menu',      label: 'MENU',             icon: '⌂', kind: 'special' },
-  { path: '/floor',     id: 'floor',     label: 'Live Floor',       shortLabel: 'Floor',      icon: '⬢', kind: 'main' },
   { path: '/iso',       id: 'iso',       label: 'Factory Builder',  shortLabel: 'Builder',    icon: '◆', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Simulation',       shortLabel: 'Sim',        icon: '▷', kind: 'main' },
   { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
@@ -59,7 +58,7 @@ export const ROUTES: RouteDef[] = [
  * Drill-down routes that don't appear in the top-bar nav. Their paths are
  * parameterised; React Router resolves them to the dedicated pages.
  *
- *   /dept/:deptId               department interior (drill-down from Live Floor)
+ *   /dept/:deptId               department interior (drill-down from the Builder)
  *   /workstation/:deptId/:wsId  one workstation inside a department
  */
 export const DRILL_PATHS = {

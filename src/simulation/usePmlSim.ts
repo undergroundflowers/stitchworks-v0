@@ -2,7 +2,7 @@
  * React hook — PML simulation playback over time.
  *
  * Drop-in replacement for the legacy `useSim` hook. Returns the same
- * `UseSimResult` shape so existing LiveSim / LiveFloor / Scenarios views
+ * `UseSimResult` shape so existing LiveSim / Scenarios views
  * consume it unchanged.
  *
  * Mechanics:

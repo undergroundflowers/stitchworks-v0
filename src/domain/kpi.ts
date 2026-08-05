@@ -164,40 +164,6 @@ export function outputPerOperatorHour(opts: {
 }
 
 /**
- * Cost per piece given materials, direct labor, and overhead.
- */
-export function costPerPiece(opts: {
-  materialUsd: number;
-  laborUsd: number;
-  overheadUsd: number;
-}): number {
-  return opts.materialUsd + opts.laborUsd + opts.overheadUsd;
-}
-
-/**
- * Composite layout-comparison score, taken from the research-paper rubric:
- *   0.30 × normThroughput + 0.20 × (1 - normLeadTime) + 0.20 × (1 - normMHCost)
- *   + 0.15 × normUtilisation + 0.15 × (1 - normWIP)
- *
- * Inputs should already be normalised to 0..1 against the best scenario.
- */
-export function compositeLayoutScore(opts: {
-  normThroughput: number;
-  normLeadTime: number;
-  normMaterialHandlingCost: number;
-  normUtilisation: number;
-  normWip: number;
-}): number {
-  return (
-    0.30 * opts.normThroughput +
-    0.20 * (1 - opts.normLeadTime) +
-    0.20 * (1 - opts.normMaterialHandlingCost) +
-    0.15 * opts.normUtilisation +
-    0.15 * (1 - opts.normWip)
-  );
-}
-
-/**
  * Smoothness Index = √(Σ(CT − ti)²) / (CT × N)
  * Variance of station loads. Lower = smoother. Per Koc & Eryürük 2025 eq. 10.
  * RPW heuristic typically achieves SI in the 0.15–0.25 range on realistic
@@ -434,27 +400,14 @@ export function qualityFromYield(opts: { goodPieces: number; totalPieces: number
 }
 
 /**
- * OEE = Availability × Performance × Quality.
+ * OEE = Performance × Quality.
  * Each input is a 0..1 fraction; the product is also 0..1. Multiply by 100
- * for the percentage figure the IE typically reports.
+ * for the percentage figure the IE typically reports. (Machine-availability
+ * is out of scope for this sewing-floor simulator, so the classic
+ * Availability factor is intentionally omitted.)
  */
-export function oee(opts: { availability: number; performance: number; quality: number }): number {
-  return opts.availability * opts.performance * opts.quality;
-}
-
-/**
- * Availability fraction for OEE = runtime / planned production time, where
- * planned time = runtime + downtime + changeover. Changeover is split out
- * from generic downtime so the IE can attribute lost minutes to setup vs
- * mechanical failure separately.
- */
-export function availabilityFromState(opts: {
-  runtimeMin: number;
-  downtimeMin: number;
-  changeoverMin: number;
-}): number {
-  const planned = opts.runtimeMin + opts.downtimeMin + opts.changeoverMin;
-  return planned > 0 ? opts.runtimeMin / planned : 0;
+export function oee(opts: { performance: number; quality: number }): number {
+  return opts.performance * opts.quality;
 }
 
 /**
@@ -542,18 +495,4 @@ export function intrinsicVsDynamicRatio(opts: {
   const intrinsic = lineBalanceRatio(opts.nominalStationSmvs);
   const dynamic = lineBalanceRatio(opts.skillAdjustedStationSmvs);
   return dynamic > 0 ? intrinsic / dynamic : 0;
-}
-
-/**
- * Cost per piece from cumulative totals (USD spent ÷ pieces produced).
- * Sibling of `costPerPiece` which sums per-piece inputs already.
- */
-export function costPerPieceFromTotals(opts: {
-  totalLabourUsd: number;
-  totalMaterialUsd: number;
-  totalOverheadUsd: number;
-  pieces: number;
-}): number {
-  if (opts.pieces <= 0) return 0;
-  return (opts.totalLabourUsd + opts.totalMaterialUsd + opts.totalOverheadUsd) / opts.pieces;
 }

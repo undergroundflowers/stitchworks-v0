@@ -26,6 +26,12 @@ interface WorkstationSpriteProps {
   /** Optional state tint — running stations glow brand, idle ones go grey. */
   state?: 'idle' | 'running' | 'broken';
   style?: CSSProperties;
+  /** When BOTH width and height are given, render at exactly that pixel box
+   *  (glyph letterboxed via preserveAspectRatio) instead of deriving the box
+   *  from `size`. Used by the Builder's 2D plan view to fit a sprite into a
+   *  station's cell footprint inside a parent SVG. */
+  width?: number;
+  height?: number;
 }
 
 /** Aspect ratio of the sprite's natural footprint, in cells. */
@@ -61,19 +67,30 @@ export function WorkstationSprite({
   withTable = true,
   state,
   style,
+  width,
+  height,
 }: WorkstationSpriteProps) {
   const spec = MACHINE_CATALOG[code];
   const [vw, vh] = FOOTPRINT_VIEWBOX[code] ?? [100, 100];
   const ratio = vw / vh;
   const w = size * ratio;
   const h = size;
+  // Explicit box mode: the caller pins the exact pixel box; the responsive
+  // maxWidth/height:auto CSS (meant for HTML layout) is suppressed because it
+  // fights attribute sizing inside a nested-SVG context.
+  const fixedBox = width != null && height != null;
 
   return (
     <svg
       viewBox={`0 0 ${vw} ${vh}`}
-      width={w}
-      height={h}
-      style={{ display: 'block', overflow: 'visible', maxWidth: '100%', height: 'auto', ...style }}
+      width={fixedBox ? width : w}
+      height={fixedBox ? height : h}
+      preserveAspectRatio="xMidYMid meet"
+      style={
+        fixedBox
+          ? { display: 'block', overflow: 'visible', ...style }
+          : { display: 'block', overflow: 'visible', maxWidth: '100%', height: 'auto', ...style }
+      }
       aria-label={spec.label}
     >
       {withTable && <StationTable spec={spec} vw={vw} vh={vh} />}
@@ -208,7 +225,7 @@ function SewingMachineHead({
       <ellipse cx={cx + 4} cy={cy + 22} rx={24} ry={5} fill={SW_COLORS.ink} opacity={0.22} />
 
       {/* Motor block (rear) — solid steel cuboid with bevel */}
-      <rect x={cx - 26} y={cy - 18} width={18} height={36} rx={3} fill={SW_COLORS.steel} />
+      <rect x={cx - 26} y={cy - 18} width={18} height={36} rx={3} fill={SW_COLORS.muted} />
       <rect x={cx - 26} y={cy - 18} width={18} height={5} rx={3} fill={SW_COLORS.steelLite} />
       <rect x={cx - 24} y={cy - 13} width={4} height={4} fill={accent} />
       <rect x={cx - 24} y={cy - 5} width={4} height={4} fill={accent} />
@@ -218,7 +235,7 @@ function SewingMachineHead({
       {/* Arm */}
       {arm === 'cylinder' ? (
         <>
-          <ellipse cx={cx + 8} cy={cy} rx={20} ry={6} fill={SW_COLORS.steel} />
+          <ellipse cx={cx + 8} cy={cy} rx={20} ry={6} fill={SW_COLORS.muted} />
           <ellipse cx={cx + 8} cy={cy - 2} rx={20} ry={3} fill={SW_COLORS.steelLite} />
           <circle cx={cx + 24} cy={cy} r={5} fill={accent} />
           <circle cx={cx + 24} cy={cy} r={2.5} fill={accentDeep} />
@@ -227,7 +244,7 @@ function SewingMachineHead({
         <>
           <path
             d={`M ${cx - 8} ${cy - 8} Q ${cx + 12} ${cy - 14} ${cx + 22} ${cy} Q ${cx + 12} ${cy + 14} ${cx - 8} ${cy + 8} Z`}
-            fill={SW_COLORS.steel}
+            fill={SW_COLORS.muted}
           />
           <path
             d={`M ${cx - 8} ${cy - 8} Q ${cx + 12} ${cy - 14} ${cx + 22} ${cy} Q ${cx + 8} ${cy - 8} ${cx - 8} ${cy - 6} Z`}
@@ -236,7 +253,7 @@ function SewingMachineHead({
         </>
       ) : (
         <>
-          <rect x={cx - 8} y={cy - 7} width={32} height={14} rx={3} fill={SW_COLORS.steel} />
+          <rect x={cx - 8} y={cy - 7} width={32} height={14} rx={3} fill={SW_COLORS.muted} />
           <rect x={cx - 8} y={cy - 7} width={32} height={4} rx={3} fill={SW_COLORS.steelLite} />
         </>
       )}
@@ -271,7 +288,7 @@ function SewingMachineHead({
       <line x1={cx - 17} y1={cy - 22} x2={cx + 14} y2={cy - 7} stroke={SW_COLORS.thread} strokeWidth={1} />
 
       {/* Hand wheel — solid disc + spokes */}
-      <circle cx={cx - 8} cy={cy + 16} r={5.5} fill={SW_COLORS.steel} />
+      <circle cx={cx - 8} cy={cy + 16} r={5.5} fill={SW_COLORS.muted} />
       <circle cx={cx - 8} cy={cy + 16} r={4} fill={SW_COLORS.steelLite} />
       <circle cx={cx - 8} cy={cy + 16} r={1.6} fill={accent} />
     </g>
@@ -281,7 +298,7 @@ function SewingMachineHead({
 function ButtonholeHead({ cx, cy }: { cx: number; cy: number }) {
   return (
     <g>
-      <rect x={cx - 22} y={cy - 14} width={44} height={28} rx={4} fill={SW_COLORS.steel} />
+      <rect x={cx - 22} y={cy - 14} width={44} height={28} rx={4} fill={SW_COLORS.muted} />
       <rect x={cx - 22} y={cy - 14} width={44} height={7} rx={4} fill={SW_COLORS.steelLite} />
       <rect x={cx - 14} y={cy - 2} width={28} height={5} rx={2.5} fill={SW_COLORS.paper} />
       <rect x={cx - 12} y={cy - 1} width={24} height={3} rx={1.5} fill={SW_COLORS.ink} />
@@ -299,7 +316,7 @@ function ButtonholeHead({ cx, cy }: { cx: number; cy: number }) {
 function ButtonSewHead({ cx, cy }: { cx: number; cy: number }) {
   return (
     <g>
-      <rect x={cx - 20} y={cy - 14} width={40} height={28} rx={4} fill={SW_COLORS.steel} />
+      <rect x={cx - 20} y={cy - 14} width={40} height={28} rx={4} fill={SW_COLORS.muted} />
       <rect x={cx - 20} y={cy - 14} width={40} height={7} rx={4} fill={SW_COLORS.steelLite} />
       <circle cx={cx} cy={cy} r={7} fill={SW_COLORS.paper} />
       <circle cx={cx} cy={cy} r={5.5} fill={SW_COLORS.bobbin} />
@@ -316,7 +333,7 @@ function ButtonSewHead({ cx, cy }: { cx: number; cy: number }) {
 function BartackHead({ cx, cy }: { cx: number; cy: number }) {
   return (
     <g>
-      <rect x={cx - 22} y={cy - 12} width={44} height={24} rx={4} fill={SW_COLORS.steel} />
+      <rect x={cx - 22} y={cy - 12} width={44} height={24} rx={4} fill={SW_COLORS.muted} />
       <rect x={cx - 22} y={cy - 12} width={44} height={6} rx={4} fill={SW_COLORS.steelLite} />
       <rect x={cx - 7} y={cy - 6} width={14} height={12} rx={1.5} fill={SW_COLORS.paper} />
       <g fill={SW_COLORS.trim}>
@@ -337,7 +354,7 @@ function EmbroideryHead({ vw, vh }: { vw: number; vh: number }) {
   return (
     <g>
       <ellipse cx={cx + 4} cy={cy + 35} rx={75} ry={6} fill={SW_COLORS.ink} opacity={0.22} />
-      <rect x={cx - 70} y={cy - 30} width={140} height={60} rx={5} fill={SW_COLORS.steel} />
+      <rect x={cx - 70} y={cy - 30} width={140} height={60} rx={5} fill={SW_COLORS.muted} />
       <rect x={cx - 70} y={cy - 30} width={140} height={12} rx={5} fill={SW_COLORS.steelLite} />
       <rect x={cx - 64} y={cy - 24} width={128} height={20} rx={3} fill={shade(SW_COLORS.steel, 0.2)} />
       {[-48, -16, 16, 48].map((dx, i) => (
@@ -361,10 +378,10 @@ function StraightKnifeHead({ cx, cy }: { cx: number; cy: number }) {
   return (
     <g>
       <ellipse cx={cx + 2} cy={cy + 20} rx={28} ry={4} fill={SW_COLORS.ink} opacity={0.22} />
-      <rect x={cx - 26} y={cy - 4} width={52} height={8} rx={2} fill={SW_COLORS.steel} />
+      <rect x={cx - 26} y={cy - 4} width={52} height={8} rx={2} fill={SW_COLORS.muted} />
       <rect x={cx - 26} y={cy - 4} width={52} height={2.5} rx={2} fill={SW_COLORS.steelLite} />
       <rect x={cx - 7} y={cy - 24} width={14} height={28} rx={2} fill={SW_COLORS.steelLite} />
-      <rect x={cx - 7} y={cy - 24} width={14} height={4} rx={2} fill={SW_COLORS.steel} />
+      <rect x={cx - 7} y={cy - 24} width={14} height={4} rx={2} fill={SW_COLORS.muted} />
       <rect x={cx - 2} y={cy - 14} width={4} height={26} fill={SW_COLORS.press} />
       <rect x={cx - 1} y={cy + 6} width={2} height={14} fill={SW_COLORS.ink} />
       <circle cx={cx} cy={cy - 22} r={3.5} fill={SW_COLORS.brand} />
@@ -391,12 +408,12 @@ function CadCutterHead({ vw, vh }: { vw: number; vh: number }) {
             cx={cx - 160 + rx2 * 20}
             cy={cy - 50 + ry * 20}
             r={1.4}
-            fill={SW_COLORS.steel}
+            fill={SW_COLORS.muted}
           />
         )),
       )}
       {/* Gantry rail */}
-      <rect x={cx - 170} y={cy - 6} width={340} height={14} fill={SW_COLORS.steel} />
+      <rect x={cx - 170} y={cy - 6} width={340} height={14} fill={SW_COLORS.muted} />
       <rect x={cx - 170} y={cy - 6} width={340} height={4} fill={SW_COLORS.steelLite} />
       {/* Cutting head */}
       <rect x={cx + 40} y={cy - 24} width={40} height={32} rx={3} fill={SW_COLORS.brand} />
@@ -432,7 +449,7 @@ function SpreaderHead({ vw, vh }: { vw: number; vh: number }) {
       <rect x={cx - 160} y={cy - 12} width={320} height={6} fill={SW_COLORS.fabric} />
       <rect x={cx - 160} y={cy - 2} width={320} height={6} fill={shade(SW_COLORS.fabric, 0.18)} />
       {/* Carriage */}
-      <rect x={cx + 110} y={cy - 32} width={50} height={64} rx={3} fill={SW_COLORS.steel} />
+      <rect x={cx + 110} y={cy - 32} width={50} height={64} rx={3} fill={SW_COLORS.muted} />
       <rect x={cx + 110} y={cy - 32} width={50} height={10} rx={3} fill={SW_COLORS.steelLite} />
       <rect x={cx + 116} y={cy - 26} width={28} height={12} fill={SW_COLORS.brand} />
       <rect x={cx + 116} y={cy - 26} width={28} height={3} fill={shade(SW_COLORS.brand, 0.25)} />
@@ -455,7 +472,7 @@ function FusingPressHead({ vw, vh }: { vw: number; vh: number }) {
     <g>
       <ellipse cx={cx + 4} cy={cy + 22} rx={90} ry={5} fill={SW_COLORS.ink} opacity={0.22} />
       {/* Conveyor */}
-      <rect x={cx - 80} y={cy - 14} width={160} height={30} rx={3} fill={SW_COLORS.steel} />
+      <rect x={cx - 80} y={cy - 14} width={160} height={30} rx={3} fill={SW_COLORS.muted} />
       <rect x={cx - 80} y={cy - 14} width={160} height={6} rx={3} fill={SW_COLORS.steelLite} />
       <rect x={cx - 76} y={cy - 4} width={152} height={16} fill={SW_COLORS.ink} />
       {/* Belt notches */}
@@ -498,7 +515,7 @@ function IronHead({ cx, cy }: { cx: number; cy: number }) {
         d={`M ${cx - 14} ${cy - 4} L ${cx + 14} ${cy - 6} L ${cx + 14} ${cy - 4} L ${cx - 14} ${cy - 3} Z`}
         fill="#FFFFFF"
       />
-      <rect x={cx - 12} y={cy - 13} width={20} height={8} rx={3} fill={SW_COLORS.steel} />
+      <rect x={cx - 12} y={cy - 13} width={20} height={8} rx={3} fill={SW_COLORS.muted} />
       <rect x={cx - 12} y={cy - 13} width={20} height={2.5} rx={3} fill={SW_COLORS.steelLite} />
       {/* Steam — solid wavy glyphs */}
       <g stroke={SW_COLORS.bobbin} strokeWidth={2} fill="none" strokeLinecap="round">
@@ -517,7 +534,7 @@ function SteamTunnelHead({ vw, vh }: { vw: number; vh: number }) {
     <g>
       <ellipse cx={cx + 4} cy={cy + 66} rx={180} ry={7} fill={SW_COLORS.ink} opacity={0.22} />
       {/* Tunnel body — solid steel cuboid */}
-      <rect x={cx - 170} y={cy - 60} width={340} height={120} rx={20} fill={SW_COLORS.steel} />
+      <rect x={cx - 170} y={cy - 60} width={340} height={120} rx={20} fill={SW_COLORS.muted} />
       <rect x={cx - 170} y={cy - 60} width={340} height={24} rx={20} fill={SW_COLORS.steelLite} />
       <rect x={cx - 160} y={cy - 50} width={320} height={100} rx={14} fill={shade(SW_COLORS.steel, 0.18)} />
       {/* Inner cavity */}
@@ -568,7 +585,7 @@ function InspectionHead({ cx, cy }: { cx: number; cy: number }) {
       <circle cx={cx + 18} cy={cy - 18} r={8} fill={SW_COLORS.steelLite} />
       <circle cx={cx + 18} cy={cy - 18} r={5.5} fill={SW_COLORS.bobbin} />
       <circle cx={cx + 16} cy={cy - 20} r={1.6} fill="#FFFFFF" />
-      <rect x={cx + 22} y={cy - 13} width={8} height={3} rx={1} transform={`rotate(35 ${cx + 22} ${cy - 13})`} fill={SW_COLORS.steel} />
+      <rect x={cx + 22} y={cy - 13} width={8} height={3} rx={1} transform={`rotate(35 ${cx + 22} ${cy - 13})`} fill={SW_COLORS.muted} />
     </g>
   );
 }
@@ -583,9 +600,9 @@ function ManualHead({ cx, cy }: { cx: number; cy: number }) {
       {/* Solid scissors */}
       <polygon points={`${cx - 6},${cy + 6} ${cx + 12},${cy - 10} ${cx + 13},${cy - 9} ${cx - 5},${cy + 7}`} fill={SW_COLORS.steelLite} />
       <polygon points={`${cx + 6},${cy + 6} ${cx - 12},${cy - 10} ${cx - 13},${cy - 9} ${cx + 5},${cy + 7}`} fill={SW_COLORS.steelLite} />
-      <circle cx={cx - 8} cy={cy + 6} r={3.4} fill={SW_COLORS.steel} />
+      <circle cx={cx - 8} cy={cy + 6} r={3.4} fill={SW_COLORS.muted} />
       <circle cx={cx - 8} cy={cy + 6} r={1.6} fill={SW_COLORS.paperEdge} />
-      <circle cx={cx + 8} cy={cy + 6} r={3.4} fill={SW_COLORS.steel} />
+      <circle cx={cx + 8} cy={cy + 6} r={3.4} fill={SW_COLORS.muted} />
       <circle cx={cx + 8} cy={cy + 6} r={1.6} fill={SW_COLORS.paperEdge} />
       {/* Spool of thread */}
       <rect x={cx + 10} y={cy + 8} width={6} height={4} fill={SW_COLORS.thread} />

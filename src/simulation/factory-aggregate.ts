@@ -111,7 +111,6 @@ export function aggregateFactoryKpis(
     return { mean, std: Math.sqrt(variance) };
   };
   const oee              = wIntensive((l) => l.agg.oee);
-  const oeeAvailability  = wIntensive((l) => l.agg.oeeAvailability);
   const oeePerformance   = wIntensive((l) => l.agg.oeePerformance);
   const oeeQuality       = wIntensive((l) => l.agg.oeeQuality);
   const onStandardPct    = wIntensive((l) => l.agg.onStandardPct);
@@ -134,14 +133,10 @@ export function aggregateFactoryKpis(
     mean: sumMean((l) => l.agg.demandTaktGap),
     std: sumStd((l) => l.agg.demandTaktGap),
   };
-  // Changeover / downtime minutes — extensive across lines.
+  // Changeover minutes — extensive across lines.
   const totalChangeoverMin = {
     mean: sumMean((l) => l.agg.totalChangeoverMin),
     std: sumStd((l) => l.agg.totalChangeoverMin),
-  };
-  const totalDowntimeMin = {
-    mean: sumMean((l) => l.agg.totalDowntimeMin),
-    std: sumStd((l) => l.agg.totalDowntimeMin),
   };
   // Per-order completion times — union across lines. An order should
   // belong to exactly one line in a well-formed setup, so the union is
@@ -166,7 +161,6 @@ export function aggregateFactoryKpis(
     utilization,
     wipBundles,
     oee,
-    oeeAvailability,
     oeePerformance,
     oeeQuality,
     onStandardPct,
@@ -174,7 +168,6 @@ export function aggregateFactoryKpis(
     labourProductivity,
     demandTaktGap,
     totalChangeoverMin,
-    totalDowntimeMin,
     perOrderCompletionTime,
     bottleneckOpName: slowest?.agg.bottleneckOpName ?? '—',
     bottleneckQueue: slowest?.agg.bottleneckQueue ?? 0,
@@ -196,7 +189,6 @@ function emptyAgg(): AggregateKpis {
     utilization: zero,
     wipBundles: zero,
     oee: zero,
-    oeeAvailability: zero,
     oeePerformance: zero,
     oeeQuality: zero,
     onStandardPct: zero,
@@ -204,7 +196,6 @@ function emptyAgg(): AggregateKpis {
     labourProductivity: zero,
     demandTaktGap: zero,
     totalChangeoverMin: zero,
-    totalDowntimeMin: zero,
     perOrderCompletionTime: {},
     bottleneckOpName: '—',
     bottleneckQueue: 0,

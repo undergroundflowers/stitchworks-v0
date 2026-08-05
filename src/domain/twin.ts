@@ -269,8 +269,6 @@ export interface ResourceAttrs {
   /** Catalogue machine id (DEPT_MACHINE_CATALOG.id), when the workstation IS
    *  a machine. Null for tables / racks / pure storage. */
   machineId: string | null;
-  /** Energy draw in kW; falls back to the catalogue value. */
-  powerKw?: number;
 }
 
 /** KPI lens — split into authored *targets* and the most-recent *observed*
@@ -665,11 +663,11 @@ export interface ScenarioKpis {
   bottleneckQueue: number;
   /** Number of replications behind these means. 1 = single-seed. */
   replicationCount?: number;
-  /** OEE three-factor product (Availability × Performance × Quality), 0..1.
-   *  Until P2 lands rework + downtime + changeover, Quality defaults to 1.0
-   *  and Availability defaults to 1.0; only Performance carries information. */
+  /** OEE two-factor product (Performance × Quality), 0..1. Machine
+   *  availability is out of scope for this simulator, so the classic
+   *  Availability factor is omitted. Quality defaults to 1.0 until rework /
+   *  scrap lands; only Performance carries information today. */
   oee?: number;
-  oeeAvailability?: number;
   oeePerformance?: number;
   oeeQuality?: number;
   /** On-standard performance % — alias of BSI for the lean-vocabulary reader. */
@@ -694,8 +692,6 @@ export interface ScenarioKpis {
    *  emitted by the Source until the order's last piece reaches the Sink).
    *  Keyed by Order.id. Populated by P4's order-aware engine. */
   perOrderCompletionTime?: Record<string, number>;
-  /** Minutes lost to machine downtime during the run; populated in P2. */
-  downtimeMinutes?: number;
   std?: {
     producedPieces: number;
     throughputPerHr: number;
@@ -776,7 +772,18 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     modifiedAt: now,
     gridW: 36,
     gridH: 28,
-    departments: [],
+    // Sewing-centric: the sewing floor is the only zoned region the builder
+    // authors, so every new factory is seeded with one. Without it a blank
+    // twin would have nowhere to drop a station.
+    departments: [
+      {
+        id: newDeptId(),
+        name: 'Sewing Floor',
+        kind: 'Sewing',
+        color: 'blue',
+        bounds: { x: 2, y: 2, w: 24, h: 18 },
+      },
+    ],
     lines: [],
     workstations: [],
     connectors: [],
@@ -815,7 +822,7 @@ export function normalizeTwin(input: unknown): Twin {
 
 /**
  * Build the "Pachyatap Demo Apparel Co." factory — a fully-populated canonical
- * twin used to seed a fresh project so that the Builder and the Live Floor are
+ * twin used to seed a fresh project so that the Builder and the simulation views are
  * never empty in a demo. Lays out a five-department T-shirt factory on a
  * 36×26 grid: Storage, Cutting, QC at the top; Sewing line and Finishing
  * across the bottom. Every sewing station is wired to a real op id from the
@@ -1003,8 +1010,6 @@ export function makeWorkstation(input: {
       : isMachine
         ? 1
         : 0;
-  const powerKw =
-    typeof seedProps.power_kw === 'number' ? (seedProps.power_kw as number) : undefined;
 
   // If the fixture is a PML primitive (`pml_*` id), auto-stamp the matching
   // block kind so the new workstation lands as e.g. a real Source / Queue /
@@ -1025,7 +1030,6 @@ export function makeWorkstation(input: {
       workerArchetypeId: null,
       materialsPerCycle: {},
       machineId: isMachine ? input.catalogId : null,
-      powerKw,
     },
     kpiTargets: {},
     block: pmlKind

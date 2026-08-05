@@ -15,6 +15,7 @@ import {
   type PmlCategory,
 } from './pml';
 import type { PmlIconComponent } from '../assets/pml-icons';
+import type { MachineCode } from './machines';
 
 // ============================================================================
 // ISO PROJECTION
@@ -44,6 +45,42 @@ export function unproject(sx: number, sy: number): { x: number; y: number } {
     y: (sy / ISO_THIN - sx / ISO_TILE) / 2,
   };
 }
+
+// ============================================================================
+// FLAT (2D top-down) PROJECTION
+// The Builder's 2D plan view shares the same integer cell grid as ISO but
+// maps cells 1:1 onto screen pixels (no diamond skew, no altitude). Both
+// projections are packaged as a `Projection` pair so the canvas and its
+// page-level handlers can be parameterized instead of forked.
+// ============================================================================
+
+export const FLAT_CELL = 40; // px per cell at zoom 1 (2D top-down view)
+
+export interface Projection {
+  kind: 'iso' | 'flat';
+  project: (x: number, y: number, z?: number) => IsoPoint;
+  unproject: (sx: number, sy: number) => { x: number; y: number };
+}
+
+export function flatProj(x: number, y: number, _z: number = 0): IsoPoint {
+  return { sx: x * FLAT_CELL, sy: y * FLAT_CELL };
+}
+
+export function flatUnproject(sx: number, sy: number): { x: number; y: number } {
+  return { x: sx / FLAT_CELL, y: sy / FLAT_CELL };
+}
+
+export const ISO_PROJECTION: Projection = {
+  kind: 'iso',
+  project: isoProj,
+  unproject,
+};
+
+export const FLAT_PROJECTION: Projection = {
+  kind: 'flat',
+  project: flatProj,
+  unproject: flatUnproject,
+};
 
 /** Rotate a local (x, y) point on the build plane by `r` (0/90/180/270) so
  *  that the rotated bounding box still anchors at (0, 0). Used by isoProjR
@@ -92,26 +129,42 @@ export function isoProjR(
 // PALETTE — hybrid cream / brand red / blue / yellow accents
 // ============================================================================
 
+/**
+ * Palette for the isometric sprites. Kept separate from SW_COLORS because these
+ * are pigments for drawing objects (a machine body, a table top, a thread cone)
+ * rather than UI roles, and they must not retheme when the vibe changes — a
+ * sewing machine is the same colour in every theme.
+ *
+ * "Control Room" reads the floor as desaturated slate so that saturation always
+ * means *state*: a choked station is the brightest thing on the stage precisely
+ * because the machinery around it is not competing. The `cream*` names are kept
+ * (the sprite modules reference them at ~200 call sites) but now carry slate
+ * values — the machine-body ramp, light to dark.
+ */
 export const SW_PAL = {
-  cream: '#F6F1E5',
-  creamHi: '#FFFAEB',
-  creamLo: '#E2DBC8',
-  ink: '#0F1419',
-  steel: '#3F4A55',
-  edge: '#1E2530',
-  red: '#E63946',
-  redLo: '#A92638',
-  blue: '#3D6EE5',
-  blueLo: '#2750B0',
-  yellow: '#F2C12E',
-  yellowLo: '#C99A1F',
-  paper: '#FFFEF8',
-  paperShade: '#EDE6D2',
-  metal: '#9AA6B2',
-  metalLo: '#6F7A86',
-  wood: '#C8915E',
-  woodLo: '#8E5F36',
-  green: '#1FB36B',
+  cream: '#2A3444',
+  creamHi: '#3A4658',
+  creamLo: '#1E2634',
+  ink: '#080B11',
+  steel: '#4A5768',
+  edge: '#131924',
+  // Accent details — thread cones, spool caps, control panels. These are the one
+  // place colour is allowed on a sprite, so they come from the app palette:
+  // alarm, bobbin, warn and ok respectively.
+  red: '#FF4D55',
+  redLo: '#D63B44',
+  blue: '#5AA2F0',
+  blueLo: '#3A7DC9',
+  yellow: '#FFB223',
+  yellowLo: '#C9861A',
+  green: '#2BD07E',
+  // Work surfaces — table tops, cutting beds.
+  paper: '#232D3D',
+  paperShade: '#1A222E',
+  metal: '#8794A6',
+  metalLo: '#5C6875',
+  wood: '#8A6A4A',
+  woodLo: '#5E452C',
 } as const;
 
 export type IsoPaletteKey = keyof typeof SW_PAL;
@@ -1314,15 +1367,6 @@ function packBench(): IsoDrawFn {
       })(),
     );
 }
-function compressor(): IsoDrawFn {
-  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.blue, left: SW_PAL.blueLo, right: SW_PAL.blue, r });
-}
-function breakerPanel(): IsoDrawFn {
-  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel, r });
-}
-function hvac(): IsoDrawFn {
-  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r });
-}
 
 // ── Apparel-specific draw fns ───────────────────────────────────────────────
 
@@ -1432,7 +1476,6 @@ export type IsoCategoryId =
   | 'op'
   | 'buf'
   | 'fix'
-  | 'util'
   | 'pml';
 
 export interface IsoCategory {
@@ -1452,7 +1495,6 @@ export const ISO_CATEGORIES: IsoCategory[] = [
   { id: 'op', label: 'Operators', icon: '☻' },
   { id: 'buf', label: 'Buffers', icon: '◫' },
   { id: 'fix', label: 'Fixtures', icon: '▭' },
-  { id: 'util', label: 'Utilities', icon: '⚡' },
   { id: 'pml', label: 'Process blocks', icon: '⚙' },
 ];
 
@@ -1469,8 +1511,6 @@ export const ISO_CATEGORIES: IsoCategory[] = [
 export type ApparelCategoryId =
   | 'sew_mach'
   | 'sew_fix'
-  | 'cut_mach'
-  | 'cut_fix'
   | 'material'
   | 'operator';
 
@@ -1483,8 +1523,6 @@ export interface ApparelCategory {
 export const APPAREL_CATEGORIES: ApparelCategory[] = [
   { id: 'sew_mach', label: 'Sewing machines',  icon: '⌃' },
   { id: 'sew_fix',  label: 'Sewing fixtures',  icon: '▭' },
-  { id: 'cut_mach', label: 'Cutting machines', icon: '⫻' },
-  { id: 'cut_fix',  label: 'Cutting fixtures', icon: '◎' },
   { id: 'material', label: 'Materials handling', icon: '⛟' },
   { id: 'operator', label: 'Operators',         icon: '☻' },
 ];
@@ -1492,7 +1530,13 @@ export const APPAREL_CATEGORIES: ApparelCategory[] = [
 /** Curated apparel asset list. Maps each apparel category to the catalogue
  *  ids the user should see in that group, in the order they should appear.
  *  Renamed from APPAREL_PALETTE to disambiguate from palette.ts's flat
- *  PaletteElement[] of the same name (caused a star-export conflict). */
+ *  PaletteElement[] of the same name (caused a star-export conflict).
+ *
+ *  Sewing-floor scope: cutting-room assets (spreaders, knives, CNC cutter,
+ *  marker plotter, cut/inspection tables, fabric roll rack) and the
+ *  role-specific operators are deliberately absent. They remain in
+ *  ISO_FIXTURE_CATALOG so factories that already placed them still render
+ *  and WORKER_ROLE_FIXTURE still resolves — they're just not offered. */
 export const APPAREL_FIXTURE_PALETTE: Record<ApparelCategoryId, string[]> = {
   sew_mach: [
     'a_snls', 'a_dnls',
@@ -1505,14 +1549,12 @@ export const APPAREL_FIXTURE_PALETTE: Record<ApparelCategoryId, string[]> = {
     'a_embroidery',
   ],
   sew_fix: ['a_iron_inline', 'a_wip_rack', 'a_op_desk'],
-  cut_mach: [
-    'a_spread_manual', 'a_spread_auto',
-    'a_knife_straight', 'a_knife_band', 'a_cnc_cutter',
-    'a_marker_plotter',
-  ],
-  cut_fix: ['a_cut_table', 'a_inspect_table'],
-  material: ['a_fabric_rack', 'a_bundle_trolley'],
-  operator: ['op_sewer', 'op_cutter', 'op_helper', 'op_super', 'op_qc'],
+  // Bundle trolley moves work between sewing operations; the fabric roll
+  // rack belongs to the cutting room / store.
+  material: ['a_bundle_trolley'],
+  // One generic operator. Roles (sewer, helper, supervisor, …) are being
+  // superseded by a user-authored operator-type feature.
+  operator: ['op_generic'],
 };
 
 // ============================================================================
@@ -1582,6 +1624,11 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   // Standing operators — h=2.4 puts a worker at ~1.7m which is 1.7× a
   // sewing-machine table+head (h=1.4). Matches real-floor anthropometry so
   // workers visually overhang their machines rather than reading shorter.
+  // The palette offers only `op_generic` — Stitchworks is sewing-floor
+  // centric and roles are being replaced by a user-authored operator-type
+  // feature. The role-specific fixtures below stay in the catalogue because
+  // WORKER_ROLE_FIXTURE and already-placed operators still resolve to them.
+  { id: 'op_generic', cat: 'op', label: 'Operator', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.steel) },
   { id: 'op_sewer', cat: 'op', label: 'Sewer', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.red) },
   { id: 'op_cutter', cat: 'op', label: 'Cutter', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.green) },
   { id: 'op_helper', cat: 'op', label: 'Helper', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.yellow) },
@@ -1598,11 +1645,6 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   { id: 'fx_press', cat: 'fix', label: 'Pressing table', w: 2, d: 1, h: 1.1, draw: pressingTable() },
   { id: 'fx_qctab', cat: 'fix', label: 'QC table', w: 2, d: 1, h: 1.0, draw: qcTable() },
   { id: 'fx_pack', cat: 'fix', label: 'Packing bench', w: 3, d: 1, h: 1.0, draw: packBench() },
-
-  // --- UTILITIES ---
-  { id: 'ut_compr', cat: 'util', label: 'Compressor', w: 2, d: 1, h: 1.5, draw: compressor() },
-  { id: 'ut_panel', cat: 'util', label: 'Breaker panel', w: 1, d: 1, h: 2.5, draw: breakerPanel() },
-  { id: 'ut_hvac', cat: 'util', label: 'HVAC vent', w: 2, d: 2, h: 0.4, draw: hvac() },
 
   // ─── APPAREL — SEWING MACHINES ──────────────────────────────────────────
   { id: 'a_snls',       cat: 'sew', label: 'SNLS · Single-needle Lock',  w: 1, d: 2, h: 1.4, draw: sewingMachine(SW_PAL.red,    '⌃')  },
@@ -1689,6 +1731,33 @@ export const MACHINE_CODE_TO_ISO_FIXTURE: Record<string, string> = {
   MNL:   'a_op_desk',
 };
 
+/** Inverse bridge: iso fixture id → top-down machine glyph code. The forward
+ *  map above is lossy (FUSE/PRESS/STEAM all share a_iron_inline), so the
+ *  inverse is authored explicitly. Used by the Builder's 2D plan view to
+ *  render `assets/workstations.tsx` top-down sprites for machine fixtures;
+ *  ids missing here (racks, trolleys, buffers, zones, operators, PML blocks)
+ *  take the flat labelled-rect fallback instead. */
+export const ISO_FIXTURE_TO_MACHINE_CODE: Record<string, MachineCode> = {
+  a_snls: 'SNL', mach_ssm: 'SNL',
+  a_dnls: 'DNL',
+  a_3ol: '4OL', a_4ol: '4OL', mach_over: '4OL',
+  a_5ol: '5OL',
+  a_flatlock: 'FL', mach_flat: 'FL',
+  a_foa: 'FB',
+  a_kansai: 'KS',
+  a_buttonhole: 'BH', mach_btnh: 'BH',
+  a_buttonsew: 'BS',
+  a_bartack: 'BT', mach_bart: 'BT',
+  a_embroidery: 'EMB',
+  a_knife_straight: 'CUT', cut_knife: 'CUT',
+  a_knife_band: 'CUT', cut_band: 'CUT',
+  a_cnc_cutter: 'CAD', cut_cnc: 'CAD',
+  a_spread_auto: 'SPR', a_spread_manual: 'SPR', cut_spread: 'SPR',
+  a_iron_inline: 'PRESS', fx_press: 'PRESS',
+  a_inspect_table: 'INSP', fx_qctab: 'INSP',
+  a_op_desk: 'MNL',
+};
+
 /** Map each worker archetype role to its iso operator fixture. Roles that
  *  share visual identity collapse onto the same operator block (e.g. all
  *  QC-flavoured roles use op_qc). */
@@ -1705,7 +1774,6 @@ export const WORKER_ROLE_TO_ISO_FIXTURE: Record<string, string> = {
   presser:          'op_sewer',
   packer:           'op_helper',
   material_handler: 'op_helper',
-  mechanic:         'op_super',
   supervisor:       'op_super',
   merchandiser:     'op_super',
 };
@@ -1731,35 +1799,35 @@ export type IsoFixturePropValue = string | number | boolean | null | undefined;
 export type IsoFixtureProps = Record<string, IsoFixturePropValue>;
 
 /** Apparel-IE-tuned defaults per apparel asset id. Values reflect typical
- *  knit-garment factory baselines (cycle time in seconds, cost USD/hr,
- *  power kW, MTBF hr, operators needed). They're starting points — the
- *  user is expected to tune them per machine + line. */
+ *  knit-garment factory baselines (cycle time in seconds, capacity/hr,
+ *  operators needed, routing). They're starting points — the user is
+ *  expected to tune them per machine + line. */
 const APPAREL_DEFAULT_PROPS: Record<string, IsoFixtureProps> = {
-  a_snls:        { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 8,  power_kw: 0.40, mtbf_hr:  800, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'seamed-pieces' },
-  a_dnls:        { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'panels',          produces: 'topstitched-pieces' },
-  a_3ol:         { capacity_per_hr: 164, cycle_s: 22, cost_per_hr: 9,  power_kw: 0.45, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-edges' },
-  a_4ol:         { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-seams' },
-  a_5ol:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  700, skill_required: 4, operators_needed: 1, accepts: 'panels-heavy',    produces: 'safety-stitched-seams' },
-  a_flatlock:    { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.55, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'flatlocked-pieces' },
-  a_bartack:     { capacity_per_hr: 300, cycle_s: 12, cost_per_hr: 10, power_kw: 0.60, mtbf_hr: 1000, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'reinforced-pieces' },
-  a_buttonhole:  { capacity_per_hr: 257, cycle_s: 14, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  900, skill_required: 3, operators_needed: 1, accepts: 'placket',         produces: 'buttonholed-placket' },
-  a_buttonsew:   { capacity_per_hr: 360, cycle_s: 10, cost_per_hr: 10, power_kw: 0.50, mtbf_hr:  900, skill_required: 2, operators_needed: 1, accepts: 'placket+button',  produces: 'buttoned-placket' },
-  a_foa:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.60, mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'tube-pieces',     produces: 'finished-cuffs' },
-  a_kansai:      { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 12, power_kw: 0.65, mtbf_hr:  800, skill_required: 3, operators_needed: 1, accepts: 'waistband-strip', produces: 'multi-needle-band' },
-  a_embroidery:  { capacity_per_hr:  20, cycle_s:180, cost_per_hr: 18, power_kw: 1.50, mtbf_hr: 1500, skill_required: 2, operators_needed: 1, accepts: 'panel',           produces: 'embroidered-panel' },
+  a_snls:        { capacity_per_hr: 144, cycle_s: 25, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'seamed-pieces' },
+  a_dnls:        { capacity_per_hr: 128, cycle_s: 28, skill_required: 4, operators_needed: 1, accepts: 'panels',          produces: 'topstitched-pieces' },
+  a_3ol:         { capacity_per_hr: 164, cycle_s: 22, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-edges' },
+  a_4ol:         { capacity_per_hr: 144, cycle_s: 25, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-seams' },
+  a_5ol:         { capacity_per_hr: 120, cycle_s: 30, skill_required: 4, operators_needed: 1, accepts: 'panels-heavy',    produces: 'safety-stitched-seams' },
+  a_flatlock:    { capacity_per_hr: 128, cycle_s: 28, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'flatlocked-pieces' },
+  a_bartack:     { capacity_per_hr: 300, cycle_s: 12, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'reinforced-pieces' },
+  a_buttonhole:  { capacity_per_hr: 257, cycle_s: 14, skill_required: 3, operators_needed: 1, accepts: 'placket',         produces: 'buttonholed-placket' },
+  a_buttonsew:   { capacity_per_hr: 360, cycle_s: 10, skill_required: 2, operators_needed: 1, accepts: 'placket+button',  produces: 'buttoned-placket' },
+  a_foa:         { capacity_per_hr: 120, cycle_s: 30, skill_required: 4, operators_needed: 1, accepts: 'tube-pieces',     produces: 'finished-cuffs' },
+  a_kansai:      { capacity_per_hr: 128, cycle_s: 28, skill_required: 3, operators_needed: 1, accepts: 'waistband-strip', produces: 'multi-needle-band' },
+  a_embroidery:  { capacity_per_hr:  20, cycle_s:180, skill_required: 2, operators_needed: 1, accepts: 'panel',           produces: 'embroidered-panel' },
 
-  a_iron_inline: { capacity_per_hr: 180, cycle_s: 20, cost_per_hr: 6,  power_kw: 1.80, mtbf_hr: 1200, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'pressed-pieces' },
+  a_iron_inline: { capacity_per_hr: 180, cycle_s: 20, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'pressed-pieces' },
   a_wip_rack:    { capacity_units: 60, occupied_units: 0 },
-  a_op_desk:     { occupants: 1, surface_m2: 1.0 },
+  a_op_desk:     { occupants: 1 },
 
-  a_spread_manual:  { capacity_per_hr:  72, cycle_s: 50, cost_per_hr: 7,  power_kw: 0.0,  skill_required: 3, operators_needed: 2, accepts: 'fabric-rolls', produces: 'fabric-lay' },
-  a_spread_auto:    { capacity_per_hr: 150, cycle_s: 24, cost_per_hr: 14, power_kw: 3.5,  mtbf_hr: 1200, skill_required: 3, operators_needed: 1, accepts: 'fabric-rolls', produces: 'fabric-lay' },
-  a_knife_straight: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 9,  power_kw: 1.4,  mtbf_hr:  600, skill_required: 4, operators_needed: 1, accepts: 'fabric-lay',   produces: 'cut-panels' },
-  a_knife_band:     { capacity_per_hr:  90, cycle_s: 40, cost_per_hr: 10, power_kw: 2.1,  mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'block-panels', produces: 'cut-panels-precise' },
-  a_cnc_cutter:     { capacity_per_hr: 200, cycle_s: 18, cost_per_hr: 22, power_kw: 5.0,  mtbf_hr: 2000, skill_required: 3, operators_needed: 1, accepts: 'fabric-lay',  produces: 'cut-panels' },
-  a_marker_plotter: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 6,  power_kw: 0.8,  mtbf_hr: 1500, skill_required: 2, operators_needed: 1, accepts: 'marker-file',  produces: 'paper-marker' },
-  a_cut_table:      { capacity_per_hr:   0, cost_per_hr: 8, power_kw: 0.0, surface_m2: 8 },
-  a_inspect_table:  { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 7,  power_kw: 0.15, skill_required: 3, operators_needed: 1, accepts: 'fabric-roll', produces: 'inspected-roll · 4pt' },
+  a_spread_manual:  { capacity_per_hr:  72, cycle_s: 50, skill_required: 3, operators_needed: 2, accepts: 'fabric-rolls', produces: 'fabric-lay' },
+  a_spread_auto:    { capacity_per_hr: 150, cycle_s: 24, skill_required: 3, operators_needed: 1, accepts: 'fabric-rolls', produces: 'fabric-lay' },
+  a_knife_straight: { capacity_per_hr:  60, cycle_s: 60, skill_required: 4, operators_needed: 1, accepts: 'fabric-lay',   produces: 'cut-panels' },
+  a_knife_band:     { capacity_per_hr:  90, cycle_s: 40, skill_required: 4, operators_needed: 1, accepts: 'block-panels', produces: 'cut-panels-precise' },
+  a_cnc_cutter:     { capacity_per_hr: 200, cycle_s: 18, skill_required: 3, operators_needed: 1, accepts: 'fabric-lay',  produces: 'cut-panels' },
+  a_marker_plotter: { capacity_per_hr:  60, cycle_s: 60, skill_required: 2, operators_needed: 1, accepts: 'marker-file',  produces: 'paper-marker' },
+  a_cut_table:      { capacity_per_hr:   0 },
+  a_inspect_table:  { capacity_per_hr: 120, cycle_s: 30, skill_required: 3, operators_needed: 1, accepts: 'fabric-roll', produces: 'inspected-roll · 4pt' },
 
   a_fabric_rack:    { capacity_units: 24, occupied_units: 0, accepts: 'fabric-rolls' },
   a_bundle_trolley: { capacity_units: 30, occupied_units: 0, accepts: 'cut-bundles,sewn-bundles' },
@@ -1770,7 +1838,6 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
   if (!a) return {};
   const base: IsoFixtureProps = {
     name: a.label,
-    assetTag: 'TAG-' + Math.random().toString(36).slice(2, 7).toUpperCase(),
     rotation: 0,
   };
   // Apparel-specific overrides take precedence over the generic category
@@ -1783,10 +1850,6 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
       ...base,
       capacity_per_hr: 60,
       cycle_s: 35,
-      cost_per_hr: 9,
-      power_kw: 0.5,
-      mtbf_hr: 800,
-      downtime_pct: 4,
       skill_required: 3,
       operators_needed: 1,
       accepts: 'fabric,panels',
@@ -1796,18 +1859,13 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
     return {
       ...base,
       capacity_per_hr: 12,
-      cost_per_hr: 6,
-      power_kw: 1.4,
-      mtbf_hr: 1200,
-      downtime_pct: 6,
       accepts: 'pallets,trolleys',
     };
-  if (a.cat === 'op') return { ...base, skill: 3, hourly_rate: 4, max_machines: 1, shift: '08:00–17:00' };
+  if (a.cat === 'op') return { ...base, skill: 3, max_machines: 1 };
   if (a.cat === 'buf') return { ...base, capacity: 30, current: 0 };
-  if (a.cat === 'conv') return { ...base, speed_m_min: 12, capacity_per_hr: 240, power_kw: 0.8 };
+  if (a.cat === 'conv') return { ...base, speed_m_min: 12, capacity_per_hr: 240 };
   if (a.cat === 'store') return { ...base, capacity_units: 80, occupied_units: 0 };
-  if (a.cat === 'util') return { ...base, power_kw: 5.5, vendor: '' };
-  if (a.cat === 'fix') return { ...base, capacity_per_hr: 40, cost_per_hr: 3 };
+  if (a.cat === 'fix') return { ...base, capacity_per_hr: 40 };
   if (a.cat === 'zone') return { ...base, area_label: a.label, color: '' };
   if (a.cat === 'pml')
     return {
@@ -1818,7 +1876,6 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
       // rest from the Inspector.
       capacity_per_hr: 0,
       cycle_s: 0,
-      cost_per_hr: 0,
     };
   return base;
 }

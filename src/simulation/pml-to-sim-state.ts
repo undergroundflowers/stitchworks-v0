@@ -2,8 +2,8 @@
  * Adapter — PML sample → legacy `SimState` shape.
  *
  * The PML discrete-event engine (`pml-engine.ts`) is the only engine going
- * forward, but every consumer of the legacy `SimEngine` (LiveSim, LiveFloor,
- * Scenarios, QueueAnalytics, etc.) reads the legacy `SimState`
+ * forward, but every consumer of the legacy `SimEngine` (LiveSim, Scenarios,
+ * QueueAnalytics, etc.) reads the legacy `SimState`
  * shape — `state.stations[]`, `state.history[]`, `state.bottleneckOpIndex`,
  * `state.events[]`. Rather than rewrite every view to read PML samples
  * directly, we map each `PmlSimSample` into the legacy shape here.

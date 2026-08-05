@@ -60,7 +60,7 @@ export interface TimeDisplayProps {
   primary: string;
   /** Optional caption shown beside the primary value. */
   secondary?: string;
-  /** Dark backgrounds (LiveSim/LiveFloor) need a brighter primary colour. */
+  /** Dark backgrounds (LiveSim) need a brighter primary colour. */
   surface?: 'dark' | 'light';
   /** Size of the primary value (px). Defaults match the LiveSim HUD. */
   primarySize?: number;

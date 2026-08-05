@@ -142,7 +142,7 @@ function Body({ kind, color }: { kind: ProductKind; color?: string }) {
 function GroundShadow({ cx = 50, cy = 88, rx = 28 }: { cx?: number; cy?: number; rx?: number }) {
   return (
     <>
-      <ellipse cx={cx} cy={cy} rx={rx} ry={4.5} fill={SW_COLORS.steel} />
+      <ellipse cx={cx} cy={cy} rx={rx} ry={4.5} fill={SW_COLORS.muted} />
       <ellipse cx={cx} cy={cy - 0.6} rx={rx * 0.78} ry={3} fill={SW_COLORS.ink} />
     </>
   );
@@ -182,7 +182,7 @@ function ThreadCone({ color }: { color: string }) {
     <g>
       <GroundShadow cx={50} cy={86} rx={26} />
       {/* Base disc */}
-      <ellipse cx={50} cy={80} rx={20} ry={5} fill={SW_COLORS.steel} />
+      <ellipse cx={50} cy={80} rx={20} ry={5} fill={SW_COLORS.muted} />
       <ellipse cx={50} cy={78} rx={20} ry={3.5} fill={SW_COLORS.steelLite} />
       {/* Cone body */}
       <path d={`M 32 80 L 68 80 L 60 22 L 40 22 Z`} fill={color} />
@@ -190,9 +190,9 @@ function ThreadCone({ color }: { color: string }) {
       <path d={`M 32 80 L 68 80 L 64 60 L 36 60 Z`} fill={deep} />
       <path d={`M 32 80 L 68 80 L 60 22 L 40 22 Z`} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.3} />
       {/* Spindle top */}
-      <ellipse cx={50} cy={22} rx={10} ry={3.5} fill={SW_COLORS.steel} />
+      <ellipse cx={50} cy={22} rx={10} ry={3.5} fill={SW_COLORS.muted} />
       <ellipse cx={50} cy={21} rx={10} ry={2.2} fill={SW_COLORS.steelLite} />
-      <rect x={49} y={12} width={2} height={10} fill={SW_COLORS.steel} />
+      <rect x={49} y={12} width={2} height={10} fill={SW_COLORS.muted} />
       <circle cx={50} cy={10} r={2.5} fill={color} />
       <circle cx={50} cy={10} r={1.2} fill={lite} />
     </g>
@@ -270,7 +270,7 @@ function Zipper({ color }: { color: string }) {
       <path d="M 38 50 L 62 50 L 56 60 L 44 60 Z" fill={SW_COLORS.steelLite} />
       <path d="M 38 50 L 62 50 L 60 53 L 40 53 Z" fill="#FFFFFF" />
       <rect x={49} y={60} width={2} height={8} fill={SW_COLORS.ink} />
-      <circle cx={50} cy={71} r={4} fill={SW_COLORS.steel} />
+      <circle cx={50} cy={71} r={4} fill={SW_COLORS.muted} />
       <circle cx={50} cy={70} r={2} fill={SW_COLORS.steelLite} />
     </g>
   );
@@ -372,7 +372,7 @@ function HangerGarment({ color }: { color: string }) {
         d={`M 50 14 q -4 -4 -8 0 q 0 4 4 6 L 50 22 L 50 14 Z`}
         fill={SW_COLORS.steelLite}
       />
-      <polygon points="18,32 50,22 82,32 50,28" fill={SW_COLORS.steel} />
+      <polygon points="18,32 50,22 82,32 50,28" fill={SW_COLORS.muted} />
       <polygon points="18,32 50,22 50,28" fill={SW_COLORS.steelLite} />
       {/* Garment body */}
       <path
@@ -501,7 +501,7 @@ function Trouser({ color }: { color: string }) {
     <g>
       <GroundShadow cx={50} cy={92} rx={32} />
       {/* Solid waistband */}
-      <rect x={22} y={14} width={56} height={8} fill={SW_COLORS.steel} />
+      <rect x={22} y={14} width={56} height={8} fill={SW_COLORS.muted} />
       <rect x={22} y={14} width={56} height={2.5} fill={SW_COLORS.steelLite} />
       <rect x={22} y={14} width={56} height={8} fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
       {/* Solid legs */}
@@ -578,9 +578,9 @@ function Sweatshirt({ color }: { color: string }) {
       <rect x={45} y={28} width={1.8} height={14} fill={SW_COLORS.paper} />
       <rect x={53} y={28} width={1.8} height={14} fill={SW_COLORS.paper} />
       {/* Cuffs + hem ribbing */}
-      <rect x={18} y={42} width={6} height={8} fill={SW_COLORS.steel} />
-      <rect x={76} y={42} width={6} height={8} fill={SW_COLORS.steel} />
-      <rect x={30} y={82} width={40} height={6} fill={SW_COLORS.steel} />
+      <rect x={18} y={42} width={6} height={8} fill={SW_COLORS.muted} />
+      <rect x={76} y={42} width={6} height={8} fill={SW_COLORS.muted} />
+      <rect x={30} y={82} width={40} height={6} fill={SW_COLORS.muted} />
     </g>
   );
 }

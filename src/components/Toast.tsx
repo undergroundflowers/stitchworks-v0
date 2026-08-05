@@ -126,7 +126,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   height: 18,
                   borderRadius: '50%',
                   background: ks.accent,
-                  color: '#fff',
+                  color: SW_COLORS.paper,
                   fontSize: 11,
                   fontWeight: 800,
                   display: 'inline-flex',

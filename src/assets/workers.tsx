@@ -53,7 +53,7 @@ export function WorkerSprite({
       aria-label={arch.label}
     >
       {/* Solid grounding shadow under the figure */}
-      <ellipse cx={30} cy={84} rx={18} ry={3.5} fill={SW_COLORS.steel} />
+      <ellipse cx={30} cy={84} rx={18} ry={3.5} fill={SW_COLORS.muted} />
       <ellipse cx={30} cy={83} rx={14} ry={2.4} fill={SW_COLORS.ink} />
 
       {/* State decoration — solid colour ring around the feet */}
@@ -196,15 +196,6 @@ function Hair({ role }: { role: WorkerRole }) {
       </g>
     );
   }
-  if (role === 'mechanic') {
-    return (
-      <g>
-        <path d="M 17 11 Q 30 3 43 11 L 43 14 L 17 14 Z" fill={SW_COLORS.steel} />
-        <rect x={17} y={14} width={26} height={2.5} fill={SW_COLORS.steelLite} />
-        <rect x={28} y={6} width={4} height={5} fill={SW_COLORS.steel} />
-      </g>
-    );
-  }
   if (role === 'supervisor') {
     return (
       <g>
@@ -237,7 +228,7 @@ function RoleTool({ role }: { role: WorkerRole }) {
       // Solid needle + thread spool in right hand
       return (
         <g>
-          <rect x={50} y={61} width={2.4} height={10} fill={SW_COLORS.steel} />
+          <rect x={50} y={61} width={2.4} height={10} fill={SW_COLORS.muted} />
           <circle cx={51.2} cy={60} r={2} fill={SW_COLORS.thread} />
           <line x1={51.2} y1={60} x2={56} y2={56} stroke={SW_COLORS.thread} strokeWidth={1.2} />
         </g>
@@ -246,8 +237,8 @@ function RoleTool({ role }: { role: WorkerRole }) {
       // Solid scissors — filled blades + handle rings
       return (
         <g>
-          <circle cx={9} cy={74} r={3} fill={SW_COLORS.steel} />
-          <circle cx={14} cy={74} r={3} fill={SW_COLORS.steel} />
+          <circle cx={9} cy={74} r={3} fill={SW_COLORS.muted} />
+          <circle cx={14} cy={74} r={3} fill={SW_COLORS.muted} />
           <circle cx={9} cy={74} r={1.2} fill={SW_COLORS.paper} />
           <circle cx={14} cy={74} r={1.2} fill={SW_COLORS.paper} />
           <polygon points="9,72 14,72 18,62 14,60" fill={SW_COLORS.steelLite} />
@@ -303,7 +294,7 @@ function RoleTool({ role }: { role: WorkerRole }) {
           <circle cx={49} cy={68} r={4.5} fill={SW_COLORS.steelLite} />
           <circle cx={49} cy={68} r={3} fill={SW_COLORS.bobbin} />
           <circle cx={47.5} cy={66.5} r={1} fill="#FFFFFF" />
-          <rect x={52} y={70.5} width={5} height={2.2} rx={0.8} transform="rotate(35 52 70.5)" fill={SW_COLORS.steel} />
+          <rect x={52} y={70.5} width={5} height={2.2} rx={0.8} transform="rotate(35 52 70.5)" fill={SW_COLORS.muted} />
         </g>
       );
     case 'presser':
@@ -311,7 +302,7 @@ function RoleTool({ role }: { role: WorkerRole }) {
       return (
         <g>
           <path d="M 2 70 L 14 67 L 16 72 L 2 73 Z" fill={SW_COLORS.steelLite} />
-          <rect x={4} y={66} width={9} height={3} rx={1} fill={SW_COLORS.steel} />
+          <rect x={4} y={66} width={9} height={3} rx={1} fill={SW_COLORS.muted} />
           <path d="M 9 64 q -2 -3 0 -6" stroke={SW_COLORS.bobbin} strokeWidth={1.4} fill="none" />
           <path d="M 13 64 q -2 -3 0 -6" stroke={SW_COLORS.bobbin} strokeWidth={1.4} fill="none" />
         </g>
@@ -329,8 +320,8 @@ function RoleTool({ role }: { role: WorkerRole }) {
       // Solid trolley with two wheels + handle
       return (
         <g>
-          <rect x={2} y={66} width={16} height={3.2} fill={SW_COLORS.steel} />
-          <rect x={2} y={62} width={2.4} height={4.5} fill={SW_COLORS.steel} />
+          <rect x={2} y={66} width={16} height={3.2} fill={SW_COLORS.muted} />
+          <rect x={2} y={62} width={2.4} height={4.5} fill={SW_COLORS.muted} />
           <rect x={5} y={64} width={11} height={3} fill={SW_COLORS.fabric} />
           <circle cx={6} cy={72} r={2.4} fill={SW_COLORS.ink} />
           <circle cx={6} cy={72} r={1} fill={SW_COLORS.steelLite} />
@@ -338,21 +329,12 @@ function RoleTool({ role }: { role: WorkerRole }) {
           <circle cx={15} cy={72} r={1} fill={SW_COLORS.steelLite} />
         </g>
       );
-    case 'mechanic':
-      // Solid wrench
-      return (
-        <g>
-          <rect x={47} y={64} width={3} height={10} rx={0.8} transform="rotate(-30 47 64)" fill={SW_COLORS.steel} />
-          <circle cx={56} cy={56} r={3.5} fill={SW_COLORS.steel} />
-          <circle cx={56} cy={56} r={1.5} fill={SW_COLORS.paper} />
-        </g>
-      );
     case 'supervisor':
       // Solid clipboard
       return (
         <g>
           <rect x={45} y={62} width={10} height={13} rx={1} fill={SW_COLORS.paper} />
-          <rect x={45} y={62} width={10} height={3} fill={SW_COLORS.steel} />
+          <rect x={45} y={62} width={10} height={3} fill={SW_COLORS.muted} />
           <rect x={48} y={61} width={4} height={2.5} rx={0.6} fill={SW_COLORS.steelLite} />
           <rect x={47} y={67} width={6} height={0.8} fill={SW_COLORS.ink} />
           <rect x={47} y={69} width={6} height={0.8} fill={SW_COLORS.ink} />
@@ -373,7 +355,7 @@ function RoleTool({ role }: { role: WorkerRole }) {
       // Solid tray
       return (
         <g>
-          <rect x={2} y={68} width={16} height={3.5} rx={1} fill={SW_COLORS.steel} />
+          <rect x={2} y={68} width={16} height={3.5} rx={1} fill={SW_COLORS.muted} />
           <rect x={3} y={66} width={14} height={2.5} rx={0.5} fill={SW_COLORS.fabric} />
         </g>
       );
@@ -426,7 +408,6 @@ const ROLE_CODE: Record<WorkerRole, string> = {
   presser: 'PRS',
   packer: 'PCK',
   material_handler: 'MAT',
-  mechanic: 'MEC',
   supervisor: 'SUP',
   merchandiser: 'MER',
 };

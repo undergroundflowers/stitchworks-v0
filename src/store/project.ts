@@ -104,17 +104,15 @@ export interface YamazumiAssignment {
 
 /** Display preferences. Persisted with the project so they roam with
  *  an exported `.swproj` file. Render sites must consume these (see
- *  `lib/format.ts`); never hardcode currency or date formatting. */
+ *  `lib/format.ts`); never hardcode date formatting. */
 export interface UnitsPrefs {
   length: 'Meters' | 'Yards';
-  currency: 'USD' | 'EUR' | 'INR' | 'BDT';
   samDisplay: 'Minutes' | 'Seconds';
   dateFormat: 'DD/MM' | 'MM/DD' | 'YYYY-MM-DD';
 }
 
 const defaultUnits: UnitsPrefs = {
   length: 'Meters',
-  currency: 'USD',
   samDisplay: 'Minutes',
   dateFormat: 'YYYY-MM-DD',
 };
@@ -130,7 +128,7 @@ const defaultUnits: UnitsPrefs = {
  *   - Wall time:     the user's device clock. Bound to model time only
  *                    during playback, via `executionMode` and `realTimeScale`.
  *
- * `UnitsPrefs` above stays a *display-formatting* struct (currency, date
+ * `UnitsPrefs` above stays a *display-formatting* struct (length, date
  * format). `TimeSettings` here is *semantics* that affects what the numbers
  * actually mean.
  */
@@ -225,9 +223,9 @@ export interface ScenarioKpis {
   bottleneckQueue: number;
   /** Number of replications behind these means. 1 = single-seed run. */
   replicationCount?: number;
-  /** OEE three-factor product (Availability × Performance × Quality), 0..1. */
+  /** OEE two-factor product (Performance × Quality), 0..1. Machine
+   *  availability is out of scope, so the Availability factor is omitted. */
   oee?: number;
-  oeeAvailability?: number;
   oeePerformance?: number;
   oeeQuality?: number;
   /** On-standard performance % — alias of BSI in lean vocabulary. */
@@ -246,8 +244,6 @@ export interface ScenarioKpis {
   totalChangeoverMinutes?: number;
   /** Per-order completion time keyed by Order.id (sim minutes). */
   perOrderCompletionTime?: Record<string, number>;
-  /** Minutes lost to machine downtime; populated in P2. */
-  downtimeMinutes?: number;
   /** Per-KPI standard deviation across replications, when available. */
   std?: {
     producedPieces: number;

@@ -79,7 +79,6 @@ function emptyAgg(): AggregateKpis {
     utilization: zero,
     wipBundles: zero,
     oee: zero,
-    oeeAvailability: zero,
     oeePerformance: zero,
     oeeQuality: zero,
     onStandardPct: zero,
@@ -87,7 +86,6 @@ function emptyAgg(): AggregateKpis {
     labourProductivity: zero,
     demandTaktGap: zero,
     totalChangeoverMin: zero,
-    totalDowntimeMin: zero,
     perOrderCompletionTime: {},
     bottleneckOpName: '—',
     bottleneckQueue: 0,
@@ -599,7 +597,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               <span style={{ color: SW_COLORS.brand }}>◆</span>
               <span>{lineSystemBadge(l, reportsTwin)}</span>
               <span style={{ color: SW_COLORS.muted, fontWeight: 600 }}>·</span>
-              <span style={{ color: SW_COLORS.steel }}>{l.name}</span>
+              <span style={{ color: SW_COLORS.muted }}>{l.name}</span>
             </span>
           ))}
         </div>
@@ -798,19 +796,19 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                       key={b.ws.id}
                       style={{
                         borderBottom: `1px solid ${SW_COLORS.line}`,
-                        background: b.bottleneck ? '#FFE5E5' : 'transparent',
+                        background: b.bottleneck ? `${SW_COLORS.alarm}24` : 'transparent',
                       }}
                     >
                       <td style={{ padding: '6px 8px', color: SW_COLORS.ink, fontWeight: 700 }}>
                         {b.bottleneck && '◆ '}
                         {b.ws.name}
                       </td>
-                      <td style={{ padding: '6px 8px', color: SW_COLORS.steel }}>{b.kind}</td>
-                      <td style={{ padding: '6px 8px', color: SW_COLORS.steel }}>{b.role}</td>
+                      <td style={{ padding: '6px 8px', color: SW_COLORS.muted }}>{b.kind}</td>
+                      <td style={{ padding: '6px 8px', color: SW_COLORS.muted }}>{b.role}</td>
                       <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: SW_COLORS.ink }}>
                         {Math.round(b.throughput).toLocaleString()}
                       </td>
-                      <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.steel }}>
+                      <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.muted }}>
                         {b.util > 0 ? `${b.util.toFixed(0)}%` : '—'}
                       </td>
                     </tr>
@@ -1207,7 +1205,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               metrics. Severity-coloured rows so the user can scan to the
               red items first. Empty state shows a "healthy" info row. */}
           <div style={{ marginTop: 12, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, overflow: 'hidden' }}>
-            <div style={{ padding: '8px 12px', background: SW_COLORS.ink, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ padding: '8px 12px', background: SW_COLORS.ink, color: SW_COLORS.paper, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
               <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 900, letterSpacing: '0.08em' }}>
                 WHAT TO FIX  ·  {balanceSuggestions.length} {balanceSuggestions.length === 1 ? 'item' : 'items'}
               </div>
@@ -1343,7 +1341,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     legend={[
                       { color: SW_COLORS.brand, label: 'Cumulative produced' },
                       { color: SW_COLORS.faint, label: 'Theoretical ceiling', dashed: true },
-                      { color: '#0F141908', label: 'Warm-up region' },
+                      { color: `${SW_COLORS.ink}0F`, label: 'Warm-up region' },
                     ]}
                   />
                   <CumulativeOutputChart
@@ -2211,14 +2209,14 @@ function KpiFormula({
             where
           </div>
           {where.map(([k, v]) => (
-            <div key={k} style={{ fontSize: 11, color: SW_COLORS.steel }}>
+            <div key={k} style={{ fontSize: 11, color: SW_COLORS.muted }}>
               <span style={{ color: SW_COLORS.ink, fontWeight: 700 }}>{k}</span> — {v}
             </div>
           ))}
         </div>
       )}
       {note && (
-        <div style={{ fontSize: 11, color: SW_COLORS.steel, fontStyle: 'italic' }}>{note}</div>
+        <div style={{ fontSize: 11, color: SW_COLORS.muted, fontStyle: 'italic' }}>{note}</div>
       )}
       {replication && (
         <div style={{ fontSize: 10, color: SW_COLORS.muted, borderTop: `1px solid ${SW_COLORS.line}`, paddingTop: 6 }}>
@@ -2273,7 +2271,7 @@ function ChartHeader({
       {legend && legend.length > 0 && (
         <div style={{ display:'flex', gap:12, fontSize:10, fontFamily: SW_FONTS.mono, fontWeight:700, flexWrap: 'wrap', alignItems: 'center', maxWidth: 260 }}>
           {legend.map((l, i) => (
-            <span key={i} style={{ display:'inline-flex', alignItems:'center', gap:5, color: SW_COLORS.steel }}>
+            <span key={i} style={{ display:'inline-flex', alignItems:'center', gap:5, color: SW_COLORS.muted }}>
               {l.dashed ? (
                 <span style={{ width: 14, height: 0, borderTop: `2px dashed ${l.color}` }} />
               ) : (
@@ -2814,7 +2812,7 @@ function QueueParetoChart({
             <text x={bx + bw / 2} y={by - 4} textAnchor="middle" fill={SW_COLORS.ink} fontSize="9" fontWeight={800} fontFamily={SW_FONTS.mono}>
               {Math.round(s.queueLen)}
             </text>
-            <text x={bx + bw / 2} y={padT + innerH + 12} textAnchor="middle" fill={SW_COLORS.steel} fontSize="9" fontWeight={700} fontFamily={SW_FONTS.mono}>
+            <text x={bx + bw / 2} y={padT + innerH + 12} textAnchor="middle" fill={SW_COLORS.muted} fontSize="9" fontWeight={700} fontFamily={SW_FONTS.mono}>
               {label}
             </text>
             <title>{`${s.opCode ? `${s.opCode} · ` : ''}${s.opName}${s.lineName ? ` · ${s.lineName}` : ''} — queue ${s.queueLen.toFixed(1)}`}</title>

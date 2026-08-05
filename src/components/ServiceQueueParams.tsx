@@ -55,8 +55,8 @@ export function ServiceQueueParams({ ws }: { ws: Workstation }) {
   if (!opId) {
     return (
       <Note>
-        Not bound to an operation yet. Set <strong>Op id</strong> above to configure its service
-        time and queue.
+        Not bound to an operation yet. Pick one under <strong>Operation</strong> above to
+        configure its service time and queue — and to enable <strong>SIMULATE</strong>.
       </Note>
     );
   }

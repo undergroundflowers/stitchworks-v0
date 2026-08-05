@@ -16,7 +16,6 @@ import type { GarmentTemplate } from '../domain';
 import {
   hourlyTarget,
   oee as oeeKpi,
-  availabilityFromState,
   performanceFromThroughput,
   qualityFromYield,
   onStandardPerformance,
@@ -39,10 +38,9 @@ export interface ReplicationResult {
   wipBundles: number;
   bottleneckOpName: string;
   bottleneckQueue: number;
-  /** OEE = availability × performance × quality, 0..1. P1 = perf only;
-   *  P2 will populate downtime + quality once rework + breakdowns land. */
+  /** OEE = performance × quality, 0..1. Machine-availability is out of
+   *  scope for this simulator, so the classic Availability factor is omitted. */
   oee: number;
-  oeeAvailability: number;
   oeePerformance: number;
   oeeQuality: number;
   /** Earned-minutes / clocked-minutes × 100. Identical to BSI; named for
@@ -55,8 +53,6 @@ export interface ReplicationResult {
   demandTaktGap: number;
   /** Cumulative changeover minutes during this replication. */
   changeoverMin: number;
-  /** Cumulative breakdown / downtime minutes during this replication. */
-  downtimeMin: number;
   /** Per-order completion time (minutes), keyed by Order.id. Empty when
    *  no OrderSequence was active during this replication. */
   perOrderCompletionTime: Record<string, number>;
@@ -72,7 +68,6 @@ export interface AggregateKpis {
   utilization:       { mean: number; std: number };
   wipBundles:        { mean: number; std: number };
   oee:               { mean: number; std: number };
-  oeeAvailability:   { mean: number; std: number };
   oeePerformance:    { mean: number; std: number };
   oeeQuality:        { mean: number; std: number };
   onStandardPct:     { mean: number; std: number };
@@ -81,8 +76,6 @@ export interface AggregateKpis {
   demandTaktGap:     { mean: number; std: number };
   /** Total changeover minutes (mean ± std across replications). */
   totalChangeoverMin: { mean: number; std: number };
-  /** Total downtime minutes (mean ± std across replications). */
-  totalDowntimeMin:   { mean: number; std: number };
   /** Per-order completion time (mean ± std across replications). Keyed
    *  by Order.id; only orders that completed (or partially completed) in
    *  every replication are reported. */
@@ -180,24 +173,14 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     const bottleneck = state?.stations[state.bottleneckOpIndex];
 
     // ── New KPI block (P1) ──────────────────────────────────────────────
-    // OEE: Availability × Performance × Quality.
-    // P1 has no downtime + no rework yet, so availability = 1 and
-    // quality = 1; only Performance carries information. P2 will populate
-    // downtime / rework and these defaults will become meaningful.
+    // OEE: Performance × Quality. (Machine-availability is out of scope for
+    // this sewing-floor simulator, so the classic Availability factor is
+    // omitted.) Quality = 1 until rework / scrap occurs.
     const clockedMin = operators * simMinutes;
     const sam = garment ? totalSam(garment.operations) : 0;
     const bottleneckSmv = bottleneck?.smv ?? 0;
     const theoreticalPph = bottleneckSmv > 0 ? hourlyTarget(bottleneckSmv) : 0;
 
-    // Runtime = shift - (changeover + downtime). Caps at 0 so a
-    // pathological config (more changeover than shift) doesn't go negative.
-    const lostMin = Math.max(0, result.changeoverMin + result.downtimeMin);
-    const runtimeMin = Math.max(0, simMinutes - lostMin);
-    const oeeAvailability = availabilityFromState({
-      runtimeMin,
-      downtimeMin: result.downtimeMin,
-      changeoverMin: result.changeoverMin,
-    });
     const oeePerformance = performanceFromThroughput({
       actualPph: throughputPerHr,
       theoreticalPph,
@@ -210,7 +193,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       totalPieces: result.totalProduced + result.piecesScrapped,
     });
     const oee = oeeKpi({
-      availability: oeeAvailability,
       performance: oeePerformance,
       quality: oeeQuality,
     });
@@ -247,7 +229,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       bottleneckOpName: bottleneck?.opName ?? '—',
       bottleneckQueue: bottleneck?.queueLen ?? 0,
       oee,
-      oeeAvailability,
       oeePerformance,
       oeeQuality,
       onStandardPct,
@@ -255,7 +236,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       labourProductivity: labourProd,
       demandTaktGap: taktGap,
       changeoverMin: result.changeoverMin,
-      downtimeMin: result.downtimeMin,
       perOrderCompletionTime: result.perOrderCompletionTime,
     });
   }
@@ -274,7 +254,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     utilization:        meanStd(samples.map((s) => s.utilization)),
     wipBundles:         meanStd(samples.map((s) => s.wipBundles)),
     oee:                meanStd(samples.map((s) => s.oee)),
-    oeeAvailability:    meanStd(samples.map((s) => s.oeeAvailability)),
     oeePerformance:     meanStd(samples.map((s) => s.oeePerformance)),
     oeeQuality:         meanStd(samples.map((s) => s.oeeQuality)),
     onStandardPct:      meanStd(samples.map((s) => s.onStandardPct)),
@@ -282,7 +261,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     labourProductivity: meanStd(samples.map((s) => s.labourProductivity)),
     demandTaktGap:      meanStd(samples.map((s) => s.demandTaktGap)),
     totalChangeoverMin: meanStd(samples.map((s) => s.changeoverMin)),
-    totalDowntimeMin:   meanStd(samples.map((s) => s.downtimeMin)),
     perOrderCompletionTime: aggregatePerOrderTimes(samples.map((s) => s.perOrderCompletionTime)),
     bottleneckOpName: median?.bottleneckOpName ?? '—',
     bottleneckQueue:  median?.bottleneckQueue ?? 0,

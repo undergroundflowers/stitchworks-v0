@@ -19,7 +19,6 @@ import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { BuilderPage } from './pages/Builder';
-import { LiveFloorPage } from './pages/LiveFloor';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { QueueIndexPage } from './pages/QueueIndex';
 import { QueueAnalyticsPage } from './pages/QueueAnalytics';
@@ -27,9 +26,7 @@ import { QueueAnalyticsPage } from './pages/QueueAnalytics';
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
  * Tweaks panel (industrial/workshop/arcade · intensity · avatar style).
- * On launch the app opens straight to the home menu (route "/"). Game
- * state is currently a static demo object (see lib/game.ts); it will
- * become reactive once we add a store and wire simulation outputs to it.
+ * On launch the app opens straight to the home menu (route "/").
  */
 export default function App() {
   const location = useLocation();
@@ -154,8 +151,6 @@ export default function App() {
           <Route path="/resources" element={<ResourcesPage />} />
           <Route path="/kpi" element={<Navigate to="/balance" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
-          {/* Live Floor — iso 3D / top 2D / heat-map views over the active twin */}
-          <Route path="/floor" element={<LiveFloorPage />} />
           {/* Factory Builder — single authoring surface for the digital twin.
               Both /iso (legacy nav id) and /builder route here. */}
           <Route path="/builder" element={<BuilderPage />} />
@@ -169,8 +164,9 @@ export default function App() {
           {/* Assets is now a tab inside Resources. The standalone /assets URL
               redirects there so old links and deep-links still resolve. */}
           <Route path="/assets" element={<Navigate to="/resources?tab=assets" replace />} />
-          {/* Reference Models and Pilot Study were removed; redirect any stale
-              deep-links back to the home menu rather than dead-ending. */}
+          {/* Live Floor, Reference Models and Pilot Study were removed; redirect
+              any stale deep-links back to the home menu rather than dead-ending. */}
+          <Route path="/floor" element={<Navigate to="/" replace />} />
           <Route path="/reference" element={<Navigate to="/" replace />} />
           <Route path="/pilot" element={<Navigate to="/" replace />} />
         </Routes>

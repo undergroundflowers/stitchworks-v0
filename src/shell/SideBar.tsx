@@ -202,7 +202,7 @@ export function SideBar() {
                   fontSize: 9,
                   fontWeight: 700,
                   background: SW_COLORS.brand,
-                  color: '#fff',
+                  color: SW_COLORS.paper,
                   borderRadius: 999,
                   minWidth: 14,
                   height: 14,

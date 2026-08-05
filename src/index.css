@@ -2,14 +2,18 @@
    applied via inline styles on each component. Add global rules here only
    when they cannot reasonably be expressed at the component level. */
 
+/* Ground and foreground are published by applyVibe as CSS variables so the few
+   rules that genuinely must be global (the focus ring, the scrollbars) can read
+   the live theme. The fallbacks are the "Control Room" defaults. */
 html,
 body,
 #root {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #ffffff;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--sw-paper, #0b0f16);
+  color: var(--sw-ink, #e8edf5);
+  font-family: 'IBM Plex Sans', 'Inter', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -22,6 +26,49 @@ body,
 
 #root {
   overflow: hidden;
+}
+
+/* The universal focus ring. The app had NO focus styling at all, which made it
+   unusable by keyboard; this is the single biggest accessibility fix available.
+   Deliberately ink and not brand — brand reads as "selected", not "focused". */
+:focus-visible {
+  outline: 2px solid var(--sw-ink, #e8edf5);
+  outline-offset: 2px;
+}
+
+/* Canvas objects sit edge-to-edge against their neighbours, so an outset ring
+   is swallowed by the adjacent tile. Flip those to an inset ring instead. */
+[data-sw-canvas-object]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--sw-ink, #e8edf5);
+}
+
+/* Scrollbars are chrome too — a default light scrollbar on a near-black panel
+   is the loudest thing on the screen. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sw-line, #e8edf566) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--sw-line, #e8edf566);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--sw-muted, #e8edf599);
+  background-clip: content-box;
 }
 
 @keyframes pulse {
@@ -37,10 +84,10 @@ body,
 @keyframes sw-pulse-bottleneck {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0);
+    box-shadow: 0 0 0 0 rgba(255, 77, 85, 0);
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(231, 76, 60, 0.25);
+    box-shadow: 0 0 0 4px rgba(255, 77, 85, 0.3);
   }
 }
 
@@ -76,8 +123,16 @@ body,
   }
 }
 
+/* Reduced motion applies everywhere, not just to overlays. The three continuous
+   animations (running pulse, marching flow, bottleneck ring) freeze to their
+   static form and every transition collapses, so nothing moves at all. */
 @media (prefers-reduced-motion: reduce) {
-  [data-sw-overlay] {
-    animation: none !important;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

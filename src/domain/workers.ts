@@ -20,7 +20,6 @@ export type WorkerRole =
   | 'presser'          // Iron / press station operator
   | 'packer'           // Folds, polybags, cartons
   | 'material_handler' // Moves bundles, trolleys, racks between zones
-  | 'mechanic'         // Machine maintenance, breakdown response
   | 'supervisor'       // Line supervisor / floor in-charge
   | 'merchandiser';    // Order coordination (planning role; not on floor)
 
@@ -45,7 +44,6 @@ export type SkillId =
   | 'packing'
   | 'bundling'
   | 'material_handling'
-  | 'mechanical_maint'
   | 'supervision';
 
 export interface WorkerArchetype {
@@ -61,8 +59,6 @@ export interface WorkerArchetype {
   secondarySkills?: SkillId[];
   /** Fraction of standard performance from a fully-trained operator. 1.0 = on standard. */
   baseEfficiency: number;
-  /** Hourly wage, typical mid-range USD. */
-  baseCostHr: number;
   /** Walking speed in m/s when moving between zones. */
   walkSpeedMps: number;
   /** Whether this role typically owns a machine (and thus a workstation). */
@@ -76,105 +72,98 @@ export const WORKER_ARCHETYPES: Record<WorkerRole, WorkerArchetype> = {
     icon: '⌃', color: SW_COLORS.brand,
     primarySkills: ['stitching'],
     secondarySkills: ['overlock', 'flatlock'],
-    baseEfficiency: 0.85, baseCostHr: 8, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.85, walkSpeedMps: 1.0, ownsStation: true,
   },
   helper: {
     role: 'helper', label: 'Helper',
     description: 'Floater. Trims threads, marks, transfers bundles, fills in for absences.',
     icon: '✋', color: SW_COLORS.muted,
     primarySkills: ['bundling'], secondarySkills: ['stitching', 'pressing'],
-    baseEfficiency: 0.7, baseCostHr: 5, walkSpeedMps: 1.1, ownsStation: false,
+    baseEfficiency: 0.7, walkSpeedMps: 1.1, ownsStation: false,
   },
   cutter: {
     role: 'cutter', label: 'Cutter',
     description: 'Cutting room operator. Hand knife or CAD cutter.',
     icon: '✂', color: SW_COLORS.press,
     primarySkills: ['cutting_manual'], secondarySkills: ['cutting_cad', 'spreading'],
-    baseEfficiency: 0.9, baseCostHr: 9, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.9, walkSpeedMps: 1.0, ownsStation: true,
   },
   spreader: {
     role: 'spreader', label: 'Spreader',
     description: 'Lays fabric layers on the spreading table for cutting.',
     icon: '≡', color: SW_COLORS.fabric,
     primarySkills: ['spreading'],
-    baseEfficiency: 0.85, baseCostHr: 7, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.85, walkSpeedMps: 1.0, ownsStation: true,
   },
   bundler: {
     role: 'bundler', label: 'Bundler',
     description: 'Tickets cut pieces, ties bundles, hand-off to sewing input.',
     icon: '◫', color: SW_COLORS.trim,
     primarySkills: ['bundling'],
-    baseEfficiency: 0.9, baseCostHr: 6, walkSpeedMps: 1.1, ownsStation: false,
+    baseEfficiency: 0.9, walkSpeedMps: 1.1, ownsStation: false,
   },
   fuser: {
     role: 'fuser', label: 'Fusing Operator',
     description: 'Runs the fusing press. Sub-assembly of collars / cuffs / plackets.',
     icon: '▦', color: SW_COLORS.press,
     primarySkills: ['fusing'],
-    baseEfficiency: 0.85, baseCostHr: 7, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.85, walkSpeedMps: 1.0, ownsStation: true,
   },
   embroidery_op: {
     role: 'embroidery_op', label: 'Embroidery Operator',
     description: 'Loads and runs embroidery machines. Watches for thread breaks.',
     icon: '✿', color: SW_COLORS.trim,
     primarySkills: ['embroidery'],
-    baseEfficiency: 0.9, baseCostHr: 8, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.9, walkSpeedMps: 1.0, ownsStation: true,
   },
   qc_inline: {
     role: 'qc_inline', label: 'In-line QC Inspector',
     description: 'Checks bundles between operations, flags issues mid-line.',
     icon: '◎', color: SW_COLORS.alarm,
     primarySkills: ['inspection'],
-    baseEfficiency: 0.9, baseCostHr: 9, walkSpeedMps: 1.2, ownsStation: false,
+    baseEfficiency: 0.9, walkSpeedMps: 1.2, ownsStation: false,
   },
   qc_final: {
     role: 'qc_final', label: 'Final QC Inspector',
     description: 'Final inspection station. AQL sampling, decides accept / reject / rework.',
     icon: '◉', color: SW_COLORS.alarm,
     primarySkills: ['inspection'],
-    baseEfficiency: 0.9, baseCostHr: 10, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.9, walkSpeedMps: 1.0, ownsStation: true,
   },
   presser: {
     role: 'presser', label: 'Presser',
     description: 'Iron station operator. Inter-process press and final pressing.',
     icon: '▤', color: SW_COLORS.thread,
     primarySkills: ['pressing'],
-    baseEfficiency: 0.85, baseCostHr: 7, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.85, walkSpeedMps: 1.0, ownsStation: true,
   },
   packer: {
     role: 'packer', label: 'Packer',
     description: 'Folds, poly-bags, cartons. End of finishing room.',
     icon: '▣', color: SW_COLORS.ship,
     primarySkills: ['packing'],
-    baseEfficiency: 0.85, baseCostHr: 6, walkSpeedMps: 1.0, ownsStation: true,
+    baseEfficiency: 0.85, walkSpeedMps: 1.0, ownsStation: true,
   },
   material_handler: {
     role: 'material_handler', label: 'Material Handler',
     description: 'Moves trolleys / bundles / racks between zones; the connective tissue.',
     icon: '⏍', color: SW_COLORS.brand,
     primarySkills: ['material_handling'],
-    baseEfficiency: 0.9, baseCostHr: 6, walkSpeedMps: 1.4, ownsStation: false,
-  },
-  mechanic: {
-    role: 'mechanic', label: 'Mechanic',
-    description: 'Machine setup, breakdown response, scheduled maintenance.',
-    icon: '🔧', color: SW_COLORS.steel,
-    primarySkills: ['mechanical_maint'],
-    baseEfficiency: 0.95, baseCostHr: 12, walkSpeedMps: 1.3, ownsStation: false,
+    baseEfficiency: 0.9, walkSpeedMps: 1.4, ownsStation: false,
   },
   supervisor: {
     role: 'supervisor', label: 'Line Supervisor',
     description: 'Owns one or more lines: pace, balance, escalations.',
     icon: '⚐', color: SW_COLORS.ink,
     primarySkills: ['supervision'],
-    baseEfficiency: 1.0, baseCostHr: 18, walkSpeedMps: 1.3, ownsStation: false,
+    baseEfficiency: 1.0, walkSpeedMps: 1.3, ownsStation: false,
   },
   merchandiser: {
     role: 'merchandiser', label: 'Merchandiser',
     description: 'Order coordination, buyer comms — planning role, not on floor.',
     icon: '✎', color: SW_COLORS.bobbin,
     primarySkills: [],
-    baseEfficiency: 1.0, baseCostHr: 15, walkSpeedMps: 1.0, ownsStation: false,
+    baseEfficiency: 1.0, walkSpeedMps: 1.0, ownsStation: false,
   },
 };
 

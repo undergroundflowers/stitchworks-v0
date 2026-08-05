@@ -1,22 +1,14 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, ProductionSystemDiagram, HudSelect } from '../components';
+import { Card, Button, SectionHeader, HudSelect } from '../components';
 import { useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  ALL_PRODUCTION_SYSTEMS,
-  PRODUCTION_SYSTEMS,
-  type ProductionSystem,
-  pitchTime,
-  crewSizeFor,
-  systemFeasibilityHint,
-} from '../domain';
+import { crewSizeFor } from '../domain';
 import type { GarmentTemplate, GarmentClass } from '../domain/garments';
 import type { Operation, OperationCategory } from '../domain/operations';
 import type { MachineCode } from '../domain/machines';
 import type { SkillId } from '../domain/workers';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { shareDebtForLine } from '../domain/twin';
 import { buildSeededDraftTwin, mapToLineSystem } from '../lib/build-draft-twin';
 
 interface OrderState {
@@ -30,11 +22,11 @@ interface OrderState {
 }
 
 /**
- * Order setup — the user enters PO/client/style/qty/deadline, picks a
+ * Order setup — the user enters PO/client/style/qty/deadline and picks a
  * garment template (T-shirt / Polo / Shirt / Trouser / Sweatshirt, all
- * sourced from the apparel domain layer with literature-backed SMVs), and
- * picks a production system. Stitchworks computes pitch time, theoretical
- * crew size and recommends the system that best fits qty × deadline.
+ * sourced from the apparel domain layer with literature-backed SMVs).
+ * Stitchworks derives a theoretical crew size from the garment's SAM and
+ * carries the project's production system through to the Builder / simulator.
  */
 export function OrdersPage() {
   const navigate = useNavigate();
@@ -49,15 +41,6 @@ export function OrdersPage() {
     garmentTemplateId: project.selectedGarmentId,
     target: 'AQL 2.5',
   });
-  // Seed the selected system with whatever recommendSystem() suggests for the
-  // initial qty/deadline so the "Recommended" tile is highlighted on first
-  // paint instead of defaulting to PBS.
-  const [system, setSystem] = useState<ProductionSystem>(() => recommendSystem(1200, 5));
-  // Hovering a system tile previews its topology + description without
-  // committing the selection. Falls back to the active `system` when null.
-  const [hoveredSystem, setHoveredSystem] = useState<ProductionSystem | null>(null);
-  const previewSystem = PRODUCTION_SYSTEMS[hoveredSystem ?? system];
-  const isPreviewing = hoveredSystem !== null && hoveredSystem !== system;
   // "+ New template" tile opens a modal that builds a custom GarmentTemplate
   // from a quick form + operations textarea. The new template is persisted in
   // `project.garmentEdits` so it shows up everywhere the garments hook is read.
@@ -177,69 +160,23 @@ export function OrdersPage() {
   }
 
   const template = garments.byId[order.garmentTemplateId];
-  const recommended = recommendSystem(order.qty, order.deadlineDays);
 
-  // Pitch time + crew size based on the chosen template's SAM and an
-  // 8-hour shift target = qty / deadline_days / 8 = pcs/hour demand.
-  // Crew size now branches on the chosen production system so picking
-  // modular yields a 6-operator rotation cell instead of a 25-operator
-  // PBS line for the same garment.
+  // The order still carries a production system downstream into the Builder
+  // and the simulator. With the on-page recommender removed, it defaults to
+  // the project's current system (PBS out of the box) and is refined in Builder.
+  const system = project.selectedProductionSystem;
+
+  // Theoretical crew size feeds the order's `operators` field: qty / deadline
+  // / 8h = pcs/hour demand, sized against the garment's SAM under `system`.
   const demandPerHour = order.qty / Math.max(1, order.deadlineDays) / 8;
-  const crewSize = crewSizeFor({
-    productionSystem: system,
-    sam: template.totalSmv,
-    opCount: template.operations.length,
-    demandPerHour,
-  });
-  const pitchSec = pitchTime({ sam: template.totalSmv, operators: crewSize });
-  const cycleDays = Math.ceil((order.qty * template.totalSmv) / (60 * 8 * crewSize));
-  const feasibility = systemFeasibilityHint({
-    productionSystem: system,
-    qty: order.qty,
-    days: order.deadlineDays,
-    opCount: template.operations.length,
-  });
-  // ── Active-twin share-debt hint ──────────────────────────────────────
-  // If a line on the active twin already runs the selected system, surface
-  // the share debt the user has authored there. A line claiming "−2 OPR
-  // saved" with "4 stations slowed 2×" is a meaningful caveat on the
-  // feasibility math — without it, the user sees the same crew-size
-  // recommendation as a fresh, fully-staffed line.
-  const activeTwin = useTwin(selectActiveTwin);
-  const mappedSystem = mapToLineSystem(system);
-  const matchedLine = activeTwin?.lines?.find(
-    (l) => l.productionSystem === mappedSystem,
-  );
-  const shareDebt = matchedLine
-    ? shareDebtForLine(activeTwin, matchedLine.id)
-    : { stations: 0, savings: 0 };
-  // Crew the line actually has after sharing (assignments save labour) — used
-  // for a fairer comparison than the abstract crewSize recommendation.
-  const recommendedCrewAfterShare = Math.max(
-    1,
-    Math.round(crewSize - shareDebt.savings),
-  );
-  // Side-by-side mini-comparison: how would this same order look under
-  // each of the five canonical systems? Drives the "Compare" table the
-  // user can scan to understand why the recommendation is what it is.
-  const COMPARISON_SYSTEMS: ProductionSystem[] = [
-    'PBS',
-    'modular',
-    'synchro',
-    'UPS',
-    'make_through',
-  ];
-  const comparison = COMPARISON_SYSTEMS.map((sys) => {
-    const crew = crewSizeFor({
-      productionSystem: sys,
-      sam: template.totalSmv,
-      opCount: template.operations.length,
-      demandPerHour,
-    });
-    const days = Math.ceil((order.qty * template.totalSmv) / (60 * 8 * Math.max(1, crew)));
-    const pitch = pitchTime({ sam: template.totalSmv, operators: crew });
-    return { sys, def: PRODUCTION_SYSTEMS[sys], crew, days, pitch };
-  });
+  const crewSize = template
+    ? crewSizeFor({
+        productionSystem: system,
+        sam: template.totalSmv,
+        opCount: template.operations.length,
+        demandPerHour,
+      })
+    : project.defaultOperators;
 
   const qtyInvalid = !(order.qty > 0);
   const deadlineInvalid = !(order.deadlineDays > 0);
@@ -247,13 +184,12 @@ export function OrdersPage() {
 
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', padding: 32, background: SW_COLORS.paperDeep }}>
-      <div style={{ maxWidth: 1180, margin:'0 auto' }}>
+      <div style={{ maxWidth: 760, margin:'0 auto' }}>
         <SectionHeader kicker="Plan a job" title="New production order"
-          sub="Enter order specs. We'll suggest the line, system and crew based on the garment template's SAM."
+          sub="Enter order specs and pick a garment template. Set up the line in the Builder, or run it straight in the simulator."
           right={<Button variant="dark" onClick={()=>navigate('/builder')}>Cancel</Button>}
         />
 
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:18 }}>
           <Card padding={20}>
             <div style={{ ...SW_TYPE.heading, marginBottom:14 }}>ORDER DETAILS</div>
             {[
@@ -373,248 +309,6 @@ export function OrdersPage() {
               )}
             </div>
           </Card>
-
-          <Card padding={20}>
-            <div style={{ ...SW_TYPE.heading, marginBottom:14 }}>SYSTEM RECOMMENDATION</div>
-            <div style={{ background: SW_COLORS.brandLite, padding:14, borderRadius: SW_RADIUS.sm, marginBottom:14, border: `1px solid ${SW_COLORS.brand}40` }}>
-              <div style={{ fontSize:11, color: SW_COLORS.brandDeep, fontWeight:700, fontFamily: SW_FONTS.mono, letterSpacing:'1px', marginBottom:4 }}>RECOMMENDED FOR THIS ORDER</div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:18, fontWeight:900, color: SW_COLORS.ink }}>
-                {PRODUCTION_SYSTEMS[recommended].label}
-              </div>
-              <div style={{ fontSize:12, color: SW_COLORS.ink, opacity:0.8, marginTop:4 }}>
-                {PRODUCTION_SYSTEMS[recommended].bestFor}
-              </div>
-            </div>
-
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:6 }}>
-              {ALL_PRODUCTION_SYSTEMS.map(s => {
-                const active = system === s.id;
-                const hovered = hoveredSystem === s.id;
-                return (
-                  <div
-                    key={s.id}
-                    onClick={()=>setSystem(s.id)}
-                    onMouseEnter={() => setHoveredSystem(s.id)}
-                    onMouseLeave={() => setHoveredSystem(null)}
-                    aria-label={`${s.label} — ${s.description}`}
-                    style={{
-                      padding:'8px 10px', textAlign:'center',
-                      borderRadius: SW_RADIUS.sm,
-                      border:`1.5px solid ${active ? SW_COLORS.ink : hovered ? SW_COLORS.brand : SW_COLORS.line}`,
-                      background: active?SW_COLORS.ink:SW_COLORS.paper,
-                      color: active?SW_COLORS.paper:SW_COLORS.ink,
-                      fontSize:11, fontWeight:700, cursor:'pointer',
-                      transition: 'border-color 120ms',
-                    }}>{s.short}</div>
-                );
-              })}
-            </div>
-
-            {/* System preview — shows the active system by default, the hovered
-                system while a tile is hovered. The diagram visually conveys
-                the floor topology (bundle vs piece flow, line shape, conveyor
-                presence) so the user can compare systems before committing. */}
-            <div
-              style={{
-                marginTop: 16,
-                padding: 12,
-                background: SW_COLORS.paperDeep,
-                borderRadius: SW_RADIUS.sm,
-                border: `1px solid ${isPreviewing ? SW_COLORS.brand + '60' : SW_COLORS.line}`,
-                display: 'grid',
-                gridTemplateColumns: 'auto 1fr',
-                gap: 14,
-                alignItems: 'start',
-              }}
-            >
-              <ProductionSystemDiagram system={previewSystem.id} height={120} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                  <strong style={{ color: SW_COLORS.ink, fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 900 }}>
-                    {previewSystem.label}
-                  </strong>
-                  {isPreviewing && (
-                    <span style={{ ...SW_TYPE.overline, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: 1.5 }}>
-                      PREVIEW
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5, marginBottom: 8 }}>
-                  {previewSystem.description}
-                </div>
-                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-                  <span>bundle <b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalBatchSize}</b></span>
-                  <span>line ~<b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalLineSize}</b> operations</span>
-                  <span>WIP ~<b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalWipPieces}</b> pcs</span>
-                  <span>changeover <b style={{ color: SW_COLORS.ink }}>{previewSystem.changeoverMin}</b> min</span>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ marginTop:18, display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:8 }}>
-              <Stat label="GARMENT SAM" value={template.totalSmv.toFixed(2)} unit="min"/>
-              <Stat label="PITCH TIME" value={pitchSec.toFixed(1)} unit="sec" color={SW_COLORS.brand}/>
-              <Stat label="EST. CYCLE" value={`${cycleDays}d`} color={SW_COLORS.thread}/>
-              <Stat label="CREW NEEDED" value={crewSize} unit="operators" color={SW_COLORS.ok}/>
-            </div>
-            {feasibility && (
-              <div
-                role="alert"
-                style={{
-                  marginTop: 12,
-                  padding: '10px 12px',
-                  borderRadius: 6,
-                  background:
-                    feasibility.severity === 'error'
-                      ? `${SW_COLORS.alarm}14`
-                      : `${SW_COLORS.thread}1f`,
-                  border: `1px solid ${feasibility.severity === 'error' ? SW_COLORS.alarm : SW_COLORS.thread}`,
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 8,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: SW_COLORS.ink,
-                }}
-              >
-                <span
-                  style={{
-                    ...SW_TYPE.kicker,
-                    fontWeight: 800,
-                    color: feasibility.severity === 'error' ? SW_COLORS.alarm : SW_COLORS.thread,
-                    letterSpacing: '1px',
-                  }}
-                >
-                  {feasibility.severity === 'error' ? '⨯ MISFIT' : '⚠ HINT'}
-                </span>
-                <span style={{ flex: 1, lineHeight: 1.4 }}>{feasibility.message}</span>
-              </div>
-            )}
-            {shareDebt.stations > 0 && matchedLine && (
-              <div
-                role="alert"
-                style={{
-                  marginTop: 8,
-                  padding: '10px 12px',
-                  borderRadius: 6,
-                  background: `${SW_COLORS.alarm}10`,
-                  border: `1px dashed ${SW_COLORS.alarm}`,
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 8,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: SW_COLORS.ink,
-                }}
-              >
-                <span
-                  style={{
-                    ...SW_TYPE.kicker,
-                    fontWeight: 800,
-                    color: SW_COLORS.alarm,
-                    letterSpacing: '1px',
-                  }}
-                >
-                  ⇄ SHARE DEBT
-                </span>
-                <span style={{ flex: 1, lineHeight: 1.4 }}>
-                  Line <strong>{matchedLine.name}</strong> already shares operators on{' '}
-                  <strong>{shareDebt.stations}</strong> station{shareDebt.stations === 1 ? '' : 's'} ·{' '}
-                  saves <strong>{shareDebt.savings.toFixed(1)}</strong> operator
-                  {shareDebt.savings >= 1.05 ? 's' : ''} of labour, but each shared station
-                  cycles ≥2× slower. Effective crew on this line ≈{' '}
-                  <strong>{recommendedCrewAfterShare}</strong>; deadline math below assumes a
-                  fresh, fully-staffed line of {crewSize}.
-                </span>
-              </div>
-            )}
-
-            {/* ── Per-system comparison ────────────────────────────────
-                How the same order would size up under each of the five
-                canonical systems. Lets the user scan the alternatives
-                without changing their selection. */}
-            <div
-              style={{
-                marginTop: 14,
-                border: `1px solid ${SW_COLORS.line}`,
-                borderRadius: 6,
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  padding: '6px 10px',
-                  background: SW_COLORS.paperDeep,
-                  ...SW_TYPE.overline,
-                  fontWeight: 800,
-                  color: SW_COLORS.muted,
-                  letterSpacing: '1.5px',
-                }}
-              >
-                COMPARE UNDER OTHER SYSTEMS
-              </div>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                <thead>
-                  <tr style={{ background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                    {['System', 'Crew', 'Pitch', 'Cycle'].map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: '6px 10px',
-                          textAlign: 'left',
-                          fontFamily: SW_FONTS.mono,
-                          fontSize: 9,
-                          fontWeight: 700,
-                          color: SW_COLORS.muted,
-                          letterSpacing: '1px',
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {comparison.map((row) => {
-                    const active = row.sys === system;
-                    return (
-                      <tr
-                        key={row.sys}
-                        onClick={() => setSystem(row.sys)}
-                        style={{
-                          borderBottom: `1px solid ${SW_COLORS.line}`,
-                          background: active ? SW_COLORS.brandLite : SW_COLORS.paper,
-                          cursor: 'pointer',
-                        }}
-                        title={`Click to pick ${row.def.label}`}
-                      >
-                        <td style={{ padding: '6px 10px', fontWeight: 700 }}>
-                          <span style={{ color: active ? SW_COLORS.brand : SW_COLORS.muted, marginRight: 6 }}>
-                            {active ? '◆' : '○'}
-                          </span>
-                          {row.def.label}
-                        </td>
-                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
-                          {row.crew}
-                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>opr</span>
-                        </td>
-                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
-                          {row.pitch.toFixed(1)}
-                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>s</span>
-                        </td>
-                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
-                          {row.days}
-                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>d</span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        </div>
-
         <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
           <Button variant="secondary" onClick={()=>navigate('/builder')}>Save draft</Button>
           <Button variant="dark" size="lg" icon="✎" onClick={commitToBuilder} disabled={orderInvalid}>
@@ -639,24 +333,6 @@ export function OrdersPage() {
       )}
     </div>
   );
-}
-
-/**
- * Heuristic system recommendation — matches the literature's rules of thumb:
- *   - very small batch / sample volume → make-through
- *   - tight deadline + small qty → modular (one-piece flow, low WIP)
- *   - mid-volume mixed → modular or UPS
- *   - high-volume basics → PBS
- *   - massive piece-rate runs → unit-handle
- */
-function recommendSystem(qty: number, days: number): ProductionSystem {
-  const dailyDemand = qty / Math.max(1, days);
-  if (qty <= 50) return 'make_through';
-  if (dailyDemand < 100) return 'modular';
-  if (dailyDemand < 400) return 'modular';
-  if (dailyDemand < 1500) return 'PBS';
-  if (dailyDemand < 3000) return 'UPS';
-  return 'unit_handle';
 }
 
 // ── New-garment-template modal ─────────────────────────────────────────────
