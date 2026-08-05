@@ -21,6 +21,7 @@ import { BuilderPage } from './pages/Builder';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { QueueIndexPage } from './pages/QueueIndex';
 import { QueueAnalyticsPage } from './pages/QueueAnalytics';
+import { InsightsPage } from './pages/Insights';
 
 /**
  * App shell: sidebar + route outlet. On launch the app opens straight to the
@@ -141,6 +142,7 @@ export default function App() {
               Both /iso (legacy nav id) and /builder route here. */}
           <Route path="/builder" element={<BuilderPage />} />
           <Route path="/iso" element={<BuilderPage />} />
+          <Route path="/insights" element={<InsightsPage />} />
           <Route path="/queues" element={<QueueIndexPage />} />
           <Route path="/queues/analytics" element={<QueueAnalyticsPage />} />
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />

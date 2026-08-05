@@ -32,6 +32,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/',          id: 'menu',      label: 'MENU',             icon: '⌂', kind: 'special' },
   { path: '/iso',       id: 'iso',       label: 'Factory Builder',  shortLabel: 'Builder',    icon: '◆', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Simulation',       shortLabel: 'Sim',        icon: '▷', kind: 'main' },
+  { path: '/insights',  id: 'insights',  label: 'Insights',                                   icon: '◎', kind: 'main' },
   { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
   { path: '/resources', id: 'resources', label: 'Resources',                                  icon: '⊟', kind: 'main' },
   // /kpi is the legacy Reports path. App.tsx redirects it to /balance, which
