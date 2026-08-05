@@ -24,15 +24,19 @@ import {
   type Workstation,
   type Department,
   type Connector,
+  type SewingLine,
   type TwinSchemaVersion,
   TWIN_SCHEMA_VERSION,
+  defaultPolicyFor,
   newTwinId,
   newDeptId,
+  newLineId,
   newConnectorId,
   makeWorkstation,
 } from './twin';
 import { defaultPropsFor } from './iso';
 import {
+  defaultDist,
   distFromOpNotes,
   syntheticTriangular,
   type ServiceDist,
@@ -380,6 +384,21 @@ export function buildReferenceTwin(
   }
 
   // ── Twin ─────────────────────────────────────────────────────────────────
+  // As in `buildGarmentTwin`: a bulletin-derived twin is a sewing line, so it
+  // gets one, and every workstation carries the same lineId (see the note
+  // there about operator pools and Source order sequences).
+  const refLine: SewingLine = {
+    id: newLineId(),
+    deptId: dSew,
+    name: 'Line 1',
+    productionSystem: 'PBS',
+    garmentId: model.garmentTemplate.id,
+    color: 'blue',
+    operatorTarget: operatorCount,
+    policy: defaultPolicyFor('PBS'),
+  };
+  for (const ws of workstations) ws.lineId = refLine.id;
+
   const variantLabel = scenario ? `${scenario.id} (${scenario.name})` : resolved.label;
   const name = opts.name ?? `${model.title} · ${variantLabel}`;
   const paperKpis = scenario
@@ -402,7 +421,7 @@ export function buildReferenceTwin(
     gridW,
     gridH,
     departments,
-    lines: [],
+    lines: [refLine],
     workstations,
     connectors,
     notes:
@@ -478,8 +497,24 @@ export function buildGarmentTwin(
 
   const workstations: Workstation[] = [];
 
-  const takt = totalSmv / ops.length;
-  const sourceRatePerHr = Math.max(60, Math.round((60 / takt) * 1.5));
+  // Arrival rate must be FEASIBLE for the line, which means it is set by the
+  // BOTTLENECK operation, not by the average one.
+  //
+  // This previously used `(60 / (totalSmv / ops.length)) × 1.5` — the mean
+  // station rate, inflated 50 %. On the T-shirt bulletin that offers 289
+  // pcs/hr to a line whose slowest operation (0.70 min) caps it at 86 pcs/hr.
+  // ρ > 1 at the bottleneck means its queue grows without bound: press play
+  // and WIP climbs forever, no KPI ever settles, and no analytical Lq exists
+  // to compare against. Feeding a line more than it can take isn't a
+  // "loaded" line, it's an unstable one.
+  //
+  // Target ~85 % bottleneck utilisation: busy enough that queues are visible
+  // and the bottleneck is obvious, stable enough that every observable
+  // converges to a finite steady state.
+  const BOTTLENECK_TARGET_RHO = 0.85;
+  const slowestSmv = ops.reduce((m, o) => Math.max(m, o.smv / Math.max(1, o.servers ?? 1)), 0);
+  const bottleneckCapPerHr = slowestSmv > 0 ? 60 / slowestSmv : 60;
+  const sourceRatePerHr = Math.max(1, Math.round(bottleneckCapPerHr * BOTTLENECK_TARGET_RHO));
   const wsSource = makeWorkstation({
     deptId: dPlumb,
     catalogId: 'buf_in',
@@ -488,11 +523,18 @@ export function buildGarmentTwin(
   });
   wsSource.block = {
     kind: 'Source',
-    params: { sourceRatePerHr, piecesPerAgent: 1 },
+    params: {
+      sourceRatePerHr,
+      piecesPerAgent: 1,
+      // Poisson arrivals. Without an explicit distribution the Source emits on
+      // a fixed lattice, which is a D/M/1 line — it under-reports queueing
+      // versus the M/M/c model every analysis surface compares it against.
+      arrivalDist: { kind: 'exp', mean: 60 / sourceRatePerHr },
+    },
   };
   wsSource.operation = {
     ...wsSource.operation,
-    freeText: `${sourceRatePerHr} pcs/hr · seeds the line`,
+    freeText: `${sourceRatePerHr} pcs/hr · ${Math.round(BOTTLENECK_TARGET_RHO * 100)}% of bottleneck capacity`,
   };
   workstations.push(wsSource);
 
@@ -540,6 +582,15 @@ export function buildGarmentTwin(
         // Bake the authored system capacity so the DES honours the same finite
         // buffer as the analytical model. 0 ⇒ unbounded. See systemCapacityFor.
         queueCapacity: op.queueCapacity ?? 0,
+        // Bake the service DISTRIBUTION for the same reason. Without this the
+        // DES falls back to a deterministic `cycleMin` (an M/D/1 station) while
+        // the analytical layer falls back to `defaultDist` (uniform ⇒ M/G/1) —
+        // two different variances, so a systematically different Lq on the two
+        // halves of every sim-vs-theory comparison. Resolving both from the
+        // same expression is what makes them agree by construction.
+        cycleDist: op.serviceDistribution
+          ?? distFromOpNotes(op.notes)
+          ?? defaultDist(op.smv),
       },
     };
     ws.operation = {
@@ -580,6 +631,28 @@ export function buildGarmentTwin(
     link(opStations[opStations.length - 1], wsSink);
   }
 
+  // A twin built from a bulletin IS a sewing line, so give it one. This used
+  // to return `lines: []` with no `lineId` on any workstation, which meant
+  // every surface that scopes by line saw a factory with no lines in it — the
+  // root of "no sewing line builds reported".
+  //
+  // Every workstation gets the SAME lineId, including the Source, the Sink and
+  // the operator ResourcePool. That consistency is load-bearing in two places:
+  // the engine keys operator pools by line, so a pool tagged differently from
+  // the Services it serves would silently impose no constraint at all; and the
+  // Source reads `ws.lineId` to find its order sequence and raise changeovers.
+  const line: SewingLine = {
+    id: newLineId(),
+    deptId: dSew,
+    name: `Line 1 · ${garment.name}`,
+    productionSystem: 'PBS',
+    garmentId: garment.id,
+    color: 'blue',
+    operatorTarget: operators,
+    policy: defaultPolicyFor('PBS'),
+  };
+  for (const ws of workstations) ws.lineId = line.id;
+
   return {
     schemaVersion: TWIN_SCHEMA_VERSION as TwinSchemaVersion,
     id: newTwinId(),
@@ -591,7 +664,7 @@ export function buildGarmentTwin(
     gridW,
     gridH,
     departments,
-    lines: [],
+    lines: [line],
     workstations,
     connectors,
     notes: `Auto-built from garment template "${garment.name}" — ${ops.length} ops, total SMV ${totalSmv.toFixed(2)} min, ${operators} operators.`,

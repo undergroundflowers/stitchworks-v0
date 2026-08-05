@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { buildSwproj, parseSwproj, applySwproj } from './swproj';
 import { useProject } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
-import { buildDemoTwin } from '../domain/twin';
+import { buildStarterLine } from '../domain/starter-line';
 
 /**
  * Guards the project file format — the regression that motivated it was an
@@ -12,7 +12,7 @@ import { buildDemoTwin } from '../domain/twin';
  */
 describe('.swproj format', () => {
   function sampleTwinExport() {
-    const canonical = buildDemoTwin();
+    const canonical = buildStarterLine();
     // Track the constant, not a literal. `buildSwproj` always stamps the
     // CURRENT store version into the envelope, so hardcoding a number here
     // asserts nothing except that the constant hasn't moved since the test
@@ -71,10 +71,10 @@ describe('.swproj format', () => {
 
   it('applySwproj restores the twin into the live store', () => {
     const project = useProject.getState().exportProject();
-    const demo = buildDemoTwin();
+    const demo = buildStarterLine();
     const env = buildSwproj(
       project,
-      { schemaVersion: 5, canonical: demo, scenarios: [], activeScenarioId: null },
+      { schemaVersion: TWIN_STORE_SCHEMA_VERSION, canonical: demo, scenarios: [], activeScenarioId: null },
       '2026-01-01T00:00:00.000Z',
     );
     const result = applySwproj(parseSwproj(JSON.parse(JSON.stringify(env))));

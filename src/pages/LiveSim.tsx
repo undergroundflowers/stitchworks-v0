@@ -51,7 +51,7 @@ import { useProject, useGarments, type OrderDraft } from '../store';
 import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
-import { getBlockSpec, apparelRoleFor } from '../domain/pml';
+import { getBlockSpec, getBlockKind, getBlockParams, apparelRoleFor } from '../domain/pml';
 import {
   type DepartmentColorKey,
   type ProductionSystemKey,
@@ -605,29 +605,28 @@ export function LiveSimPage() {
     colorScheme: 'dark',
   };
 
-  // Throughput in pieces/hour. Single-line scope multiplies the engine's
-  // bundle-throughput by the run's bundle size; multi-line scope sums the
-  // per-line pieces/hour (each line has its own bundle size, so a single
-  // multiplier can't honestly speak for the whole factory).
+  // Throughput in pieces/hour, read straight off the history.
+  //
+  // This used to multiply by the run's bundle size, which double-counted by
+  // exactly that factor: on the starter line it reported 2,134 pcs/hr next to
+  // an OUTPUT tile reading 569 pcs after 8 hours (really 71 pcs/hr). The
+  // multiplier is a leftover from the legacy engine, which counted BUNDLES —
+  // the PML engine accumulates `agent.pieces` at the Sink, so
+  // `HistoryPoint.throughputPerHr` is already pieces per hour. Multi-line
+  // scope needs no multiplier either, since `mergePmlSimStates` sums pieces.
   const throughputPerHr = useMemo(() => {
     if (inMultiLineScope) {
       let total = 0;
-      for (let i = 0; i < multiSim.states.length; i++) {
-        const h = multiSim.states[i].history;
-        const last = h.length > 0 ? h[h.length - 1] : undefined;
-        if (!last) continue;
-        const lineBundle = wiredLineBuilds[i]?.build.config.bundleSize ?? 1;
-        total += last.throughputPerHr * lineBundle;
+      for (const s of multiSim.states) {
+        const last = s.history.length > 0 ? s.history[s.history.length - 1] : undefined;
+        if (last) total += last.throughputPerHr;
       }
       return total;
     }
-    // Single-line scope: scale the engine's bundle-throughput by the active
-    // bundle size (twin-derived seed for twin source, system default otherwise).
-    const singleBundle = twinBuild?.meta.seedBundleSize ?? systemBundleSize ?? 1;
     return state.history.length > 0
-      ? state.history[state.history.length - 1].throughputPerHr * singleBundle
+      ? state.history[state.history.length - 1].throughputPerHr
       : 0;
-  }, [inMultiLineScope, multiSim.states, wiredLineBuilds, state.history, twinBuild, systemBundleSize]);
+  }, [inMultiLineScope, multiSim.states, state.history]);
 
   const efficiencyPct = Math.round(state.utilization * 100);
 
@@ -4897,11 +4896,23 @@ function SewingLinesStrip({
         const active = selectedLineId === line.id;
         const memberCount = activeTwin.workstations.filter((w) => w.lineId === line.id).length;
         const ops = build.config.operations.length;
-        // Seed throughput in pieces/hr from the bottleneck cycle — same
-        // formula `buildSimConfigFromTwin` used for arrivalRatePerHour.
-        const seedPiecesPerHr = ok && ops > 0
-          ? Math.round(build.config.arrivalRatePerHour * build.config.bundleSize)
-          : 0;
+        // Seed rate in pieces/hr, read off the line's actual Source block —
+        // which is what the engine runs on.
+        //
+        // This used to be `SimConfig.arrivalRatePerHour × bundleSize`, and
+        // SimConfig is documentation-only now: nothing feeds it to the engine
+        // (see simulation/index.ts). On the starter line that reported 94
+        // pcs/hr while the Source was emitting 73, so the headline number on
+        // the sim screen described a model that wasn't running.
+        const seedPiecesPerHr = (() => {
+          if (!ok || ops === 0) return 0;
+          const src = activeTwin.workstations.find(
+            (w) => w.lineId === line.id && getBlockKind(w) === 'Source',
+          );
+          if (!src) return 0;
+          const p = getBlockParams(src);
+          return Math.round(p.sourceRatePerHr * Math.max(1, p.piecesPerAgent));
+        })();
         const accent = DEPT_LINE_COLORS[line.color] ?? SW_COLORS.brand;
         return (
           <button

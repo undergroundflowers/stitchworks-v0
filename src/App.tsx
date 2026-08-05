@@ -7,7 +7,7 @@ import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
 import { useStoresHydrated } from './store/storage/useHydrated';
 
 import { useTwin } from './store/twin';
-import { buildDemoTwin } from './domain/twin';
+import { buildStarterLine } from './domain/starter-line';
 import { useProject } from './store/project';
 
 import { MenuPage } from './pages/Menu';
@@ -30,18 +30,20 @@ export default function App() {
   const toast = useToast();
   const hydrated = useStoresHydrated();
 
-  // Seed the canonical twin with the demo factory the first time the app
-  // boots into an empty workspace. Existing edits are preserved — we only
-  // replace when departments + workstations + scenarios are all empty.
+  // Seed a runnable sewing line the first time the app boots into an empty
+  // workspace. Existing work is never replaced — the guard is "no stations
+  // authored and no scenarios saved", which is the only state where there is
+  // genuinely nothing to lose.
+  //
+  // The old guard also required `departments.length === 0`, and that is why a
+  // fresh factory sat at 0 stations forever: `emptyTwin()` always seeds one
+  // "Sewing Floor" department for stations to be dropped into, so the
+  // condition could never be true and the seed never fired.
   useEffect(() => {
     if (!hydrated) return;
     const s = useTwin.getState();
-    if (
-      s.canonical.departments.length === 0 &&
-      s.canonical.workstations.length === 0 &&
-      s.scenarios.length === 0
-    ) {
-      s.loadCanonical(buildDemoTwin());
+    if (s.canonical.workstations.length === 0 && s.scenarios.length === 0) {
+      s.loadCanonical(buildStarterLine(s.canonical.name));
     }
   }, [hydrated]);
 

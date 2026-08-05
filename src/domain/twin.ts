@@ -757,11 +757,12 @@ export const newAssignmentId = () => newId('asgn');
 // FACTORIES
 // ============================================================================
 
-/** Create a fresh empty twin. Used as the starting point for a brand-new
- *  project; the canvas will render the empty grid until the user drops the
- *  first department from the palette. */
+/** Create a fresh empty twin — the starting point for a brand-new factory.
+ *  The canvas renders an empty grid until the user drops the first station. */
 export function emptyTwin(name: string = 'Untitled factory'): Twin {
   const now = new Date().toISOString();
+  const deptId = newDeptId();
+  const lineId = newLineId();
   return {
     schemaVersion: TWIN_SCHEMA_VERSION,
     id: newTwinId(),
@@ -777,14 +778,28 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     // twin would have nowhere to drop a station.
     departments: [
       {
-        id: newDeptId(),
+        id: deptId,
         name: 'Sewing Floor',
         kind: 'Sewing',
         color: 'blue',
         bounds: { x: 2, y: 2, w: 24, h: 18 },
       },
     ],
-    lines: [],
+    // Seed one empty line for the same reason the department is seeded: a
+    // station needs a line to belong to, and every analysis surface scopes by
+    // line. A blank twin with no line reads to those surfaces as "this factory
+    // has nothing to analyse" rather than "this line has no stations yet",
+    // which is a much less useful thing to tell the user.
+    lines: [
+      {
+        id: lineId,
+        deptId,
+        name: 'Line 1',
+        productionSystem: 'PBS',
+        color: 'blue',
+        policy: defaultPolicyFor('PBS'),
+      },
+    ],
     workstations: [],
     connectors: [],
     operators: [],
@@ -820,166 +835,6 @@ export function normalizeTwin(input: unknown): Twin {
   };
 }
 
-/**
- * Build the "Pachyatap Demo Apparel Co." factory — a fully-populated canonical
- * twin used to seed a fresh project so that the Builder and the simulation views are
- * never empty in a demo. Lays out a five-department T-shirt factory on a
- * 36×26 grid: Storage, Cutting, QC at the top; Sewing line and Finishing
- * across the bottom. Every sewing station is wired to a real op id from the
- * built-in `tshirt` garment so the Operations lens reads correctly.
- */
-export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
-  const now = new Date().toISOString();
-  const dStore  = newDeptId();
-  const dCut    = newDeptId();
-  const dQc     = newDeptId();
-  const dSew    = newDeptId();
-  const dFinish = newDeptId();
-
-  const departments: Department[] = [
-    { id: dStore,  name: 'Storage',     kind: 'Storage',   color: 'cream',  bounds: { x: 1,  y: 1, w: 8,  h: 6  }, notes: 'Inbound fabric rolls + finished-goods staging.' },
-    { id: dCut,    name: 'Cutting',     kind: 'Cutting',   color: 'green',  bounds: { x: 10, y: 1, w: 14, h: 6  }, notes: 'Spread + auto-cut + bundle.' },
-    { id: dQc,     name: 'QC Bay',      kind: 'QC',        color: 'red',    bounds: { x: 25, y: 1, w: 9,  h: 6  }, notes: '4-point fabric inspection + audit.' },
-    { id: dSew,    name: 'Sewing Floor', kind: 'Sewing',   color: 'blue',   bounds: { x: 1,  y: 8, w: 23, h: 14 }, notes: 'Two production lines — T-shirt assembly · PBS · single shift.' },
-    { id: dFinish, name: 'Finishing',   kind: 'Finishing', color: 'yellow', bounds: { x: 25, y: 8, w: 9,  h: 14 }, notes: 'Press · pack · dispatch.' },
-  ];
-
-  // Two sewing lines on the sewing floor. Line A is the full 8-station
-  // assembly line that the workstation seeds below get assigned to; Line B
-  // is a skeleton placeholder so the user can see the multi-line UI even
-  // before they wire it up.
-  const lineA = newLineId();
-  const lineB = newLineId();
-  const lines: SewingLine[] = [
-    { id: lineA, deptId: dSew, name: 'Line A · T-shirt assembly', productionSystem: 'PBS',     garmentId: 'tshirt', color: 'blue',   operatorTarget: 12, notes: 'Eight stations, PBS, bundle 20.' },
-    { id: lineB, deptId: dSew, name: 'Line B · Polo (planning)',  productionSystem: 'modular', garmentId: 'polo',   color: 'brand',  operatorTarget: 14, notes: 'Modular cell — empty placeholder, drop machines from the palette to wire it.' },
-  ];
-
-  type WsSeed = {
-    deptId: string;
-    catalogId: string;
-    position: Vec2;
-    name: string;
-    /** Optional Operations-lens binding to a tshirt op + bundle size. */
-    op?: { opId: string; bundleSize?: number };
-    /** Optional sewing-line attribution. */
-    lineId?: string;
-  };
-
-  const seeds: WsSeed[] = [
-    // ── STORAGE ────────────────────────────────────────────────────────────
-    { deptId: dStore, catalogId: 'a_fabric_rack', position: { x: 2, y: 2 }, name: 'Fabric Rack A' },
-    { deptId: dStore, catalogId: 'a_fabric_rack', position: { x: 2, y: 4 }, name: 'Fabric Rack B' },
-    { deptId: dStore, catalogId: 'mh_forklift',   position: { x: 7, y: 3 }, name: 'Forklift FL-01' },
-
-    // ── CUTTING ────────────────────────────────────────────────────────────
-    { deptId: dCut, catalogId: 'a_spread_auto',    position: { x: 11, y: 2 }, name: 'Auto Spreader SP-01' },
-    { deptId: dCut, catalogId: 'a_cnc_cutter',     position: { x: 11, y: 4 }, name: 'CNC Cutter CC-01' },
-    { deptId: dCut, catalogId: 'op_cutter',        position: { x: 17, y: 4 }, name: 'Cutter — Anu' },
-    { deptId: dCut, catalogId: 'a_bundle_trolley', position: { x: 19, y: 4 }, name: 'Bundle Trolley T-01' },
-    { deptId: dCut, catalogId: 'op_helper',        position: { x: 21, y: 4 }, name: 'Bundler — Ravi' },
-
-    // ── QC ─────────────────────────────────────────────────────────────────
-    { deptId: dQc, catalogId: 'a_inspect_table', position: { x: 26, y: 2 }, name: '4-Point Inspect IT-01' },
-    { deptId: dQc, catalogId: 'fx_qctab',        position: { x: 26, y: 4 }, name: 'Audit Table QT-01' },
-    { deptId: dQc, catalogId: 'op_qc',           position: { x: 29, y: 4 }, name: 'QC — Priya' },
-    { deptId: dQc, catalogId: 'buf_in',          position: { x: 31, y: 2 }, name: 'Cut-bundle IN' },
-    { deptId: dQc, catalogId: 'buf_out',         position: { x: 31, y: 4 }, name: 'Audit OUT' },
-
-    // ── SEWING — Line A · 8-station T-shirt assembly ────────────────────
-    { deptId: dSew, catalogId: 'buf_in',      position: { x: 1,  y: 9 },  name: 'Bundle IN', lineId: lineA },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 4,  y: 9 },  name: 'Shoulder OL-01',     op: { opId: 'ts-07', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_snls',      position: { x: 6,  y: 9 },  name: 'Neck Rib Tack SN-01', op: { opId: 'ts-09', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 8,  y: 9 },  name: 'Neck Rib OL-02',     op: { opId: 'ts-10', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 10, y: 9 },  name: 'Sleeve Hem FL-01',   op: { opId: 'ts-17', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 12, y: 9 },  name: 'Sleeve OL-03',       op: { opId: 'ts-19', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 14, y: 9 },  name: 'Side Seam OL-04',    op: { opId: 'ts-21', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 16, y: 9 },  name: 'Body Hem FL-02',     op: { opId: 'ts-23', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_snls',      position: { x: 18, y: 9 },  name: 'Care Label SN-02',   op: { opId: 'ts-01', bundleSize: 20 }, lineId: lineA },
-    { deptId: dSew, catalogId: 'a_iron_inline', position: { x: 20, y: 9 }, name: 'Inline Iron IR-01', lineId: lineA },
-    { deptId: dSew, catalogId: 'buf_out',     position: { x: 22, y: 9 },  name: 'Bundle OUT', lineId: lineA },
-
-    // Operators in front of each machine (Line A)
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 4,  y: 12 }, name: 'OPR-01 · Lakshmi', lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 6,  y: 12 }, name: 'OPR-02 · Suman',   lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 8,  y: 12 }, name: 'OPR-03 · Geetha',  lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 10, y: 12 }, name: 'OPR-04 · Kala',    lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 12, y: 12 }, name: 'OPR-05 · Manju',   lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 14, y: 12 }, name: 'OPR-06 · Devi',    lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 16, y: 12 }, name: 'OPR-07 · Sita',    lineId: lineA },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 18, y: 12 }, name: 'OPR-08 · Roja',    lineId: lineA },
-    { deptId: dSew, catalogId: 'op_helper', position: { x: 20, y: 12 }, name: 'Iron — Mohan',    lineId: lineA },
-
-    // WIP racks behind Line A operators
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 4,  y: 14 }, name: 'WIP Rack 1', lineId: lineA },
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 10, y: 14 }, name: 'WIP Rack 2', lineId: lineA },
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 16, y: 14 }, name: 'WIP Rack 3', lineId: lineA },
-
-    // Conveyor along the bottom of Line A
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 3,  y: 17 }, name: 'Conveyor C1', lineId: lineA },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 7,  y: 17 }, name: 'Conveyor C2', lineId: lineA },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 11, y: 17 }, name: 'Conveyor C3', lineId: lineA },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 15, y: 17 }, name: 'Conveyor C4', lineId: lineA },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 19, y: 17 }, name: 'Conveyor C5', lineId: lineA },
-
-    // Supervisor floats — not pinned to a line on purpose
-    { deptId: dSew, catalogId: 'op_super', position: { x: 12, y: 19 }, name: 'Supervisor — Arjun' },
-
-    // ── SEWING — Line B · skeleton (in / out + one cell, awaiting build-out)
-    { deptId: dSew, catalogId: 'buf_in',  position: { x: 1,  y: 20 }, name: 'Line B · Bundle IN',  lineId: lineB },
-    { deptId: dSew, catalogId: 'buf_out', position: { x: 22, y: 20 }, name: 'Line B · Bundle OUT', lineId: lineB },
-
-    // ── FINISHING ──────────────────────────────────────────────────────────
-    { deptId: dFinish, catalogId: 'a_iron_inline', position: { x: 26, y: 9 },  name: 'Press IR-A' },
-    { deptId: dFinish, catalogId: 'a_iron_inline', position: { x: 29, y: 9 },  name: 'Press IR-B' },
-    { deptId: dFinish, catalogId: 'op_sewer',      position: { x: 26, y: 11 }, name: 'Presser — Bala' },
-    { deptId: dFinish, catalogId: 'op_sewer',      position: { x: 29, y: 11 }, name: 'Presser — Hari' },
-    { deptId: dFinish, catalogId: 'fx_pack',       position: { x: 26, y: 13 }, name: 'Pack Bench P-1' },
-    { deptId: dFinish, catalogId: 'fx_pack',       position: { x: 26, y: 15 }, name: 'Pack Bench P-2' },
-    { deptId: dFinish, catalogId: 'op_helper',     position: { x: 30, y: 13 }, name: 'Packer — Vinod' },
-    { deptId: dFinish, catalogId: 'op_helper',     position: { x: 30, y: 15 }, name: 'Packer — Asha' },
-    { deptId: dFinish, catalogId: 'buf_out',       position: { x: 26, y: 17 }, name: 'Finished Goods OUT' },
-    { deptId: dFinish, catalogId: 'mh_forklift',   position: { x: 32, y: 17 }, name: 'Forklift FL-02' },
-  ];
-
-  const workstations: Workstation[] = seeds.map((s) => {
-    const w = makeWorkstation({
-      deptId: s.deptId,
-      catalogId: s.catalogId,
-      position: s.position,
-      name: s.name,
-    });
-    if (s.op) {
-      w.operation = {
-        ...w.operation,
-        opId: s.op.opId,
-        garmentId: 'tshirt',
-        bundleSize: s.op.bundleSize,
-      };
-    }
-    if (s.lineId) w.lineId = s.lineId;
-    return w;
-  });
-
-  return {
-    schemaVersion: TWIN_SCHEMA_VERSION,
-    id: newTwinId(),
-    name,
-    parentTwinId: null,
-    isCanonical: true,
-    createdAt: now,
-    modifiedAt: now,
-    gridW: 36,
-    gridH: 26,
-    departments,
-    lines,
-    workstations,
-    connectors: [],
-    operators: [],
-    assignments: [],
-    notes: 'Demo factory — T-shirt line, PBS, single shift. Use as a starting point.',
-  };
-}
 
 /** Build a workstation with sane lens defaults. The catalogue id must
  *  resolve — call sites are expected to pass a known fixture id.
