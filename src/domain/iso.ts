@@ -62,7 +62,10 @@ export interface Projection {
   unproject: (sx: number, sy: number) => { x: number; y: number };
 }
 
-export function flatProj(x: number, y: number, _z: number = 0): IsoPoint {
+/** Top-down projection: z is ignored, so the param is simply omitted —
+ *  TypeScript lets a 2-arg function satisfy `Projection.project`'s
+ *  `(x, y, z?)` signature. */
+export function flatProj(x: number, y: number): IsoPoint {
   return { sx: x * FLAT_CELL, sy: y * FLAT_CELL };
 }
 
@@ -1880,119 +1883,3 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
   return base;
 }
 
-// ============================================================================
-// LAYOUT TYPES
-// ============================================================================
-
-export type IsoLinkKind = 'flow' | 'operator' | 'conv' | 'buffer' | 'power' | 'comm';
-
-export interface IsoElement {
-  id: string;
-  catalogId: string;
-  x: number;
-  y: number;
-  rot: number;
-  props: IsoFixtureProps;
-}
-
-export interface IsoLink {
-  id: string;
-  kind: IsoLinkKind;
-  from: string;
-  to: string;
-  label?: string;
-}
-
-export interface IsoLayout {
-  name: string;
-  gridW: number;
-  gridH: number;
-  elements: IsoElement[];
-  links: IsoLink[];
-}
-
-export type IsoLayoutMap = Record<string, IsoLayout>;
-
-// ============================================================================
-// PERSISTENCE
-// ============================================================================
-
-const STORAGE_KEY = 'sw_iso_layouts';
-
-export function loadIsoLayouts(): IsoLayoutMap {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') as IsoLayoutMap;
-  } catch {
-    return {};
-  }
-}
-
-export function saveIsoLayouts(map: IsoLayoutMap): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    /* ignore */
-  }
-}
-
-// ============================================================================
-// DEFAULT STARTER LAYOUTS so the canvas is never empty
-// ============================================================================
-
-export const ISO_LAYOUT_FACTORY: IsoLayout = {
-  name: 'Default Factory',
-  gridW: 36,
-  gridH: 28,
-  elements: [
-    { id: 'el-1', catalogId: 'wall_str', x: 1, y: 1, rot: 0, props: defaultPropsFor('wall_str') },
-    { id: 'el-2', catalogId: 'wall_str', x: 5, y: 1, rot: 0, props: defaultPropsFor('wall_str') },
-    { id: 'el-3', catalogId: 'door_bay', x: 9, y: 1, rot: 0, props: defaultPropsFor('door_bay') },
-    { id: 'el-4', catalogId: 'zone_cut', x: 2, y: 3, rot: 0, props: defaultPropsFor('zone_cut') },
-    { id: 'el-5', catalogId: 'cut_spread', x: 3, y: 5, rot: 0, props: defaultPropsFor('cut_spread') },
-    { id: 'el-6', catalogId: 'cut_cnc', x: 3, y: 8, rot: 0, props: defaultPropsFor('cut_cnc') },
-    { id: 'el-7', catalogId: 'zone_sew', x: 11, y: 3, rot: 0, props: defaultPropsFor('zone_sew') },
-    { id: 'el-8', catalogId: 'mach_ssm', x: 12, y: 5, rot: 0, props: defaultPropsFor('mach_ssm') },
-    { id: 'el-9', catalogId: 'mach_ssm', x: 14, y: 5, rot: 0, props: defaultPropsFor('mach_ssm') },
-    { id: 'el-10', catalogId: 'mach_over', x: 16, y: 5, rot: 0, props: defaultPropsFor('mach_over') },
-    { id: 'el-11', catalogId: 'op_sewer', x: 12, y: 8, rot: 0, props: defaultPropsFor('op_sewer') },
-    { id: 'el-12', catalogId: 'op_sewer', x: 14, y: 8, rot: 0, props: defaultPropsFor('op_sewer') },
-    { id: 'el-13', catalogId: 'op_sewer', x: 16, y: 8, rot: 0, props: defaultPropsFor('op_sewer') },
-    { id: 'el-14', catalogId: 'conv_str', x: 12, y: 10, rot: 0, props: defaultPropsFor('conv_str') },
-    { id: 'el-15', catalogId: 'zone_qc', x: 21, y: 3, rot: 0, props: defaultPropsFor('zone_qc') },
-    { id: 'el-16', catalogId: 'fx_qctab', x: 22, y: 5, rot: 0, props: defaultPropsFor('fx_qctab') },
-    { id: 'el-17', catalogId: 'op_qc', x: 22, y: 7, rot: 0, props: defaultPropsFor('op_qc') },
-    { id: 'el-18', catalogId: 'zone_store', x: 27, y: 3, rot: 0, props: defaultPropsFor('zone_store') },
-    { id: 'el-19', catalogId: 'st_rack', x: 28, y: 5, rot: 0, props: defaultPropsFor('st_rack') },
-    { id: 'el-20', catalogId: 'st_rack', x: 28, y: 7, rot: 0, props: defaultPropsFor('st_rack') },
-    { id: 'el-21', catalogId: 'mh_forklift', x: 28, y: 10, rot: 0, props: defaultPropsFor('mh_forklift') },
-  ],
-  links: [
-    { id: 'lk-1', kind: 'flow', from: 'el-5', to: 'el-6', label: 'panels' },
-    { id: 'lk-2', kind: 'flow', from: 'el-6', to: 'el-8', label: 'cut pieces' },
-    { id: 'lk-3', kind: 'flow', from: 'el-8', to: 'el-10', label: 'shoulder' },
-    { id: 'lk-4', kind: 'flow', from: 'el-10', to: 'el-16', label: 'finished' },
-    { id: 'lk-5', kind: 'operator', from: 'el-11', to: 'el-8', label: 'mans' },
-    { id: 'lk-6', kind: 'operator', from: 'el-12', to: 'el-9', label: 'mans' },
-    { id: 'lk-7', kind: 'operator', from: 'el-13', to: 'el-10', label: 'mans' },
-    { id: 'lk-8', kind: 'operator', from: 'el-17', to: 'el-16', label: 'mans' },
-  ],
-};
-
-export const ISO_LAYOUT_DEPT_BY_ID = (deptId: string): IsoLayout => ({
-  name: 'Dept — ' + deptId,
-  gridW: 22,
-  gridH: 14,
-  elements: [
-    { id: 'el-1', catalogId: 'mach_ssm', x: 3, y: 3, rot: 0, props: defaultPropsFor('mach_ssm') },
-    { id: 'el-2', catalogId: 'mach_ssm', x: 5, y: 3, rot: 0, props: defaultPropsFor('mach_ssm') },
-    { id: 'el-3', catalogId: 'op_sewer', x: 3, y: 5, rot: 0, props: defaultPropsFor('op_sewer') },
-    { id: 'el-4', catalogId: 'op_sewer', x: 5, y: 5, rot: 0, props: defaultPropsFor('op_sewer') },
-    { id: 'el-5', catalogId: 'buf_in', x: 1, y: 3, rot: 0, props: defaultPropsFor('buf_in') },
-    { id: 'el-6', catalogId: 'buf_out', x: 8, y: 3, rot: 0, props: defaultPropsFor('buf_out') },
-  ],
-  links: [
-    { id: 'lk-1', kind: 'flow', from: 'el-5', to: 'el-1' },
-    { id: 'lk-2', kind: 'flow', from: 'el-1', to: 'el-2' },
-    { id: 'lk-3', kind: 'flow', from: 'el-2', to: 'el-6' },
-  ],
-});
