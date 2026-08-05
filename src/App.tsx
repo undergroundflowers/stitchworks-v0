@@ -1,9 +1,7 @@
-import { useEffect, useReducer } from 'react';
+import { useEffect } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { SideBar } from './shell/SideBar';
 import { SW_COLORS, SW_FONTS } from './design/tokens';
-import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
-import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
 import { ErrorBoundary, useToast } from './components';
 import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
 import { useStoresHydrated } from './store/storage/useHydrated';
@@ -24,23 +22,13 @@ import { QueueIndexPage } from './pages/QueueIndex';
 import { QueueAnalyticsPage } from './pages/QueueAnalytics';
 
 /**
- * App shell: top bar + route outlet, vibe-driven theming, the floating
- * Tweaks panel (industrial/workshop/arcade · intensity · avatar style).
- * On launch the app opens straight to the home menu (route "/").
+ * App shell: sidebar + route outlet. On launch the app opens straight to the
+ * home menu (route "/").
  */
 export default function App() {
   const location = useLocation();
   const toast = useToast();
   const hydrated = useStoresHydrated();
-  const [t, setTweak] = useTweaks(SW_TWEAK_DEFAULTS);
-  // Vibe mutates SW_COLORS/SW_FONTS/SW_RADIUS in place. Force a re-render so
-  // every component re-reads them on next paint.
-  const [, force] = useReducer((x: number) => x + 1, 0);
-
-  useEffect(() => {
-    applyVibe(t.vibe as 'industrial' | 'workshop' | 'arcade');
-    force();
-  }, [t.vibe]);
 
   // Seed the canonical twin with the demo factory the first time the app
   // boots into an empty workspace. Existing edits are preserved — we only
@@ -86,18 +74,7 @@ export default function App() {
     return () => window.removeEventListener(QUOTA_EVENT, onQuota);
   }, [toast]);
 
-  useEffect(() => {
-    const speed = 0.4 + ((t.intensity as number) / 100) * 1.8;
-    (window as unknown as { SW_INTENSITY: number }).SW_INTENSITY =
-      (t.intensity as number) / 100;
-    (window as unknown as { SW_TEMPO: number }).SW_TEMPO = speed;
-    document.documentElement.style.setProperty('--sw-tempo', String(speed));
-    (window as unknown as { SW_AVATARS: string }).SW_AVATARS = t.avatars as string;
-    window.dispatchEvent(new Event('sw_tweaks'));
-  }, [t.intensity, t.avatars]);
-
   const showSideBar = location.pathname !== '/';
-  const intensityFilter = `saturate(${0.7 + ((t.intensity as number) / 100) * 0.9}) contrast(${0.95 + ((t.intensity as number) / 100) * 0.15})`;
 
   // Gate the first render until the IndexedDB-backed stores have rehydrated,
   // so the UI never flashes an empty factory while persistence loads.
@@ -130,8 +107,6 @@ export default function App() {
         display: 'flex',
         flexDirection: 'row',
         background: SW_COLORS.paperDeep,
-        filter: intensityFilter,
-        transition: 'filter 240ms',
       }}
     >
       {showSideBar && <SideBar />}
@@ -173,58 +148,6 @@ export default function App() {
         </Routes>
         </ErrorBoundary>
       </div>
-
-      {/* Arcade scanline overlay — only at high intensity */}
-      {t.vibe === 'arcade' && (t.intensity as number) > 70 && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            pointerEvents: 'none',
-            zIndex: 9998,
-            background:
-              'repeating-linear-gradient(0deg, rgba(255,45,135,0.04) 0 2px, transparent 2px 4px)',
-            mixBlendMode: 'multiply',
-          }}
-        />
-      )}
-
-      <TweaksPanel title="STITCHWORKS Tweaks">
-        <TweakSection label="Vibe">
-          <TweakRadio
-            label="Aesthetic"
-            value={t.vibe as string}
-            options={[
-              { value: 'industrial', label: 'Industrial' },
-              { value: 'workshop', label: 'Workshop' },
-              { value: 'arcade', label: 'Arcade' },
-            ]}
-            onChange={(v) => setTweak('vibe', v)}
-          />
-        </TweakSection>
-        <TweakSection label="Energy">
-          <TweakSlider
-            label="Floor intensity"
-            value={t.intensity as number}
-            min={0}
-            max={100}
-            unit="%"
-            onChange={(v) => setTweak('intensity', v)}
-          />
-        </TweakSection>
-        <TweakSection label="Operators">
-          <TweakRadio
-            label="Avatar style"
-            value={t.avatars as string}
-            options={[
-              { value: 'dots', label: 'Dots' },
-              { value: 'silhouette', label: 'Silhouette' },
-              { value: 'chibi', label: 'Chibi' },
-            ]}
-            onChange={(v) => setTweak('avatars', v)}
-          />
-        </TweakSection>
-      </TweaksPanel>
     </div>
   );
 }

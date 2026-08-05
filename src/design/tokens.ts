@@ -1,8 +1,13 @@
 /**
  * Design tokens — single source of truth for colours, fonts, radii, shadows.
- * Ported from STITCHWORKS.html. Keep these as plain objects so they're easy
- * to read in inline styles; they're typed via `as const` so TypeScript catches
- * typos at the call site.
+ * Plain objects so they read clearly in inline styles, typed `as const` so
+ * TypeScript catches typos at the call site.
+ *
+ * These are now genuinely constant. The old "vibe" system (industrial /
+ * workshop / arcade) mutated SW_COLORS, SW_FONTS and SW_RADIUS in place at
+ * runtime, which is why callers were forbidden from hoisting token reads into
+ * module-level consts. That system is gone, so the values below are the values
+ * the app renders with — no runtime rewriting, no stale-capture hazard.
  */
 import type { CSSProperties } from 'react';
 
@@ -46,7 +51,7 @@ export const SW_COLORS = {
   okDeep: '#1FA862',
   alarmDeep: '#D63B44',
 
-  // UI grays (alpha on ink) — recomputed from the vibe's ink by applyVibe
+  // UI grays — alpha on `ink`.
   line: '#E8EDF566',
   muted: '#E8EDF599',
   faint: '#E8EDF54F',
@@ -54,8 +59,8 @@ export const SW_COLORS = {
   lineSoft: '#E8EDF52E',
   /**
    * Modal/dialog backdrop. NOT ink-alpha: on a dark ground `ink` is the light
-   * end, so an ink-alpha scrim would be a white wash. Derived from the ground
-   * instead — see the carve-out in applyVibe.
+   * end, so an ink-alpha scrim would paint a white wash over the app instead
+   * of dimming it. Derived from the ground.
    */
   overlay: '#04070CB8',
 } as const;
@@ -72,7 +77,14 @@ export const SW_FONTS = {
   mono: '"IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace',
 } as const;
 
-export const SW_RADIUS = { sm: 4, md: 8, lg: 12, xl: 18 } as const;
+/**
+ * Corner radii. These are the values the app has actually been rendering:
+ * `applyVibe` overwrote SW_RADIUS on every boot with 6/10/14/22, so a later
+ * tightening of this object to 4/8/12/18 never took effect. Now that the vibe
+ * system is gone the declaration is the truth, so it carries the live numbers
+ * — deleting the mutation must not silently restyle every corner in the app.
+ */
+export const SW_RADIUS = { sm: 6, md: 10, lg: 14, xl: 22 } as const;
 
 /**
  * Shadows barely read on a near-black ground, so separation is carried by a 1px
@@ -152,10 +164,9 @@ export type SwColor = (typeof SW_COLORS)[keyof typeof SW_COLORS];
  * Type scale — the app's system text styles. Spread into inline styles
  * (`{...SW_TYPE.caption, color: …}`) and override per-site where needed.
  *
- * Defined as getters so every access reads the CURRENT SW_FONTS — the vibe
- * system swaps the display font at runtime. NEVER hoist `SW_TYPE.x` into a
- * module-level const; that freezes the pre-vibe font (the same stale-capture
- * bug Button's VARIANTS had).
+ * Still getters, but now only for laziness, not correctness: SW_FONTS no
+ * longer changes at runtime, so hoisting a `SW_TYPE.x` read is no longer a
+ * stale-capture hazard.
  */
 export const SW_TYPE = {
   /** Hero/stat numerals. */
