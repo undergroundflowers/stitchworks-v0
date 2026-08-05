@@ -1,17 +1,11 @@
-export { WorkstationSprite } from './workstations';
-export { WorkerSprite } from './workers';
-export type { WorkerSpriteStyle } from './workers';
-export {
-  ProductSprite,
-  PRODUCT_KINDS,
-  PRODUCT_LABELS,
-  PRODUCT_GROUPS,
-  type ProductKind,
-} from './products';
-export { IsoMiniPreview } from './iso-preview';
+/**
+ * Sprite assets. Narrowed to the sewing floor: the only sprite the app still
+ * renders is the workstation top-view, used by the Builder's 2D plan canvas
+ * (imported there as `MachineTopSprite`).
+ *
+ * The worker / product / iso-preview sprites and the asset-library gallery
+ * they served were removed with the sewing-lines pivot — a queueing tool has
+ * no use for fabric-roll or packed-goods artwork.
+ */
 
-/** Loose-typed product sprite used by the asset library so user-authored
- *  product kinds (string ids) can still be rendered by piggy-backing on a
- *  built-in sprite. The Asset Library converts custom kinds to their
- *  `baseSprite` before calling this. */
-export type ProductSpriteKindHint = string;
+export { WorkstationSprite } from './workstations';

@@ -12,9 +12,6 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { GARMENT_TEMPLATES, type GarmentTemplate, type Operation, type ProductionSystem } from '../domain';
 import { indexedDbStorage } from './storage/indexedDbStorage';
-import type { MachineCode, MachineSpec } from '../domain/machines';
-import type { WorkerArchetype } from '../domain/workers';
-import type { ProductKind } from '../assets';
 import type { ModelTimeUnit } from '../simulation/timeUnit';
 import type { Twin } from '../domain/twin';
 
@@ -27,62 +24,15 @@ import type { Twin } from '../domain/twin';
 const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
 
 /**
- * Schema version. v2 introduced the `time` slice (model-time-unit, start date,
- * execution mode, real-time scale) — see `TimeSettings`. Migration in the
- * persist config fills defaults for projects saved under v1.
+ * Schema version.
+ *   v2 — introduced the `time` slice (model-time-unit, start date, execution
+ *        mode, real-time scale); see `TimeSettings`.
+ *   v3 — sewing-lines pivot. Dropped the asset-library slices (machine /
+ *        worker / product edits, customs, hidden flags and uploaded images).
+ *        The migration deletes those keys outright so IndexedDB payloads
+ *        actually shrink rather than carrying dead maps forever.
  */
-export const PROJECT_SCHEMA_VERSION = 2 as const;
-
-/**
- * A user-authored workstation. Carries the same shape as a built-in
- * `MachineSpec` but with a free-form `code` string instead of the
- * `MachineCode` union, and a `baseSprite` field so the gallery and layout
- * canvas can render it using one of the built-in SVG illustrations until
- * we ship per-asset custom artwork.
- */
-export interface CustomMachineSpec extends Omit<MachineSpec, 'code'> {
-  code: string;
-  isCustom: true;
-  /** Which built-in sprite to render this asset with. */
-  baseSprite: MachineCode;
-}
-
-/**
- * A user-authored worker role. Same shape as the built-in
- * `WorkerArchetype` but with a free-form `role` string and a `baseSprite`
- * pointing at a built-in role for visual rendering.
- */
-export interface CustomWorkerArchetype extends Omit<WorkerArchetype, 'role'> {
-  role: string;
-  isCustom: true;
-  baseSprite: import('../domain/workers').WorkerRole;
-}
-
-/**
- * A user-authored product kind. Products in Stitchworks are mostly visual
- * sprites with a label — customs piggy-back on a built-in `ProductKind`
- * for their SVG body and override colour + label.
- */
-export interface CustomProductSpec {
-  kind: string;
-  isCustom: true;
-  baseSprite: ProductKind;
-  label: string;
-  category: 'raw' | 'wip' | 'finished' | 'packed';
-  /** Hex colour override used by the sprite tinter. */
-  color?: string;
-  description?: string;
-}
-
-/** Per-kind edit overlay for a built-in product. Sparse — only the fields
- *  the user changed are populated. */
-export interface ProductEdit {
-  label?: string;
-  color?: string;
-  description?: string;
-  /** Override the SVG sprite shape (the rendered "kind"). */
-  baseSprite?: ProductKind;
-}
+export const PROJECT_SCHEMA_VERSION = 3 as const;
 
 export interface ProjectMeta {
   name: string;
@@ -358,37 +308,6 @@ export interface ProjectState {
    */
   hiddenGarmentIds: Record<string, true>;
 
-  /** Per-machine-code edits that shadow the built-in `MACHINE_CATALOG`.
-   *  Editing a built-in (e.g. cost change) clones the spec into here. */
-  machineEdits: Record<string, MachineSpec>;
-  /** User-authored workstations keyed by their custom code. */
-  customMachines: Record<string, CustomMachineSpec>;
-  /** Built-in machines flagged hidden by the user. They still exist in code
-   *  but are filtered out of the asset library and any picker that calls
-   *  through `useMachines`. */
-  hiddenMachines: Record<string, true>;
-  /** User-uploaded image (data URL) per machine code. Overrides the SVG sprite
-   *  on asset library cards and any consumer that honours `customImage`. */
-  machineImages: Record<string, string>;
-
-  /** Per-role edits that shadow built-in `WORKER_ARCHETYPES`. */
-  workerEdits: Record<string, WorkerArchetype>;
-  /** User-authored worker archetypes keyed by their custom role id. */
-  customWorkers: Record<string, CustomWorkerArchetype>;
-  /** Built-in worker roles flagged hidden by the user. */
-  hiddenWorkers: Record<string, true>;
-  /** User-uploaded image (data URL) per worker role. */
-  workerImages: Record<string, string>;
-
-  /** User-authored product kinds keyed by their custom kind id. */
-  customProducts: Record<string, CustomProductSpec>;
-  /** Sparse edit overlay for built-in products (label/color/description). */
-  productEdits: Record<string, ProductEdit>;
-  /** Built-in product kinds flagged hidden by the user. */
-  hiddenProducts: Record<string, true>;
-  /** User-uploaded image (data URL) per product kind. */
-  productImages: Record<string, string>;
-
   /** Display preferences set from the Settings page. Render sites read
    *  these to format currency, dates, distances and SAM. */
   units: UnitsPrefs;
@@ -508,62 +427,6 @@ export interface ProjectState {
   /** Unhide a previously hidden built-in. */
   unhideGarment: (id: string) => void;
 
-  // ── Asset library: workstations ──────────────────────────────────────────
-  /** Patch a built-in machine spec (auto-clones into `machineEdits`). */
-  patchMachine: (
-    code: string,
-    builtIn: MachineSpec | undefined,
-    patch: Partial<Omit<MachineSpec, 'code'>>,
-  ) => void;
-  /** Drop the edit override for a built-in machine code. */
-  resetMachine: (code: string) => void;
-  /** Add a brand-new user-authored workstation. */
-  addCustomMachine: (spec: CustomMachineSpec) => void;
-  /** Patch one user-authored machine in-place. */
-  patchCustomMachine: (code: string, patch: Partial<Omit<CustomMachineSpec, 'code' | 'isCustom'>>) => void;
-  /** Remove a user-authored machine. */
-  removeCustomMachine: (code: string) => void;
-  /** Hide a built-in machine (filters it out of the asset library) or
-   *  remove a custom machine outright. Idempotent. */
-  deleteMachine: (code: string) => void;
-  /** Un-hide a previously deleted built-in machine. No-op for customs. */
-  restoreMachine: (code: string) => void;
-  /** Set or clear the uploaded image (data URL) for a machine code. Pass
-   *  `null` to clear. */
-  setMachineImage: (code: string, dataUrl: string | null) => void;
-
-  // ── Asset library: workers ───────────────────────────────────────────────
-  patchWorker: (
-    role: string,
-    builtIn: WorkerArchetype | undefined,
-    patch: Partial<Omit<WorkerArchetype, 'role'>>,
-  ) => void;
-  resetWorker: (role: string) => void;
-  addCustomWorker: (spec: CustomWorkerArchetype) => void;
-  patchCustomWorker: (role: string, patch: Partial<Omit<CustomWorkerArchetype, 'role' | 'isCustom'>>) => void;
-  removeCustomWorker: (role: string) => void;
-  /** Hide a built-in worker role or remove a custom one. */
-  deleteWorker: (role: string) => void;
-  /** Un-hide a previously deleted built-in worker role. */
-  restoreWorker: (role: string) => void;
-  /** Set or clear the uploaded image for a worker role. */
-  setWorkerImage: (role: string, dataUrl: string | null) => void;
-
-  // ── Asset library: products ──────────────────────────────────────────────
-  addCustomProduct: (spec: CustomProductSpec) => void;
-  patchCustomProduct: (kind: string, patch: Partial<Omit<CustomProductSpec, 'kind' | 'isCustom'>>) => void;
-  removeCustomProduct: (kind: string) => void;
-  /** Patch a built-in product (label/color/description/baseSprite). Clones
-   *  the patch into `productEdits` sparsely. */
-  patchProduct: (kind: string, patch: ProductEdit) => void;
-  /** Drop the edit overlay for a built-in product. */
-  resetProduct: (kind: string) => void;
-  /** Hide a built-in product or remove a custom one. */
-  deleteProduct: (kind: string) => void;
-  /** Un-hide a previously deleted built-in product. */
-  restoreProduct: (kind: string) => void;
-  /** Set or clear the uploaded image for a product kind. */
-  setProductImage: (kind: string, dataUrl: string | null) => void;
   /**
    * Sweep custom (non-built-in) garments whose names match the test-name
    * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
@@ -656,30 +519,6 @@ const defaults: Omit<
   | 'purgeTestGarments'
   | 'setUnit'
   | 'setTime'
-  | 'patchMachine'
-  | 'resetMachine'
-  | 'addCustomMachine'
-  | 'patchCustomMachine'
-  | 'removeCustomMachine'
-  | 'deleteMachine'
-  | 'restoreMachine'
-  | 'setMachineImage'
-  | 'patchWorker'
-  | 'resetWorker'
-  | 'addCustomWorker'
-  | 'patchCustomWorker'
-  | 'removeCustomWorker'
-  | 'deleteWorker'
-  | 'restoreWorker'
-  | 'setWorkerImage'
-  | 'addCustomProduct'
-  | 'patchCustomProduct'
-  | 'removeCustomProduct'
-  | 'patchProduct'
-  | 'resetProduct'
-  | 'deleteProduct'
-  | 'restoreProduct'
-  | 'setProductImage'
 > = (() => {
   const meta = defaultMeta();
   return {
@@ -696,18 +535,6 @@ const defaults: Omit<
     factory: defaultFactory(),
     garmentEdits: {},
     hiddenGarmentIds: {},
-    machineEdits: {},
-    customMachines: {},
-    hiddenMachines: {},
-    machineImages: {},
-    workerEdits: {},
-    customWorkers: {},
-    hiddenWorkers: {},
-    workerImages: {},
-    customProducts: {},
-    productEdits: {},
-    hiddenProducts: {},
-    productImages: {},
     units: defaultUnits,
     time: defaultTimeSettings(meta.createdAt),
   };
@@ -1029,222 +856,6 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, hiddenGarmentIds: next });
         }),
 
-      // ── Asset library: workstations ──────────────────────────────────────
-      patchMachine: (code, builtIn, patch) =>
-        set((s) => {
-          const current = s.machineEdits[code] ?? builtIn;
-          if (!current) return s;
-          const next = { ...current, ...patch } as MachineSpec;
-          return touch({ ...s, machineEdits: { ...s.machineEdits, [code]: next } });
-        }),
-
-      resetMachine: (code) =>
-        set((s) => {
-          if (!s.machineEdits[code]) return s;
-          const next = { ...s.machineEdits };
-          delete next[code];
-          return touch({ ...s, machineEdits: next });
-        }),
-
-      addCustomMachine: (spec) =>
-        set((s) => touch({ ...s, customMachines: { ...s.customMachines, [spec.code]: spec } })),
-
-      patchCustomMachine: (code, patch) =>
-        set((s) => {
-          const current = s.customMachines[code];
-          if (!current) return s;
-          return touch({
-            ...s,
-            customMachines: { ...s.customMachines, [code]: { ...current, ...patch } },
-          });
-        }),
-
-      removeCustomMachine: (code) =>
-        set((s) => {
-          if (!s.customMachines[code]) return s;
-          const next = { ...s.customMachines };
-          delete next[code];
-          return touch({ ...s, customMachines: next });
-        }),
-
-      deleteMachine: (code) =>
-        set((s) => {
-          if (s.customMachines[code]) {
-            const next = { ...s.customMachines };
-            delete next[code];
-            const nextImages = { ...s.machineImages };
-            delete nextImages[code];
-            return touch({ ...s, customMachines: next, machineImages: nextImages });
-          }
-          if (s.hiddenMachines[code]) return s;
-          return touch({
-            ...s,
-            hiddenMachines: { ...s.hiddenMachines, [code]: true },
-          });
-        }),
-
-      restoreMachine: (code) =>
-        set((s) => {
-          if (!s.hiddenMachines[code]) return s;
-          const next = { ...s.hiddenMachines };
-          delete next[code];
-          return touch({ ...s, hiddenMachines: next });
-        }),
-
-      setMachineImage: (code, dataUrl) =>
-        set((s) => {
-          const next = { ...s.machineImages };
-          if (dataUrl) next[code] = dataUrl;
-          else delete next[code];
-          return touch({ ...s, machineImages: next });
-        }),
-
-      // ── Asset library: workers ───────────────────────────────────────────
-      patchWorker: (role, builtIn, patch) =>
-        set((s) => {
-          const current = s.workerEdits[role] ?? builtIn;
-          if (!current) return s;
-          const next = { ...current, ...patch } as WorkerArchetype;
-          return touch({ ...s, workerEdits: { ...s.workerEdits, [role]: next } });
-        }),
-
-      resetWorker: (role) =>
-        set((s) => {
-          if (!s.workerEdits[role]) return s;
-          const next = { ...s.workerEdits };
-          delete next[role];
-          return touch({ ...s, workerEdits: next });
-        }),
-
-      addCustomWorker: (spec) =>
-        set((s) => touch({ ...s, customWorkers: { ...s.customWorkers, [spec.role]: spec } })),
-
-      patchCustomWorker: (role, patch) =>
-        set((s) => {
-          const current = s.customWorkers[role];
-          if (!current) return s;
-          return touch({
-            ...s,
-            customWorkers: { ...s.customWorkers, [role]: { ...current, ...patch } },
-          });
-        }),
-
-      removeCustomWorker: (role) =>
-        set((s) => {
-          if (!s.customWorkers[role]) return s;
-          const next = { ...s.customWorkers };
-          delete next[role];
-          return touch({ ...s, customWorkers: next });
-        }),
-
-      deleteWorker: (role) =>
-        set((s) => {
-          if (s.customWorkers[role]) {
-            const next = { ...s.customWorkers };
-            delete next[role];
-            const nextImages = { ...s.workerImages };
-            delete nextImages[role];
-            return touch({ ...s, customWorkers: next, workerImages: nextImages });
-          }
-          if (s.hiddenWorkers[role]) return s;
-          return touch({
-            ...s,
-            hiddenWorkers: { ...s.hiddenWorkers, [role]: true },
-          });
-        }),
-
-      restoreWorker: (role) =>
-        set((s) => {
-          if (!s.hiddenWorkers[role]) return s;
-          const next = { ...s.hiddenWorkers };
-          delete next[role];
-          return touch({ ...s, hiddenWorkers: next });
-        }),
-
-      setWorkerImage: (role, dataUrl) =>
-        set((s) => {
-          const next = { ...s.workerImages };
-          if (dataUrl) next[role] = dataUrl;
-          else delete next[role];
-          return touch({ ...s, workerImages: next });
-        }),
-
-      // ── Asset library: products ──────────────────────────────────────────
-      addCustomProduct: (spec) =>
-        set((s) => touch({ ...s, customProducts: { ...s.customProducts, [spec.kind]: spec } })),
-
-      patchCustomProduct: (kind, patch) =>
-        set((s) => {
-          const current = s.customProducts[kind];
-          if (!current) return s;
-          return touch({
-            ...s,
-            customProducts: { ...s.customProducts, [kind]: { ...current, ...patch } },
-          });
-        }),
-
-      removeCustomProduct: (kind) =>
-        set((s) => {
-          if (!s.customProducts[kind]) return s;
-          const next = { ...s.customProducts };
-          delete next[kind];
-          return touch({ ...s, customProducts: next });
-        }),
-
-      patchProduct: (kind, patch) =>
-        set((s) => {
-          const current = s.productEdits[kind] ?? {};
-          const merged: ProductEdit = { ...current, ...patch };
-          // Strip undefined keys so the overlay stays sparse.
-          (Object.keys(merged) as (keyof ProductEdit)[]).forEach((k) => {
-            if (merged[k] === undefined) delete merged[k];
-          });
-          return touch({
-            ...s,
-            productEdits: { ...s.productEdits, [kind]: merged },
-          });
-        }),
-
-      resetProduct: (kind) =>
-        set((s) => {
-          if (!s.productEdits[kind]) return s;
-          const next = { ...s.productEdits };
-          delete next[kind];
-          return touch({ ...s, productEdits: next });
-        }),
-
-      deleteProduct: (kind) =>
-        set((s) => {
-          if (s.customProducts[kind]) {
-            const next = { ...s.customProducts };
-            delete next[kind];
-            const nextImages = { ...s.productImages };
-            delete nextImages[kind];
-            return touch({ ...s, customProducts: next, productImages: nextImages });
-          }
-          if (s.hiddenProducts[kind]) return s;
-          return touch({
-            ...s,
-            hiddenProducts: { ...s.hiddenProducts, [kind]: true },
-          });
-        }),
-
-      restoreProduct: (kind) =>
-        set((s) => {
-          if (!s.hiddenProducts[kind]) return s;
-          const next = { ...s.hiddenProducts };
-          delete next[kind];
-          return touch({ ...s, hiddenProducts: next });
-        }),
-
-      setProductImage: (kind, dataUrl) =>
-        set((s) => {
-          const next = { ...s.productImages };
-          if (dataUrl) next[kind] = dataUrl;
-          else delete next[kind];
-          return touch({ ...s, productImages: next });
-        }),
-
       purgeTestGarments: () => {
         let removed = 0;
         set((s) => {
@@ -1315,19 +926,6 @@ export const useProject = create<ProjectState>()(
           hideGarment: get().hideGarment,
           unhideGarment: get().unhideGarment,
           purgeTestGarments: get().purgeTestGarments,
-          patchMachine: get().patchMachine,
-          resetMachine: get().resetMachine,
-          addCustomMachine: get().addCustomMachine,
-          patchCustomMachine: get().patchCustomMachine,
-          removeCustomMachine: get().removeCustomMachine,
-          patchWorker: get().patchWorker,
-          resetWorker: get().resetWorker,
-          addCustomWorker: get().addCustomWorker,
-          patchCustomWorker: get().patchCustomWorker,
-          removeCustomWorker: get().removeCustomWorker,
-          addCustomProduct: get().addCustomProduct,
-          patchCustomProduct: get().patchCustomProduct,
-          removeCustomProduct: get().removeCustomProduct,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,
@@ -1336,12 +934,15 @@ export const useProject = create<ProjectState>()(
       loadProject: (snapshot) => {
         if (!snapshot || typeof snapshot !== 'object') return { ok: false, reason: 'Not an object' };
         const s = snapshot as Partial<ProjectState>;
-        // Accept v1 and v2; v1 imports get default TimeSettings filled in.
+        // Accept every version we've ever written. v1 imports get default
+        // TimeSettings filled in; v1/v2 asset-library slices are simply not
+        // read (the spread below names every field explicitly), so an older
+        // file loads cleanly and is re-saved as v3 without them.
         const sv = s.schemaVersion as number | undefined;
-        if (sv !== 1 && sv !== 2) {
+        if (sv !== 1 && sv !== 2 && sv !== 3) {
           return {
             ok: false,
-            reason: `Schema version mismatch: file is v${sv}, app supports v1 or v2`,
+            reason: `Schema version mismatch: file is v${sv}, app supports v1–v3`,
           };
         }
         set((cur) => ({
@@ -1359,11 +960,6 @@ export const useProject = create<ProjectState>()(
           factory: s.factory ?? defaultFactory(),
           garmentEdits: s.garmentEdits ?? {},
           hiddenGarmentIds: s.hiddenGarmentIds ?? {},
-          machineEdits: s.machineEdits ?? {},
-          customMachines: s.customMachines ?? {},
-          workerEdits: s.workerEdits ?? {},
-          customWorkers: s.customWorkers ?? {},
-          customProducts: s.customProducts ?? {},
           units: { ...defaultUnits, ...s.units },
           // v1 files have no `time` field — fill from defaults anchored on
           // the project's creation date so calendar projections are sensible.
@@ -1391,11 +987,6 @@ export const useProject = create<ProjectState>()(
           factory: s.factory,
           garmentEdits: s.garmentEdits,
           hiddenGarmentIds: s.hiddenGarmentIds,
-          machineEdits: s.machineEdits,
-          customMachines: s.customMachines,
-          workerEdits: s.workerEdits,
-          customWorkers: s.customWorkers,
-          customProducts: s.customProducts,
           units: s.units,
           time: s.time,
         } as ProjectState;
@@ -1423,31 +1014,38 @@ export const useProject = create<ProjectState>()(
         factory: state.factory,
         garmentEdits: state.garmentEdits,
         hiddenGarmentIds: state.hiddenGarmentIds,
-        machineEdits: state.machineEdits,
-        customMachines: state.customMachines,
-        workerEdits: state.workerEdits,
-        customWorkers: state.customWorkers,
-        customProducts: state.customProducts,
         units: state.units,
         time: state.time,
       }),
-      // v1 → v2: add the `time` slice with sensible defaults anchored on
-      // the existing project's creation date.
       migrate: (persisted, fromVersion) => {
-        const p = (persisted as Partial<ProjectState>) ?? {};
+        let p = (persisted as Partial<ProjectState>) ?? {};
+        // v1 → v2: add the `time` slice with sensible defaults anchored on
+        // the existing project's creation date.
         if (fromVersion < 2) {
           const createdAt = p.meta?.createdAt ?? new Date().toISOString();
-          return {
-            ...p,
-            schemaVersion: PROJECT_SCHEMA_VERSION,
-            time: defaultTimeSettings(createdAt),
-          } as Partial<ProjectState>;
+          p = { ...p, time: defaultTimeSettings(createdAt) };
         }
-        return p as Partial<ProjectState>;
+        // v2 → v3: the sewing-lines pivot removed the asset library. Delete
+        // its twelve slices outright rather than letting them ride along as
+        // dead weight — `partialize` no longer writes them, but an existing
+        // IndexedDB payload keeps whatever it last stored (including any
+        // uploaded images, which were base64 data URLs and by far the
+        // largest thing in the record).
+        if (fromVersion < 3) {
+          const dead = [
+            'machineEdits', 'customMachines', 'hiddenMachines', 'machineImages',
+            'workerEdits', 'customWorkers', 'hiddenWorkers', 'workerImages',
+            'customProducts', 'productEdits', 'hiddenProducts', 'productImages',
+          ] as const;
+          const next = { ...p } as Record<string, unknown>;
+          for (const k of dead) delete next[k];
+          p = next as Partial<ProjectState>;
+        }
+        return { ...p, schemaVersion: PROJECT_SCHEMA_VERSION } as Partial<ProjectState>;
       },
-      // Existing localStorage payloads predate `units` and the asset-library
-      // edit maps. Without this, the first boot after upgrade hydrates them
-      // as undefined and any consumer that iterates over them crashes.
+      // Payloads written before a slice existed hydrate it as undefined, and
+      // any consumer that iterates over it then crashes. Backfill the maps
+      // and records that must never be undefined.
       merge: (persisted, current) => {
         const p = (persisted as Partial<ProjectState>) ?? {};
         return {
@@ -1455,11 +1053,6 @@ export const useProject = create<ProjectState>()(
           ...p,
           units: { ...defaultUnits, ...(p.units ?? {}) },
           hiddenGarmentIds: p.hiddenGarmentIds ?? {},
-          machineEdits: p.machineEdits ?? {},
-          customMachines: p.customMachines ?? {},
-          workerEdits: p.workerEdits ?? {},
-          customWorkers: p.customWorkers ?? {},
-          customProducts: p.customProducts ?? {},
           orders: p.orders ?? [],
           time: { ...defaultTimeSettings(p.meta?.createdAt ?? current.meta.createdAt), ...(p.time ?? {}) },
         };

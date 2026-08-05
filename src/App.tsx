@@ -161,9 +161,10 @@ export default function App() {
           {/* Dept interior screen is not yet ported.
               Bounce back to Builder so users don't land on a dead-end stub. */}
           <Route path="/dept/:deptId" element={<Navigate to="/builder" replace />} />
-          {/* Assets is now a tab inside Resources. The standalone /assets URL
-              redirects there so old links and deep-links still resolve. */}
-          <Route path="/assets" element={<Navigate to="/resources?tab=assets" replace />} />
+          {/* The asset library was removed with the sewing-lines pivot — a
+              queueing tool doesn't author fabric-roll artwork. Land stale
+              /assets links on Resources rather than dead-ending. */}
+          <Route path="/assets" element={<Navigate to="/resources" replace />} />
           {/* Live Floor, Reference Models and Pilot Study were removed; redirect
               any stale deep-links back to the home menu rather than dead-ending. */}
           <Route path="/floor" element={<Navigate to="/" replace />} />

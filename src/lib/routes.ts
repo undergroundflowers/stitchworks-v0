@@ -46,10 +46,6 @@ export const ROUTES: RouteDef[] = [
   // route still resolves for deep-links and internal navigations.
   { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'special' },
   { path: '/queues/analytics', id: 'queues-analytics', label: 'Queue Analytics', shortLabel: 'Analytics', icon: '∿', kind: 'special' },
-  // Assets is no longer a top-level nav item — it lives inside Resources as
-  // the "Assets" tab. The /assets path stays for deep-links; App.tsx redirects
-  // it to /resources?tab=assets.
-  { path: '/assets',    id: 'assets',    label: 'Assets',                                     icon: '◇', kind: 'special' },
   { path: '/orders',    id: 'orders',    label: 'Orders',                                     icon: '⎙', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings',                                   icon: '⚙', kind: 'main' },
 ];

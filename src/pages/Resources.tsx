@@ -24,7 +24,6 @@ import type {
 } from '../domain/twin';
 import { useProject, useGarments, type EffectiveGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { AssetsGalleryPage } from './AssetsGallery';
 import { parseGarmentXlsx, type ImportedGarment } from '../lib/import-garment-xlsx';
 import {
   parseFloorXlsx,
@@ -48,10 +47,10 @@ export function ResourcesPage() {
   // the operations editor for a specific garment.
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as
-    | 'operators' | 'machines' | 'skills' | 'operations' | 'assets'
+    | 'operators' | 'machines' | 'skills' | 'operations'
     | null) ?? 'operators';
   const initialGarment = searchParams.get('garment') ?? undefined;
-  const [tab, setTab] = useState<'operators' | 'machines' | 'skills' | 'operations' | 'assets'>(initialTab);
+  const [tab, setTab] = useState<'operators' | 'machines' | 'skills' | 'operations'>(initialTab);
   const project = useProject();
   const garments = useGarments();
   const skillMatrix = project.skillMatrix;
@@ -141,20 +140,10 @@ export function ResourcesPage() {
             { value:'machines',   label:`⚙ Machines · ${machineCount}` },
             { value:'operations', label:`🪡 Operations · ${garments.all.length} garments` },
             { value:'skills',     label:`🎯 Skill matrix` },
-            { value:'assets',     label:'◇ Assets' },
           ]}/>
         </div>
       </div>
 
-      {/* Assets tab embeds the full AssetsGalleryPage, which manages its own
-          scrolling and a right-side editor drawer; rendering it inside the
-          padded scroll wrapper below would double-scroll and clip the drawer.
-          Every other tab uses the standard padded scroll area. */}
-      {tab==='assets' ? (
-        <div style={{ flex:1, minHeight:0, overflow:'hidden' }}>
-          <AssetsGalleryPage/>
-        </div>
-      ) : (
       <div style={{ flex:1, overflow:'auto', padding:'24px' }}>
         {tab==='operators' && (
           <div style={{ display:'grid', gridTemplateColumns:'1fr 280px', gap: 18 }}>
@@ -324,7 +313,6 @@ export function ResourcesPage() {
         )}
 
       </div>
-      )}
     </div>
   );
 }
