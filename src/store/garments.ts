@@ -11,7 +11,6 @@
 
 import { useMemo } from 'react';
 import { GARMENT_TEMPLATES, ALL_GARMENT_TEMPLATES, type GarmentTemplate } from '../domain';
-import { REFERENCE_MODELS } from '../domain/reference-models';
 import { useProject } from './project';
 
 export interface EffectiveGarments {
@@ -62,16 +61,6 @@ function buildEffective(
       byId[id] = edits[id];
       if (!hidden[id]) all.push(edits[id]);
     }
-  }
-  // Reference-paper garment templates are resolvable but NOT added to `all`
-  // so the picker stays focused on the 5 canonical bulletins. A workstation
-  // painted via "Load Ref Factory" carries a `ref-…` garmentId, and the sim
-  // model-builder relies on `byId` to look it up — without this the Builder's
-  // "Simulate this factory" button drops every workstation as unresolved and
-  // the run silently falls back to a generic line.
-  for (const m of REFERENCE_MODELS) {
-    const g = m.garmentTemplate;
-    if (!byId[g.id]) byId[g.id] = edits[g.id] ?? g;
   }
   return {
     all,

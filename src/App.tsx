@@ -15,12 +15,9 @@ import { MenuPage } from './pages/Menu';
 import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
 import { ResourcesPage } from './pages/Resources';
-import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { BuilderPage } from './pages/Builder';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
-import { QueueIndexPage } from './pages/QueueIndex';
-import { QueueAnalyticsPage } from './pages/QueueAnalytics';
 import { InsightsPage } from './pages/Insights';
 
 /**
@@ -115,8 +112,8 @@ export default function App() {
     >
       {/*
         The simulation clock. Headless, and deliberately mounted here — above
-        <Routes> — so playback survives navigation: start a run on the Sim
-        screen, walk to Reports, and the same engine is still ticking at the
+        the router — so playback survives navigation: start a run on the Sim
+        screen, walk to Insights, and the same engine is still ticking at the
         same frame. While each page owned its own loop, leaving the page killed
         the run.
       */}
@@ -126,35 +123,33 @@ export default function App() {
         <ErrorBoundary key={location.pathname} scope="page">
         <Routes>
           <Route path="/" element={<MenuPage />} />
-          <Route path="/orders" element={<OrdersPage />} />
+
+          {/* The four surfaces. */}
+          <Route path="/line" element={<BuilderPage />} />
           <Route path="/sim" element={<LiveSimPage />} />
-          {/* /balance is the merged Reports hub (performance + line balance +
-              validation tabs). The legacy /kpi path redirects here so existing
-              links still resolve. */}
-          <Route path="/balance" element={<ReportsPage />} />
-          {/* Scenarios is now a tab inside Reports. The standalone /scenarios
-              URL redirects there so old links and deep-links still resolve. */}
-          <Route path="/scenarios" element={<Navigate to="/balance?tab=scenarios" replace />} />
-          <Route path="/resources" element={<ResourcesPage />} />
-          <Route path="/kpi" element={<Navigate to="/balance" replace />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          {/* Factory Builder — single authoring surface for the digital twin.
-              Both /iso (legacy nav id) and /builder route here. */}
-          <Route path="/builder" element={<BuilderPage />} />
-          <Route path="/iso" element={<BuilderPage />} />
           <Route path="/insights" element={<InsightsPage />} />
-          <Route path="/queues" element={<QueueIndexPage />} />
-          <Route path="/queues/analytics" element={<QueueAnalyticsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+
+          {/* Secondary surfaces — reachable from BUILD and from deep links, but
+              not top-level destinations. Orders authors demand; Resources holds
+              the operation bulletin and the skill matrix. */}
+          <Route path="/orders" element={<OrdersPage />} />
+          <Route path="/resources" element={<ResourcesPage />} />
+          {/* One station's queueing detail, drilled into from INSIGHTS. */}
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
-          {/* Dept interior screen is not yet ported.
-              Bounce back to Builder so users don't land on a dead-end stub. */}
-          <Route path="/dept/:deptId" element={<Navigate to="/builder" replace />} />
-          {/* The asset library was removed with the sewing-lines pivot — a
-              queueing tool doesn't author fabric-roll artwork. Land stale
-              /assets links on Resources rather than dead-ending. */}
+
+          {/* Everything that used to be its own tab now lives inside one of the
+              four. Redirects are declared here and nowhere else, so the route
+              registry stays a list of real surfaces. */}
+          <Route path="/builder" element={<Navigate to="/line" replace />} />
+          <Route path="/iso" element={<Navigate to="/line" replace />} />
+          <Route path="/dept/:deptId" element={<Navigate to="/line" replace />} />
           <Route path="/assets" element={<Navigate to="/resources" replace />} />
-          {/* Live Floor, Reference Models and Pilot Study were removed; redirect
-              any stale deep-links back to the home menu rather than dead-ending. */}
+          <Route path="/balance" element={<Navigate to="/insights" replace />} />
+          <Route path="/kpi" element={<Navigate to="/insights" replace />} />
+          <Route path="/queues" element={<Navigate to="/insights" replace />} />
+          <Route path="/queues/analytics" element={<Navigate to="/insights" replace />} />
+          <Route path="/scenarios" element={<Navigate to="/insights" replace />} />
           <Route path="/floor" element={<Navigate to="/" replace />} />
           <Route path="/reference" element={<Navigate to="/" replace />} />
           <Route path="/pilot" element={<Navigate to="/" replace />} />

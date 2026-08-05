@@ -86,10 +86,10 @@ export function MenuPage() {
     if (isFactoryNameTaken(name)) return; // belt + braces; button is disabled
     archiveAndStartFresh(name);
     setNewFactoryOpen(false);
-    navigate('/builder');
+    navigate('/line');
   };
   const handleLoadSaved = (id: string) => {
-    if (loadFactory(id)) navigate('/builder');
+    if (loadFactory(id)) navigate('/line');
   };
   const handleOpenScenariosForActive = () => {
     navigate('/scenarios');
@@ -193,7 +193,7 @@ export function MenuPage() {
               tag="ACTIVE"
               tagColor={SW_COLORS.ok}
               scenarioCount={activeScenarioCount}
-              onClick={() => navigate('/builder')}
+              onClick={() => navigate('/line')}
               onOpenScenarios={handleOpenScenariosForActive}
             />
 

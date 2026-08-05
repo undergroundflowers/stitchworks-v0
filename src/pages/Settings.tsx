@@ -197,7 +197,6 @@ export function SettingsPage() {
               }}
             >
               {[
-                { label: 'Departments', value: composition.departments },
                 { label: 'Sewing lines', value: composition.lines },
                 { label: 'Workstations', value: composition.workstations },
                 { label: 'Connectors', value: composition.connectors },
@@ -440,7 +439,7 @@ export function SettingsPage() {
 
         <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="secondary" onClick={() => navigate('/')}>Back to menu</Button>
-          <Button variant="primary" onClick={() => navigate('/builder')}>Save</Button>
+          <Button variant="primary" onClick={() => navigate('/line')}>Save</Button>
         </div>
       </div>
     </div>

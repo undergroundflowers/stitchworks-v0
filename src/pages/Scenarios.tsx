@@ -70,7 +70,7 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
     // Land in Builder so the user can verify the swapped floor visually
     // before deciding whether to re-run Sim against it. Previously this
     // jumped to /sim which hid the layout change.
-    navigate('/builder');
+    navigate('/line');
   }
 
   async function handleDelete(s: Scenario) {

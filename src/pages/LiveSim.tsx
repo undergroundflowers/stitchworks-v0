@@ -69,10 +69,8 @@ import {
   buildSimReadyOrderTwin,
   mapToLineSystem,
 } from '../lib/build-draft-twin';
-import { REFERENCE_MODELS, REFERENCE_MODELS_BY_SLUG, type ReferenceModel } from '../domain/reference-models';
 import { buildGarmentTwin } from '../domain/reference-twin';
 import type { GarmentTemplate } from '../domain/garments';
-import { useReferenceContext } from '../store/reference';
 
 /**
  * Resolve a station's canonical visual asset from `MACHINE_CATALOG`. This
@@ -105,12 +103,6 @@ function stationAsset(machineCode: string | undefined): {
 
 /** Total operator pool count for a (paper, variant/scenario) selection.
  *  Falls back to the baseline op count if the chosen variant key is unknown. */
-function variantOperatorCount(model: ReferenceModel, key: string): number {
-  if (key === 'baseline') return model.baseline.operators;
-  if (key === 'proposed') return model.proposed?.operators ?? model.baseline.operators;
-  const scenario = model.scenarios?.find((s) => s.id === key);
-  return scenario?.operators ?? model.baseline.operators;
-}
 
 type SimView = 'iso' | 'top' | 'heat' | 'logic' | 'pml';
 
@@ -193,22 +185,6 @@ export function LiveSimPage() {
   // ISO/TOP/HEAT/LOGIC views also reflect the loaded reference. Sim doesn't
   // author refs anymore (the picker bar moved out), so we only need the
   // read + clear selectors here.
-  const refCtx = useReferenceContext();
-  const clearRefContext = useReferenceContext((s) => s.clear);
-
-  // When a reference is loaded, its garment bulletin + operator pool drive the
-  // legacy SimEngine too — otherwise the ISO/TOP/HEAT/LOGIC views would still
-  // show the project's default garment, which is jarring after LOAD & SIMULATE.
-  const refOverride = useMemo(() => {
-    if (!refCtx.slug || !refCtx.variantKey) return null;
-    const model = REFERENCE_MODELS_BY_SLUG[refCtx.slug];
-    if (!model) return null;
-    return {
-      garment: model.garmentTemplate,
-      operators: variantOperatorCount(model, refCtx.variantKey),
-    };
-  }, [refCtx.slug, refCtx.variantKey]);
-
   // Source select — twin path (default when no reference is loaded) draws the
   // simulation from the user's Factory Builder twin; `source=reference` keeps
   // the legacy garment-template flow for paper comparisons; `source=order:<id>`
@@ -230,7 +206,7 @@ export function LiveSimPage() {
   const isOrderSource = !!activeOrder;
   const useTwinSource =
     sourceParam === 'twin' ||
-    (!refOverride && sourceParam !== 'reference' && !isOrderSource && !sourceParam?.startsWith('order'));
+    (sourceParam !== 'reference' && !isOrderSource && !sourceParam?.startsWith('order'));
 
   // Engine scope — three levels: a single sewing line, an entire department
   // (every wired line whose deptId matches), or the whole factory (every
@@ -304,7 +280,6 @@ export function LiveSimPage() {
   const orderGarment = activeOrder ? garments.byId[activeOrder.garmentTemplateId] ?? null : null;
 
   const garment = twinBuild?.meta.garment
-    ?? refOverride?.garment
     ?? orderGarment
     ?? (garments.byId[garmentId] ?? garments.all[0]);
   // Effective operator count for display + reference path. Twin path always
@@ -314,17 +289,14 @@ export function LiveSimPage() {
     ? operators
     : activeOrder
       ? operators
-      : (refOverride?.operators ?? operators);
+      : operators;
 
   // Production-system bundle size — picked up from the Orders wizard. PBS
   // batches 30, modular/UPS/make-through run piece-by-piece (size 1), etc.
-  // Reference-paper runs keep the paper's own bundle size, so they're
-  // unaffected by this hook-up.
   const productionSystemId = activeOrder?.productionSystem ?? project.selectedProductionSystem;
   const productionSystemDef = PRODUCTION_SYSTEMS[productionSystemId];
-  const systemBundleSize = refOverride
-    ? undefined
-    : (bundleOverride ?? twinBuild?.meta.seedBundleSize ?? productionSystemDef.typicalBatchSize);
+  const systemBundleSize =
+    bundleOverride ?? twinBuild?.meta.seedBundleSize ?? productionSystemDef.typicalBatchSize;
 
   const opEfficiency = useMemo(
     () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
@@ -335,7 +307,6 @@ export function LiveSimPage() {
   // so each source (twin / reference / order / garment) materialises into
   // one.
   //   • Twin / reference path → the active twin (loadCanonical writes the
-  //     reference twin in-place, so by the time refOverride is set the
   //     active twin is already the reference graph).
   //   • Order / garment fallback → synthesise a single-line twin from the
   //     chosen bulletin so PML has a Source → ops → Sink to run.
@@ -349,7 +320,7 @@ export function LiveSimPage() {
   // is available either.
   const simSourceTwin = useMemo(() => {
     let base: Twin;
-    if (useTwinSource || refOverride) {
+    if (useTwinSource) {
       base = selectedLineId
         ? scopedTwinForLine(activeTwin, selectedLineId)
         : activeTwin;
@@ -371,7 +342,7 @@ export function LiveSimPage() {
     }
     if (!bundleOverride || bundleOverride <= 0) return base;
     return overrideBundleSize(base, bundleOverride);
-  }, [useTwinSource, refOverride, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride, productionSystemId]);
+  }, [useTwinSource, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride, productionSystemId]);
   // Captured for future PML wiring — neither flows into the engine today
   // because the twin already encodes both. `systemBundleSize` is read by the
   // HUD's BUNDLE chip; opEfficiency is mirrored back into the skill matrix
@@ -532,26 +503,6 @@ export function LiveSimPage() {
       });
   }, [useTwinSource, activeTwin, effectiveTwinMeta]);
 
-  // The reference-line picker (paper + variant + LOAD & SIMULATE) used to
-  // live here as a sim-toolbar strip. It now lives on the Reference Models
-  // page so authoring + loading happens in one place and the Sim chrome
-  // stays focused on observing. We still resolve `refLoadedLabel` from
-  // `refCtx` because the Sim source picker surfaces it as a source option.
-  const refLoadedLabel =
-    refCtx.slug && refCtx.variantKey
-      ? (() => {
-          const m = REFERENCE_MODELS.find((x) => x.slug === refCtx.slug);
-          if (!m) return null;
-          const vlabel =
-            refCtx.variantKey === 'baseline'
-              ? 'Baseline'
-              : refCtx.variantKey === 'proposed'
-                ? 'Proposed'
-                : refCtx.variantKey;
-          return `${m.authorYear} · ${vlabel}`;
-        })()
-      : null;
-
   // Time displays — see `lib/timeUnit`. Three labelled kinds replace the
   // old `hr = 8 + floor(t/60)` fake clock that conflated model time with
   // calendar HH:MM. DAY N is derived from model time (not wall clock) so
@@ -692,18 +643,10 @@ export function LiveSimPage() {
           orders={project.orders}
           garmentsById={garments.byId}
           twinBuild={inMultiLineScope && effectiveTwinMeta ? { meta: effectiveTwinMeta } : twinBuild}
-          refOverride={refOverride}
-          refLoadedLabel={refLoadedLabel}
           totalWorkstations={activeTwin.workstations.length}
           factoryName={project.meta.name}
-          onPickTwin={() => {
-            if (refOverride) clearRefContext();
-            setSearchParams({ source: 'twin' });
-          }}
-          onPickOrder={(id) => {
-            if (refOverride) clearRefContext();
-            setSearchParams({ source: `order:${id}` });
-          }}
+          onPickTwin={() => setSearchParams({ source: 'twin' })}
+          onPickOrder={(id) => setSearchParams({ source: `order:${id}` })}
           onNewOrder={() => navigate('/orders')}
         />
 
@@ -1065,7 +1008,6 @@ export function LiveSimPage() {
             <SimPmlView
               garment={garment}
               operators={effectiveOperators}
-              hasReference={!!(refCtx.slug && refCtx.variantKey)}
               useActiveTwin={inMultiLineScope}
             />
           </PanZoomViewport>
@@ -1206,12 +1148,8 @@ export function LiveSimPage() {
                       // would be silently ignored.
                       const twinGarment = twinBuild?.meta.garment ?? null;
                       const twinPins =
-                        !!twinGarment && !refOverride && !!twinBuild?.meta.garmentPinned;
-                      const displayedValue = refOverride
-                        ? '__ref__'
-                        : twinPins
-                          ? twinGarment.id
-                          : garmentId;
+                        !!twinGarment && !!twinBuild?.meta.garmentPinned;
+                      const displayedValue = twinPins ? twinGarment.id : garmentId;
                       const visibleHasTwinGarment =
                         twinPins && garments.all.some((g) => g.id === twinGarment.id);
                       const twinExtraOption =
@@ -1224,14 +1162,6 @@ export function LiveSimPage() {
                             }]
                           : [];
                       const options = [
-                        ...(refOverride
-                          ? [{
-                              value: '__ref__',
-                              label: refOverride.garment.name.replace(/\s*\(.*\)/, ''),
-                              tag: 'REF',
-                              disabled: true,
-                            }]
-                          : []),
                         ...twinExtraOption,
                         ...garments.all.map((g) => ({
                           value: g.id,
@@ -1242,20 +1172,17 @@ export function LiveSimPage() {
                       ];
                       const title = twinPins
                         ? `Garment is pinned by the workstations in Factory Builder (${twinGarment.name}). Change the workstation operation in Builder to switch garments.`
-                        : refOverride
-                          ? 'Garment is pinned by the loaded reference scenario. Clear the reference (× on the source chip) to pick freely.'
-                          : undefined;
+                        : undefined;
                       return (
                         <HudSelect
                           value={displayedValue}
                           minWidth={180}
                           mono
-                          disabled={twinPins || !!refOverride}
+                          disabled={twinPins}
                           title={title}
                           options={options}
                           onChange={(id) => {
                             if (id === '__ref__') return;
-                            if (refOverride) clearRefContext();
                             setGarmentId(id);
                           }}
                         />
@@ -1291,8 +1218,7 @@ export function LiveSimPage() {
                     </div>
                   )}
 
-                  {!refOverride && (
-                    <div
+                  <div
                       title={`${productionSystemDef.label}\n${productionSystemDef.description}`}
                       style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, cursor: 'help' }}
                     >
@@ -1302,8 +1228,7 @@ export function LiveSimPage() {
                       <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
                         {productionSystemDef.short}
                       </span>
-                    </div>
-                  )}
+                  </div>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 12, order: 1 }}>
@@ -1635,8 +1560,6 @@ interface SimSourceMenuProps {
   orders: OrderDraft[];
   garmentsById: Record<string, GarmentTemplate>;
   twinBuild: { meta: BuildFromTwinMeta } | null;
-  refOverride: { garment: GarmentTemplate; operators: number } | null;
-  refLoadedLabel: string | null;
   totalWorkstations: number;
   factoryName: string;
   onPickTwin: () => void;
@@ -1656,8 +1579,6 @@ function SimSourceMenu({
   orders,
   garmentsById,
   twinBuild,
-  refOverride,
-  refLoadedLabel,
   totalWorkstations,
   factoryName,
   onPickTwin,
@@ -1665,8 +1586,8 @@ function SimSourceMenu({
   onNewOrder,
 }: SimSourceMenuProps) {
   const factoryLabel = (factoryName?.trim() || 'Untitled factory').toUpperCase();
-  const isOrderSource = !!activeOrderId && !refOverride;
-  const isRefSource = !!refOverride;
+  const isOrderSource = !!activeOrderId;
+  const isRefSource = false;
   const isTwinSource = !isOrderSource && !isRefSource;
   const simCount = twinBuild?.meta.simulatedWsIds.length ?? 0;
   const infraCount = twinBuild?.meta.infrastructure.length ?? 0;
@@ -1704,9 +1625,9 @@ function SimSourceMenu({
   const refOption: HudSelectOption<SourceValue>[] = isRefSource
     ? [{
         value: 'ref',
-        label: refLoadedLabel ?? '—',
+        label: '—',
         tag: 'REF',
-        meta: `${refOverride!.operators} OPR`,
+        meta: '',
         disabled: true,
       }]
     : [];
@@ -4466,7 +4387,6 @@ interface SimPmlViewProps {
   /** True when a reference paper has been loaded — currently unused beyond
    *  the playback-reset effect since we always build from the garment prop
    *  (which already folds in the reference's garmentTemplate when loaded). */
-  hasReference: boolean;
   /** Dept/factory scope — run PML against the actual twin (every block,
    *  every line, every garment) instead of a single-garment synth. PML is
    *  twin-native: `runPmlOnTwin` already simulates every block in the twin
@@ -4481,7 +4401,7 @@ interface SimPmlViewProps {
 // immediately reshapes the block grid. In dept/factory scope we drive PML
 // from the active twin directly — that's the only honest way to surface
 // every wired line's Petri-net behaviour in one pass.
-function SimPmlView({ garment, operators, hasReference, useActiveTwin = false }: SimPmlViewProps) {
+function SimPmlView({ garment, operators, useActiveTwin = false }: SimPmlViewProps) {
   const activeTwin = useTwin(selectActiveTwin);
   const garmentTwin = useMemo(
     () => (useActiveTwin ? null : buildGarmentTwin(garment, operators)),
@@ -4505,7 +4425,7 @@ function SimPmlView({ garment, operators, hasReference, useActiveTwin = false }:
     setReport(null);
     setFrame(0);
     setPlaying(false);
-  }, [hasReference, garment.id, operators, useActiveTwin]);
+  }, [garment.id, operators, useActiveTwin]);
 
   const samples = report?.raw.samples ?? [];
   const lastFrame = Math.max(0, samples.length - 1);
@@ -4824,23 +4744,15 @@ function SewingLinesStrip({
 }) {
   const factoryActive = scope.kind === 'factory';
   const selectedLineId = scope.kind === 'line' ? scope.id : null;
-  // Departments that contain at least one wired line. When the twin only has
-  // a single such dept, "DEPT · X" would be a duplicate of "FACTORY" — hide
-  // it to keep the strip clean. The picker grows naturally when the user
-  // adds a second sewing dept (or a finishing line in another dept).
-  const deptsWithLines = useMemo(() => {
-    const seen = new Map<string, { id: string; name: string; count: number }>();
-    for (const lb of lineBuilds) {
-      if (!lb.ok) continue;
-      const dept = (activeTwin.departments ?? []).find((d) => d.id === lb.line.deptId);
-      if (!dept) continue;
-      const entry = seen.get(dept.id);
-      if (entry) entry.count += 1;
-      else seen.set(dept.id, { id: dept.id, name: dept.name, count: 1 });
-    }
-    return [...seen.values()];
-  }, [lineBuilds, activeTwin.departments]);
-  const showDeptPills = deptsWithLines.length > 1;
+  // Departments are no longer a user-facing concept: a sewing floor has LINES,
+  // and every twin now carries exactly one auto-managed "Sewing Floor" that the
+  // Builder creates and grows on its own. The scope strip is therefore
+  // ALL LINES + one pill per line, with no department tier in between.
+  //
+  // `Department` stays in the schema and `deptId` stays on every entity, so
+  // saved .swproj files and IndexedDB twins keep loading untouched — this is a
+  // UI removal, not a migration.
+
   return (
     <div
       style={{
@@ -4884,43 +4796,12 @@ function SewingLinesStrip({
         }}
       >
         <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em' }}>
-          {showDeptPills ? 'FACTORY' : 'ALL LINES'}
+          ALL LINES
         </span>
         <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
           {activeTwin.workstations.length} workstations · whole twin
         </span>
       </button>
-
-      {showDeptPills && deptsWithLines.map((d) => {
-        const active = scope.kind === 'dept' && scope.id === d.id;
-        return (
-          <button
-            key={d.id}
-            onClick={() => onPickScope({ kind: 'dept', id: d.id })}
-            title={`Scope the engine to every wired line in ${d.name} (${d.count} line${d.count === 1 ? '' : 's'})`}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-              minWidth: 140,
-              padding: '6px 12px',
-              borderRadius: 6,
-              border: `1px solid ${active ? SW_COLORS.fabric : '#ffffff20'}`,
-              background: active ? `${SW_COLORS.fabric}26` : 'transparent',
-              color: '#fff',
-              cursor: 'pointer',
-              textAlign: 'left',
-            }}
-          >
-            <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em' }}>
-              DEPT · {d.name.toUpperCase()}
-            </span>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
-              {d.count} line{d.count === 1 ? '' : 's'}
-            </span>
-          </button>
-        );
-      })}
 
       {lineBuilds.map(({ line, build, ok, reason }) => {
         const active = selectedLineId === line.id;

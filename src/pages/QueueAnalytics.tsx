@@ -35,7 +35,13 @@ import { DRILL_PATHS } from '../lib/routes';
 
 type ViewMode = 'strip' | 'compare';
 
-export function QueueAnalyticsPage() {
+export interface QueueAnalyticsPageProps {
+  /** Rendered inside another surface (INSIGHTS): drop the page chrome and the
+   *  outer scroll container so the host owns both. */
+  embedded?: boolean;
+}
+
+export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps = {}) {
   const navigate = useNavigate();
   // Real lines through the shared session; see useLineSim for what this
   // replaced.
@@ -61,15 +67,20 @@ export function QueueAnalyticsPage() {
 
   return (
     <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16,
-        padding: '20px 24px',
-        height: '100%',
-        overflow: 'auto',
-      }}
+      style={
+        embedded
+          ? { display: 'flex', flexDirection: 'column', gap: 16 }
+          : {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+              padding: '20px 24px',
+              height: '100%',
+              overflow: 'auto',
+            }
+      }
     >
+      {!embedded && (
       <header style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between' }}>
         <div>
           <div
@@ -125,7 +136,7 @@ export function QueueAnalyticsPage() {
           </button>
           <button
             type="button"
-            onClick={() => navigate('/queues')}
+            onClick={() => navigate('/insights')}
             style={navBtn()}
             title="Back to the snapshot table"
           >
@@ -133,6 +144,7 @@ export function QueueAnalyticsPage() {
           </button>
         </div>
       </header>
+      )}
 
       <Card>
         <div

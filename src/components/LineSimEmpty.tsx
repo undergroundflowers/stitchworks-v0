@@ -26,7 +26,7 @@ export function LineSimEmpty({
   what = 'Queueing analysis',
 }: LineSimEmptyProps) {
   const navigate = useNavigate();
-  const toBuilder = { label: 'Open Factory Builder', onClick: () => navigate('/builder') };
+  const toBuilder = { label: 'Open Factory Builder', onClick: () => navigate('/line') };
 
   if (reason === 'stations-not-in-a-line') {
     return (

@@ -105,7 +105,7 @@ export function WorkstationDetailPage() {
           No station <code>{wsId}</code> on the line currently in scope. It may belong to a
           different line — switch scope on the Queue Analysis page and try again.
         </p>
-        <button type="button" onClick={() => navigate('/queues')} style={navBtn()}>
+        <button type="button" onClick={() => navigate('/insights')} style={navBtn()}>
           Back to queue analysis
         </button>
       </Card>

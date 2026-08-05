@@ -28,7 +28,13 @@ import { useLineSim } from '../simulation/useLineSim';
 import { useSimSession } from '../simulation/useSimSession';
 import { DRILL_PATHS } from '../lib/routes';
 
-export function QueueIndexPage() {
+export interface QueueIndexPageProps {
+  /** Rendered inside another surface (INSIGHTS): drop the page chrome and the
+   *  outer scroll container so the host owns both. */
+  embedded?: boolean;
+}
+
+export function QueueIndexPage({ embedded = false }: QueueIndexPageProps = {}) {
   const navigate = useNavigate();
   // The user's OWN lines, through the shared session — not a throwaway line
   // synthesised from the selected garment template, which is what this page
@@ -54,15 +60,20 @@ export function QueueIndexPage() {
 
   return (
     <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16,
-        padding: '20px 24px',
-        height: '100%',
-        overflow: 'auto',
-      }}
+      style={
+        embedded
+          ? { display: 'flex', flexDirection: 'column', gap: 16 }
+          : {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+              padding: '20px 24px',
+              height: '100%',
+              overflow: 'auto',
+            }
+      }
     >
+      {!embedded && (
       <header style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between' }}>
         <div>
           <div
@@ -126,6 +137,7 @@ export function QueueIndexPage() {
           </button>
         </div>
       </header>
+      )}
 
       <Card>
         <SectionHeader title="Workstations" />

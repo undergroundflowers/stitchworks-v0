@@ -44,9 +44,6 @@ import { lineSystemBadge, shareDebtForLine } from '../domain/twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { buildGarmentTwin } from '../domain/reference-twin';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
-import { REFERENCE_MODELS } from '../domain/reference-models';
-import { compareToPaper, type ReferenceVariant } from '../domain/reference-twin';
-import { useReferenceContext } from '../store/reference';
 
 const SHIFT_MIN = 480;
 /** Base RNG seed for the page-level replications. Replication i uses
@@ -440,73 +437,6 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const pmlBottleneck = pmlBlocks.find((b) => b.bottleneck) ?? null;
   const pmlAnyObserved = pmlBlocks.length > 0;
 
-  // ── Reference paper validation ──────────────────────────────────────────
-  // When the user has loaded a published case study into the active twin,
-  // surface a paper-vs-observed comparison so they can judge how closely
-  // Stitchworks reproduces the literature.
-  const refCtx = useReferenceContext();
-  const clearRefContext = useReferenceContext((s) => s.clear);
-  const refModel = useMemo(
-    () =>
-      refCtx.slug
-        ? REFERENCE_MODELS.find((m) => m.slug === refCtx.slug) ?? null
-        : null,
-    [refCtx.slug],
-  );
-
-  // Auto-run PML once when a reference is loaded but no observed values
-  // exist yet — saves the user a click. Stays a no-op for non-reference twins.
-  useEffect(() => {
-    if (!refModel || !refCtx.variantKey) return;
-    if (pmlAnyObserved) return;
-    runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
-    setPmlRunBump((n) => n + 1);
-  }, [refModel, refCtx.variantKey, pmlAnyObserved, pmlTwin, setKpiObserved]);
-
-  const refValidation = useMemo(() => {
-    if (!refModel || !refCtx.variantKey) return null;
-    if (!pmlAnyObserved) return null;
-    const throughputPerHr = pmlSinkThroughput;
-    const pool = pmlTwin.workstations.find(
-      (w) => w.block?.kind === 'ResourcePool',
-    );
-    const operatorsConfigured =
-      pool && pool.block && pool.block.kind === 'ResourcePool'
-        ? (pool.block.params?.capacity ?? 0)
-        : 0;
-    const totalSmvMin = refModel.garmentTemplate.totalSmv;
-    const isScenario = !!refModel.scenarios?.some(
-      (s) => s.id === refCtx.variantKey,
-    );
-    const variant: ReferenceVariant =
-      refCtx.variantKey === 'proposed' ? 'proposed' : 'baseline';
-    const rows = compareToPaper({
-      model: refModel,
-      variant,
-      scenarioId: isScenario ? refCtx.variantKey : undefined,
-      observed: {
-        throughputPerHr,
-        operatorsConfigured,
-        totalSmvMin,
-        shiftMin: SHIFT_MIN,
-      },
-    });
-    const variantLabel =
-      refCtx.variantKey === 'baseline'
-        ? 'Baseline'
-        : refCtx.variantKey === 'proposed'
-          ? 'Proposed'
-          : refModel.scenarios?.find((s) => s.id === refCtx.variantKey)?.name ??
-            refCtx.variantKey;
-    return {
-      rows,
-      throughputPerHr,
-      operatorsConfigured,
-      variantLabel,
-      variantKey: refCtx.variantKey,
-    };
-  }, [refModel, refCtx.variantKey, pmlSinkThroughput, pmlAnyObserved, pmlTwin]);
-
   // Period scaling for cumulative KPIs. Throughput is a rate and percentages
   // (efficiency, utilization) are intensive — they don't scale. Only OUTPUT
   // and other tally-style numbers multiply by working-day count. Sri Lankan
@@ -526,7 +456,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader
         kicker="Reports"
-        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
+        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Engine report' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
         sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -631,115 +561,12 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           Line Balance gives the Yamazumi authoring surface; Validation
           shows how the model lines up with the reference paper / wired
           block graph. */}
-      <ReportTabBar value={tab} onChange={setTab} hasReference={!!(refModel && refCtx.variantKey)} hasPml={pmlAnyObserved} />
+      <ReportTabBar value={tab} onChange={setTab} hasPml={pmlAnyObserved} />
 
       {/* ── Reference paper validation ───────────────────────────────────
           Visible only when the user has loaded a published case study into
           the active twin from the Simulation tab. Side-by-side paper KPIs
           vs. Stitchworks observed, with delta% and pass/fail badges. */}
-      {tab === 'validation' && refModel && refCtx.variantKey && (
-        <HideableBox style={{ marginBottom: 20 }}>
-        <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
-            <div>
-              <div style={{ ...SW_TYPE.kicker, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '2px', marginBottom: 4 }}>
-                📚 PAPER VALIDATION
-              </div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>
-                {refModel.title}
-              </div>
-              <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4 }}>
-                {refModel.authorYear} · variant <strong style={{ color: SW_COLORS.ink }}>{refValidation?.variantLabel ?? refCtx.variantKey}</strong>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Button
-                variant="primary"
-                size="sm"
-                icon="▶"
-                onClick={() => {
-                  runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
-                  setPmlRunBump((n) => n + 1);
-                }}
-              >
-                Re-run PML
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => { clearRefContext(); }}>
-                Clear
-              </Button>
-            </div>
-          </div>
-
-          {!refValidation ? (
-            <div style={{ padding: '14px 16px', border: `1px dashed ${SW_COLORS.line}`, borderRadius: 6, fontSize: 12, color: SW_COLORS.muted }}>
-              Running first PML pass on the loaded reference twin…
-            </div>
-          ) : (
-            <>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
-                <Stat label="OPERATORS (CFG)" value={refValidation.operatorsConfigured} unit="" color={SW_COLORS.steel} />
-                <Stat label="OBSERVED" value={Math.round(refValidation.throughputPerHr * 8).toLocaleString()} unit="pcs/day" color={SW_COLORS.brand} />
-                <Stat
-                  label="PAPER THROUGHPUT"
-                  value={
-                    refValidation.rows.find((r) => r.label === 'Throughput')
-                      ? Number(refValidation.rows.find((r) => r.label === 'Throughput')!.paper).toLocaleString()
-                      : '—'
-                  }
-                  unit="pcs/day"
-                  color={SW_COLORS.fabric}
-                />
-                <Stat
-                  label="WITHIN ±10%"
-                  value={refValidation.rows.every((r) => r.withinTolerance) ? '✓ PASS' : '⚠ DRIFT'}
-                  unit=""
-                  color={refValidation.rows.every((r) => r.withinTolerance) ? SW_COLORS.ok : SW_COLORS.alarm}
-                />
-              </div>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.mono, fontSize: 11 }}>
-                  <thead>
-                    <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>KPI</th>
-                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>PAPER</th>
-                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>STITCHWORKS</th>
-                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>Δ%</th>
-                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>±10%</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {refValidation.rows.map((r) => {
-                      const tone = r.withinTolerance ? SW_COLORS.ok : SW_COLORS.alarm;
-                      return (
-                        <tr key={r.label} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                          <td style={{ padding: '6px 8px', color: SW_COLORS.ink, fontWeight: 700 }}>{r.label}</td>
-                          <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.ink }}>
-                            {Number(r.paper).toLocaleString()} {r.unit}
-                          </td>
-                          <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: SW_COLORS.ink }}>
-                            {typeof r.observed === 'number' ? r.observed.toLocaleString() : r.observed} {r.unit}
-                          </td>
-                          <td style={{ padding: '6px 8px', textAlign: 'right', color: tone, fontWeight: 800 }}>
-                            {r.deltaPct >= 0 ? '+' : ''}{r.deltaPct.toFixed(1)}%
-                          </td>
-                          <td style={{ padding: '6px 8px', textAlign: 'right', color: tone, fontWeight: 800 }}>
-                            {r.withinTolerance ? '✓' : '✗'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div style={{ marginTop: 8, fontSize: 11, color: SW_COLORS.muted, fontStyle: 'italic', lineHeight: 1.55 }}>
-                Stitchworks uses mean SMV per op (deterministic); the paper fitted per-op stochastic distributions. Small drift is expected.
-              </div>
-            </>
-          )}
-        </Card>
-        </HideableBox>
-      )}
-
       {/* ── PML simulation report ───────────────────────────────────────
           Reads observed KPIs that the Builder's PML runner wrote onto
           each workstation. Lets the user re-run from this page so they
@@ -768,7 +595,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             >
               Run PML
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => navigate('/builder')}>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/line')}>
               Open Builder
             </Button>
           </div>
@@ -1675,7 +1502,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop: 18 }}>
         <Button variant="secondary" icon="↓">Export PDF</Button>
         {!embedded && (
-          <Button variant="dark" icon="✓" onClick={() => navigate('/builder')}>Back to builder</Button>
+          <Button variant="dark" icon="✓" onClick={() => navigate('/line')}>Back to builder</Button>
         )}
       </div>
 
@@ -1736,14 +1563,13 @@ type ReportTab = 'performance' | 'balance' | 'validation' | 'scenarios';
 interface ReportTabBarProps {
   value: ReportTab;
   onChange: (next: ReportTab) => void;
-  hasReference: boolean;
   hasPml: boolean;
 }
 
 /** Underline-style segmented tabs sitting under the Reports SectionHeader.
  *  The badge on the Validation tab tells the user when there's something
  *  to look at — a loaded reference paper, or observed PML KPIs. */
-function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarProps) {
+function ReportTabBar({ value, onChange, hasPml }: ReportTabBarProps) {
   const tabs: { id: ReportTab; label: string; hint: string; badge?: string }[] = [
     { id: 'performance', label: 'Performance', hint: 'KPIs · output · efficiency' },
     { id: 'balance',     label: 'Line Balance', hint: 'Yamazumi · takt · efficiency' },
@@ -1751,7 +1577,7 @@ function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarPro
       id: 'validation',
       label: 'Validation',
       hint: 'Reference paper · PML run',
-      badge: hasReference ? 'PAPER' : hasPml ? 'PML' : undefined,
+      badge: hasPml ? 'PML' : undefined,
     },
     { id: 'scenarios',   label: 'Scenarios',   hint: 'Saved runs · compare KPIs' },
   ];

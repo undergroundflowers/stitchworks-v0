@@ -187,7 +187,7 @@ export function OrdersPage() {
       <div style={{ maxWidth: 760, margin:'0 auto' }}>
         <SectionHeader kicker="Plan a job" title="New production order"
           sub="Enter order specs and pick a garment template. Set up the line in the Builder, or run it straight in the simulator."
-          right={<Button variant="dark" onClick={()=>navigate('/builder')}>Cancel</Button>}
+          right={<Button variant="dark" onClick={()=>navigate('/line')}>Cancel</Button>}
         />
 
           <Card padding={20}>
@@ -310,7 +310,7 @@ export function OrdersPage() {
             </div>
           </Card>
         <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
-          <Button variant="secondary" onClick={()=>navigate('/builder')}>Save draft</Button>
+          <Button variant="secondary" onClick={()=>navigate('/line')}>Save draft</Button>
           <Button variant="dark" size="lg" icon="✎" onClick={commitToBuilder} disabled={orderInvalid}>
             Build in Builder
           </Button>

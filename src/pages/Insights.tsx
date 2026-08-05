@@ -37,6 +37,9 @@ import {
   type QueueFinding,
 } from '../domain/queue-advisor';
 import { UtilizationBarChart, QueueParetoChart } from '../components/charts';
+import { QueueIndexPage } from './QueueIndex';
+import { QueueAnalyticsPage } from './QueueAnalytics';
+import { ReportsPage } from './Reports';
 
 const SEVERITY_STYLE: Record<FindingSeverity, { color: string; label: string }> = {
   critical: { color: SW_COLORS.alarm, label: 'CRITICAL' },
@@ -45,7 +48,13 @@ const SEVERITY_STYLE: Record<FindingSeverity, { color: string; label: string }> 
   info: { color: SW_COLORS.muted, label: 'NOTE' },
 };
 
-type InsightTab = 'diagnosis' | 'stations';
+/**
+ * INSIGHTS is the single analysis surface, so the pages that used to be their
+ * own top-level tabs are mounted here as panels. They already read the shared
+ * session and the shared scope, so nothing about them changes — they simply
+ * stop being separate destinations the user has to know about.
+ */
+type InsightTab = 'diagnosis' | 'stations' | 'queues' | 'timeline' | 'reports';
 
 export function InsightsPage() {
   const navigate = useNavigate();
@@ -127,6 +136,9 @@ export function InsightsPage() {
           options={[
             { value: 'diagnosis', label: `⚑ Diagnosis · ${findings.length}` },
             { value: 'stations', label: '▤ Where the load sits' },
+            { value: 'queues', label: 'Σ Per-station queues' },
+            { value: 'timeline', label: '∿ Over time' },
+            { value: 'reports', label: '⌬ Reports' },
           ]}
         />
       </div>
@@ -139,6 +151,10 @@ export function InsightsPage() {
           ))}
         </div>
       )}
+
+      {tab === 'queues' && <QueueIndexPage embedded />}
+      {tab === 'timeline' && <QueueAnalyticsPage embedded />}
+      {tab === 'reports' && <ReportsPage embedded />}
 
       {tab === 'stations' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
