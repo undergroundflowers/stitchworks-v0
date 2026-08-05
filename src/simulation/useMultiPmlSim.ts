@@ -1,172 +1,120 @@
 /**
- * Parallel-engine sibling of `usePmlSim` — runs one PML sim per sewing line
- * and drives them from a single wall-clock tick so play/pause/speed/reset
- * operate on all of them together. Returned `states[]` is parallel to the
- * `lineTwins[]` argument.
+ * Parallel-engine sibling of `usePmlSim` — one PML run per sewing line, all
+ * driven from the shared clock so play / pause / speed / reset act on them
+ * together. `states[]` is parallel to the `lineTwins[]` argument.
  *
- * Justification: PML can in principle simulate the whole multi-line twin in
- * one call, but per-line isolation matters for two reasons —
- *   1. Per-line garment / bundle-size differs (Line 1 = knit T-shirt, Line 2
- *      = woven shirt); modelling them as independent flows is honest.
- *   2. The legacy `useMultiSim` exposed this exact shape; keeping it lets
- *      LiveSim swap hooks without restructuring its multi-line branch.
+ * Per-line isolation is deliberate rather than a limitation: Line 1 might be
+ * running a knit T-shirt at bundle 30 while Line 2 runs a woven shirt at bundle
+ * 10, and modelling those as one homogeneous flow would be dishonest about
+ * both. Each line is its own tandem network with its own operator pool.
  *
- * Tick semantics match `usePmlSim` 1:1 so the same transport bar drives
- * either hook without drift.
+ * Like `usePmlSim`, this is now a thin adapter over `useSimSession`; see that
+ * module for why the run is keyed structurally and the clock is global.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { Twin } from '../domain/twin';
 import type { GarmentTemplate } from '../domain';
-import { runPmlSim, type PmlSimResult } from './pml-engine';
-import {
-  buildPmlTwinView,
-  emptyPmlSimState,
-  pmlSampleToSimState,
-  type PmlTwinView,
-} from './pml-to-sim-state';
+import type { PmlSimResult } from './pml-engine';
+import { emptyPmlSimState, type PmlTwinView } from './pml-to-sim-state';
 import type { SimState, StationView } from './sim-state';
 import type { BuildFromTwinMeta } from './model-from-twin';
-import { useProject } from '../store';
+import { useProject } from '../store/project';
+import { useSimScope } from '../store/simScope';
+import { simSpecKey, type SimSpec } from './sim-spec';
+import { useSimSession } from './useSimSession';
 import type { UseSimResult } from './usePmlSim';
 
-const TICK_MS = 200;
 const DEFAULT_DURATION_MIN = 480;
 const DEFAULT_SEED = 42;
 
 export interface PmlLineInput {
-  /** Stable line id — used as the React key and the namespace for opId merging. */
+  /** Stable line id — the React key and the namespace for opId merging. */
   lineId: string;
   /** Twin scoped to this line's workstations + connectors. */
   twin: Twin;
-  /** Optional bulletin to carry opCode / opName / serviceDist hints into the adapter. */
+  /** Optional bulletin carrying opCode / opName / serviceDist hints. */
   garment?: GarmentTemplate;
 }
 
 export interface UseMultiPmlSimResult extends Omit<UseSimResult, 'state'> {
   /** Parallel to the `lineTwins` argument. Same shape as `usePmlSim().state`. */
   states: SimState[];
-  /** Per-line PmlTwinView, parallel to `lineTwins`. Useful for the merged meta. */
+  /** Per-line PmlTwinView, parallel to `lineTwins`. */
   views: PmlTwinView[];
-  /** Per-line PML run report, parallel to `lineTwins`. Null until the run completes. */
+  /** Per-line PML run report, parallel to `lineTwins`. Null until it runs. */
   results: (PmlSimResult | null)[];
 }
 
 export function useMultiPmlSim(
   lineTwins: PmlLineInput[],
-  opts?: { durationMin?: number; seed?: number; recordFlow?: boolean },
+  opts?: { durationMin?: number; seed?: number; recordFlow?: boolean; warmupMin?: number },
 ): UseMultiPmlSimResult {
+  const scopeWarmup = useSimScope((s) => s.warmupMin);
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
   const recordFlow = opts?.recordFlow ?? false;
+  const warmupMin = opts?.warmupMin ?? scopeWarmup;
 
-  const views = useMemo(
-    () => lineTwins.map((lt) => buildPmlTwinView(lt.twin, lt.garment)),
-    [lineTwins],
-  );
-  const results = useMemo<(PmlSimResult | null)[]>(
-    () =>
-      lineTwins.map((lt) => {
-        if (lt.twin.workstations.length === 0) return null;
-        try {
-          return runPmlSim({ twin: lt.twin, durationMin, seed, samplePeriodMin: 1, recordFlow });
-        } catch (err) {
-          if (typeof console !== 'undefined') {
-            console.error(`[useMultiPmlSim] runPmlSim failed for line ${lt.lineId}:`, err);
-          }
-          return null;
-        }
-      }),
-    [lineTwins, durationMin, seed, recordFlow],
+  const spec = useMemo<SimSpec>(
+    () => ({
+      lines: lineTwins.map((lt) => ({
+        lineId: lt.lineId,
+        lineName: lt.lineId,
+        twin: lt.twin,
+        garment: lt.garment,
+      })),
+      durationMin,
+      seed,
+      samplePeriodMin: 1,
+      recordFlow,
+      warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
+    }),
+    [lineTwins, durationMin, seed, recordFlow, warmupMin],
   );
 
-  // Total frame count — the shorter line settles at its last sample while
-  // longer lines continue advancing. Playback ends when every line has hit
-  // its end (so the user can compare ramp-up across lines honestly).
-  const maxFrames = useMemo(
-    () =>
-      results.reduce(
-        (m, r) => Math.max(m, (r?.samples.length ?? 1) - 1),
-        0,
-      ),
-    [results],
-  );
+  // Empty input ⇒ no key, no session, no interference. LiveSim renders this
+  // hook unconditionally even in single-line scope, so it has to stay inert.
+  const key = useMemo(() => (spec.lines.length > 0 ? simSpecKey(spec) : ''), [spec]);
 
-  const [frame, setFrame] = useState(0);
-  const frameRef = useRef(frame);
-  frameRef.current = frame;
-
-  // Reset frame when any line's samples change.
+  const ensure = useSimSession((s) => s.ensure);
   useEffect(() => {
-    setFrame(0);
-  }, [results]);
+    if (key) ensure(spec);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
-  const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const session = useSimSession((s) => (key ? s.sessions[key] : undefined));
+  const playing = useSimSession((s) => s.playing);
+  const speed = useSimSession((s) => s.speed);
+  const setPlaying = useSimSession((s) => s.setPlaying);
+  const setSpeed = useSimSession((s) => s.setSpeed);
+  const reset = useSimSession((s) => s.reset);
+  const step = useSimSession((s) => s.step);
   const mode = useProject((s) => s.time.executionMode);
-  const realTimeScale = useProject((s) => s.time.realTimeScale);
-
-  useEffect(() => {
-    if (!playing || maxFrames === 0) return;
-    if (mode === 'virtual') {
-      const id = requestAnimationFrame(() => {
-        setFrame(maxFrames);
-        setPlaying(false);
-      });
-      return () => cancelAnimationFrame(id);
-    }
-    // Fractional accumulator preserves precision at low speeds. See
-    // usePmlSim for the longer note on why a per-tick integer round was
-    // 5× too fast at the default speed.
-    let last = performance.now();
-    let accum = frameRef.current;
-    const id = window.setInterval(() => {
-      const now = performance.now();
-      const dt = (now - last) / 1000;
-      last = now;
-      const effectiveScale = Math.max(0, realTimeScale) * Math.max(0, speed);
-      accum += dt * effectiveScale;
-      const nextFrame = Math.min(maxFrames, Math.floor(accum));
-      if (nextFrame === frameRef.current) return;
-      setFrame(nextFrame);
-      if (nextFrame >= maxFrames) {
-        setPlaying(false);
-      }
-    }, TICK_MS);
-    return () => window.clearInterval(id);
-  }, [playing, speed, mode, realTimeScale, maxFrames]);
-
-  const reset = useCallback(() => setFrame(0), []);
-  const step = useCallback(
-    (units: number) => setFrame((f) => Math.max(0, Math.min(maxFrames, f + Math.round(units)))),
-    [maxFrames],
-  );
 
   const states = useMemo<SimState[]>(
+    () => lineTwins.map((_, i) => session?.runs[i]?.state ?? emptyPmlSimState()),
+    [session, lineTwins],
+  );
+  const views = useMemo<PmlTwinView[]>(
     () =>
-      views.map((view, i) => {
-        const result = results[i];
-        if (!result || result.samples.length === 0) return emptyPmlSimState();
-        const idx = Math.min(frame, result.samples.length - 1);
-        const sample = result.samples[idx];
-        const prior = result.samples.slice(0, idx + 1);
-        return pmlSampleToSimState(view, sample, result, prior);
-      }),
-    [views, results, frame],
+      lineTwins.map(
+        (_, i) =>
+          session?.runs[i]?.view ?? {
+            stations: [],
+            infrastructure: [],
+            meta: null as unknown as BuildFromTwinMeta,
+            nonFifoStations: [],
+          },
+      ),
+    [session, lineTwins],
+  );
+  const results = useMemo<(PmlSimResult | null)[]>(
+    () => lineTwins.map((_, i) => session?.runs[i]?.result ?? null),
+    [session, lineTwins],
   );
 
-  return {
-    states,
-    views,
-    results,
-    playing,
-    speed,
-    mode,
-    setPlaying,
-    setSpeed,
-    reset,
-    step,
-  };
+  return { states, views, results, playing, speed, mode, setPlaying, setSpeed, reset, step };
 }
 
 // ============================================================================

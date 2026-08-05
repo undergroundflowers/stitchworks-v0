@@ -1,42 +1,34 @@
 /**
  * React hook — PML simulation playback over time.
  *
- * Drop-in replacement for the legacy `useSim` hook. Returns the same
- * `UseSimResult` shape so existing LiveSim / Scenarios views
- * consume it unchanged.
+ * Now a thin adapter over `useSimSession`. The return shape is unchanged, so
+ * existing consumers read it exactly as before, but the run itself lives in the
+ * shared session: the engine is invoked once per STRUCTURALLY distinct spec
+ * rather than once per twin object, the playback clock is global, and two
+ * surfaces that describe the same run share it instead of each simulating the
+ * factory separately.
  *
- * Mechanics:
- *   1. `runPmlSim(twin, …)` is invoked once when the active twin (or any
- *      explicit opts) change. The full sample timeseries is cached.
- *   2. A wall-clock loop advances a frame pointer into `samples[]` at the
- *      rate dictated by the project's `time.executionMode` and
- *      `time.realTimeScale`, multiplied by the user-controlled `speed`.
- *   3. `state` is the legacy-shape SimState reconstructed from
- *      `samples[frame]` by the adapter — so the UI sees the exact contract
- *      it expects (`state.stations[]`, `state.history[]`, etc.).
- *
- * The PML engine is record-then-replay: the entire run executes the
- * moment a new twin arrives, then playback scrubs through the recorded
- * timeseries. That mirrors the AnyLogic 'virtual time' contract — the
- * sim itself runs as fast as compute allows; the playback overlays a
- * cinematic rate on top.
+ * What this fixes for callers, without their changing a line:
+ *   • The engine no longer re-runs because an unrelated store write minted a
+ *     new twin object. It ran three times on a cold boot before the user
+ *     touched anything.
+ *   • The frame pointer no longer resets to zero on those re-runs. That reset,
+ *     racing a mount-only warm-up effect, is why changing the garment or the
+ *     operator count left every metric reading zero permanently.
+ *   • `state.history` / `state.stationHistory` are grown incrementally instead
+ *     of rebuilt from the whole sample array on every rendered frame.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { Twin } from '../domain/twin';
 import type { GarmentTemplate } from '../domain';
-import { runPmlSim, type PmlSimResult } from './pml-engine';
-import {
-  buildPmlTwinView,
-  emptyPmlSimState,
-  pmlSampleToSimState,
-  type PmlTwinView,
-} from './pml-to-sim-state';
+import type { PmlSimResult } from './pml-engine';
+import { emptyPmlSimState, type PmlTwinView } from './pml-to-sim-state';
 import type { SimState } from './sim-state';
-import { useProject } from '../store';
-
-/** Tick interval for the wall-clock loop (real-time mode only). */
-const TICK_MS = 200;
+import { useProject } from '../store/project';
+import { useSimScope } from '../store/simScope';
+import { simSpecKey, type SimSpec } from './sim-spec';
+import { useSimSession } from './useSimSession';
 
 /** Default sim duration when the caller doesn't override it. One 8h shift. */
 const DEFAULT_DURATION_MIN = 480;
@@ -54,9 +46,11 @@ export interface UsePmlSimOpts {
    *  the bulletin. Falls back to `ws.operation.*` fields otherwise. */
   garment?: GarmentTemplate;
   /** Record the entity-flow stream (`result.flow`) so the view can play back
-   *  REAL per-bundle movement instead of synthetic motion. Off by default —
-   *  only LiveSim needs it; analytics/report consumers skip the memory cost. */
+   *  REAL per-bundle movement instead of synthetic motion. */
   recordFlow?: boolean;
+  /** Steady-state warm-up in sim MINUTES. Defaults to the shared scope's
+   *  setting; pass 0 to measure across the whole run. */
+  warmupMin?: number;
 }
 
 export interface UseSimResult {
@@ -74,136 +68,110 @@ export interface UseSimResult {
  *  run report so summary KPI cards can read aggregate numbers (lead time,
  *  throughput, warnings) without re-running the sim. */
 export interface UsePmlSimResult extends UseSimResult {
-  /** The completed PML run, or null until the first run finishes. Memoized
-   *  by twin identity + opts — does not change frame-to-frame. */
+  /** The completed PML run, or null until the first run finishes. */
   result: PmlSimResult | null;
-  /** Static metadata about the twin's stations (opCode, machineCode, etc.).
-   *  Useful for views that want to label cells before the run completes. */
+  /** Static metadata about the twin's stations (opCode, machineCode, etc.). */
   view: PmlTwinView;
 }
 
-export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
+/**
+ * Wrap a single already-scoped twin as a one-line spec.
+ *
+ * Callers hand this hook a twin that is either the whole factory or one line's
+ * slice of it; either way the engine treats it as a single tandem network, so
+ * a one-entry spec is the faithful description. The synthetic line id is
+ * derived from the twin so two structurally identical twins land on the same
+ * session.
+ */
+function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec {
+  const scopeWarmup = useSimScope((s) => s.warmupMin);
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
   const garment = opts?.garment;
   const recordFlow = opts?.recordFlow ?? false;
+  const warmupMin = opts?.warmupMin ?? scopeWarmup;
 
-  // Static twin view — opId/opCode/opName/machineCode/smv per station. Cheap
-  // to compute; memoize by twin identity so the adapter doesn't redo the
-  // catalog/bulletin lookups every render.
-  const view = useMemo(() => buildPmlTwinView(twin, garment), [twin, garment]);
+  return useMemo<SimSpec>(
+    () => ({
+      lines: [
+        {
+          lineId: twin.lines?.[0]?.id ?? twin.id,
+          lineName: twin.lines?.[0]?.name ?? twin.name,
+          twin,
+          garment,
+        },
+      ],
+      durationMin,
+      seed,
+      samplePeriodMin: 1,
+      recordFlow,
+      warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
+    }),
+    [twin, garment, durationMin, seed, recordFlow, warmupMin],
+  );
+}
 
-  // Run the PML engine once for this (twin, durationMin, seed). The result is
-  // a record-then-replay artifact — every frame the playback shows came out
-  // of this single call.
-  const result = useMemo<PmlSimResult | null>(() => {
-    if (twin.workstations.length === 0) return null;
-    try {
-      return runPmlSim({ twin, durationMin, seed, samplePeriodMin: 1, recordFlow });
-    } catch (err) {
-      // The engine throws on truly broken graphs (no Source, no Sink, etc.);
-      // return null so the UI renders an empty-state shell instead of crashing.
-      // The Builder's validation chip surfaces the same errors pre-flight.
-      if (typeof console !== 'undefined') {
-        console.error('[usePmlSim] runPmlSim failed:', err);
-      }
-      return null;
-    }
-  }, [twin, durationMin, seed, recordFlow]);
+export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
+  const spec = useSingleLineSpec(twin, opts);
+  // The key is what the effect depends on, NOT the spec object. That is the
+  // whole trick: a re-derived but structurally identical spec produces the
+  // same key, so nothing re-runs.
+  const key = useMemo(() => (spec.lines[0].twin.workstations.length > 0 ? simSpecKey(spec) : ''), [spec]);
 
-  const samples = result?.samples ?? [];
-  const lastFrame = Math.max(0, samples.length - 1);
-
-  // Frame pointer — the index in `samples[]` currently being displayed.
-  const [frame, setFrame] = useState(0);
-  const frameRef = useRef(frame);
-  frameRef.current = frame;
-
-  // Reset frame when the underlying samples change (twin or opts changed).
+  const ensure = useSimSession((s) => s.ensure);
   useEffect(() => {
-    setFrame(0);
-  }, [result]);
+    if (key) ensure(spec);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
-  const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
-
+  const session = useSimSession((s) => (key ? s.sessions[key] : undefined));
+  const playing = useSimSession((s) => s.playing);
+  const speed = useSimSession((s) => s.speed);
+  const setPlaying = useSimSession((s) => s.setPlaying);
+  const setSpeed = useSimSession((s) => s.setSpeed);
+  const sessionReset = useSimSession((s) => s.reset);
+  const sessionStep = useSimSession((s) => s.step);
   const mode = useProject((s) => s.time.executionMode);
-  const realTimeScale = useProject((s) => s.time.realTimeScale);
 
-  useEffect(() => {
-    if (!playing || samples.length === 0) return;
-
-    if (mode === 'virtual') {
-      // Virtual time: jump to end-of-run on the next animation frame. The PML
-      // run is already recorded — there's nothing to "compute faster"; just
-      // settle on the final sample so the UI shows steady-state numbers.
-      const id = requestAnimationFrame(() => {
-        setFrame(lastFrame);
-        setPlaying(false);
-      });
-      return () => cancelAnimationFrame(id);
-    }
-
-    // Real-time mode: advance frame at `effectiveScale × dt` sim-minutes per
-    // real-second. With realTimeScale=1, speed=1 that's exactly 1 sim-minute
-    // per wall-second (since samples are taken at 1-min cadence) — matching
-    // the legacy engine cadence.
-    //
-    // A fractional accumulator preserves precision at low speeds: rounding
-    // dt × scale up to 1 per tick (the previous approach) made the default
-    // speed=1 case advance ~5 frames/sec instead of 1 frame/sec, because
-    // each 200 ms tick contributed 0.2 sim-minutes that rounded up.
-    let last = performance.now();
-    let accum = frameRef.current; // start where the frame pointer is now
-    const id = window.setInterval(() => {
-      const now = performance.now();
-      const dt = (now - last) / 1000;
-      last = now;
-      const effectiveScale = Math.max(0, realTimeScale) * Math.max(0, speed);
-      accum += dt * effectiveScale;
-      const nextFrame = Math.min(lastFrame, Math.floor(accum));
-      if (nextFrame === frameRef.current) return;
-      setFrame(nextFrame);
-      if (nextFrame >= lastFrame) {
-        setPlaying(false);
-      }
-    }, TICK_MS);
-    return () => window.clearInterval(id);
-  }, [playing, samples.length, speed, mode, realTimeScale, lastFrame]);
-
-  const reset = useCallback(() => {
-    setFrame(0);
-  }, []);
-
-  const step = useCallback(
-    (units: number) => {
-      setFrame((f) => Math.max(0, Math.min(lastFrame, f + Math.round(units))));
-    },
-    [lastFrame],
+  const slot = session?.runs[0];
+  const fallbackView = useMemo<PmlTwinView>(
+    () => ({ stations: [], infrastructure: [], meta: emptyMeta(twin), nonFifoStations: [] }),
+    [twin],
   );
 
-  // Build the SimState for the current frame. priorSamples slice keeps
-  // `history` and `stationHistory` time-bounded to what's "happened so far"
-  // — playback feels causal even though the run is pre-recorded.
-  const state = useMemo<SimState>(() => {
-    if (samples.length === 0 || !result) return emptyPmlSimState();
-    const idx = Math.min(frame, lastFrame);
-    const sample = samples[idx];
-    if (!sample) return emptyPmlSimState();
-    const prior = samples.slice(0, idx + 1);
-    return pmlSampleToSimState(view, sample, result, prior);
-  }, [samples, result, frame, lastFrame, view]);
-
   return {
-    state,
+    state: slot?.state ?? emptyPmlSimState(),
     playing,
     speed,
     mode,
     setPlaying,
     setSpeed,
-    reset,
-    step,
-    result,
-    view,
+    reset: sessionReset,
+    step: sessionStep,
+    result: slot?.result ?? null,
+    view: slot?.view ?? fallbackView,
+  };
+}
+
+/** Minimal meta stand-in for the pre-run render. Mirrors what
+ *  `buildPmlTwinView` produces for an empty twin without paying for the
+ *  catalog lookups. */
+function emptyMeta(twin: Twin): PmlTwinView['meta'] {
+  return {
+    simulatedWsIds: [],
+    skipped: [],
+    infrastructure: [],
+    seedOperators: 0,
+    seedBundleSize: 1,
+    topologySource: 'connectors',
+    stations: [],
+    workstations: [],
+    garment: {
+      id: 'pml-twin',
+      name: twin.name,
+      defaultBundleSize: 1,
+      operations: [],
+    } as unknown as PmlTwinView['meta']['garment'],
+    garmentPinned: false,
   };
 }

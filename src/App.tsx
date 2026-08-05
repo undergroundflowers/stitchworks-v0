@@ -9,6 +9,7 @@ import { useStoresHydrated } from './store/storage/useHydrated';
 import { useTwin } from './store/twin';
 import { buildStarterLine } from './domain/starter-line';
 import { useProject } from './store/project';
+import { SimSessionDriver } from './simulation/SimSessionDriver';
 
 import { MenuPage } from './pages/Menu';
 import { OrdersPage } from './pages/Orders';
@@ -111,6 +112,14 @@ export default function App() {
         background: SW_COLORS.paperDeep,
       }}
     >
+      {/*
+        The simulation clock. Headless, and deliberately mounted here — above
+        <Routes> — so playback survives navigation: start a run on the Sim
+        screen, walk to Reports, and the same engine is still ticking at the
+        same frame. While each page owned its own loop, leaving the page killed
+        the run.
+      */}
+      <SimSessionDriver />
       {showSideBar && <SideBar />}
       <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
         <ErrorBoundary key={location.pathname} scope="page">
