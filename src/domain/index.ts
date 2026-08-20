@@ -23,3 +23,4 @@ export * from './kpi';
 export * from './balance-advisor';
 export * from './palette';
 export * from './iso';
+export * from './camera';

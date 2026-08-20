@@ -28,7 +28,16 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_MOTION, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { HudSelect, StageOverlay, StationGlyph, ViewTitle, useConfirm } from '../components';
+import {
+  HudSelect,
+  StationGlyph,
+  CanvasLegend,
+  ViewSwitch,
+  ViewTitle,
+  ZoomHud,
+  useCanvasCamera,
+  useConfirm,
+} from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { ServiceQueueParams } from '../components/ServiceQueueParams';
 import {
@@ -46,6 +55,9 @@ import {
   lerpProjection,
   FLAT_CELL,
   ISO_FIXTURE_TO_MACHINE_CODE,
+  CAM_IDENTITY,
+  fitBounds,
+  type Cam,
 } from '../domain';
 import {
   useTwin,
@@ -597,12 +609,13 @@ export function BuilderPage() {
   const paletteTab: 'ws' | 'pml' = canvasMode === 'process' ? 'pml' : 'ws';
   const [paletteSearch, setPaletteSearch] = useState<string>('');
   // Pan starts with the factory footprint centred in the stage under the
-  // initial projection (in flat space the whole grid lives in the positive
-  // quadrant, so a 0,0 pan would hang the factory off the bottom-right).
-  // The PROCESS canvas is a freeform pixel space anchored near the origin,
-  // so it keeps the plain 0,0 framing.
+  // initial projection — in flat space the whole grid lives in the positive
+  // quadrant, so a 0,0 pan would hang the factory off the bottom-right.
+  //
+  // Seeded even when the app boots straight into PROCESS: switching views
+  // preserves each camera rather than re-centring, so an unseeded floor
+  // camera would strand the factory the first time you left the graph.
   const [pan, setPan] = useState(() => {
-    if (canvasMode === 'process') return { x: 0, y: 0 };
     const p = canvasMode === 'iso' ? ISO_PROJECTION : FLAT_PROJECTION;
     const c = p.project(twin.gridW / 2, twin.gridH / 2);
     return { x: -c.sx, y: -c.sy };
@@ -614,9 +627,8 @@ export function BuilderPage() {
    * The two are unrelated coordinate spaces — the floor's pan is in projected
    * iso/flat pixels and gets re-centred through `centerPan(projection)`, while
    * the process canvas is a flat diagram of blocks. Sharing one camera meant
-   * `resetView` fed the process view a large negative floor pan, which under
-   * its old scroll-box model parked the whole diagram somewhere you could not
-   * scroll back to.
+   * a shared camera meant the floor's large negative pan leaked into the
+   * process view and parked the whole diagram out of reach.
    *
    * Page-level rather than inside BuilderProcessView because the zoom HUD and
    * the +/-/Cmd-0 keys are page-level, and because the process view unmounts
@@ -624,8 +636,6 @@ export function BuilderPage() {
    */
   const [processCam, setProcessCam] = useState({ x: 0, y: 0, z: 1 });
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
-  const [spacePan, setSpacePan] = useState(false);
-  const [isPanning, setIsPanning] = useState(false);
   /** Live stage element size in CSS pixels. Drives the SVG viewBox so the
    *  canvas user-space matches stage pixels 1:1 — required for the cursor
    *  → world projection to be exact regardless of element aspect ratio. */
@@ -688,8 +698,6 @@ export function BuilderPage() {
   // re-bound (the non-passive wheel listener in particular).
   const canvasModeRef = useRef(canvasMode);
   canvasModeRef.current = canvasMode;
-  const spacePanRef = useRef(false);
-  spacePanRef.current = spacePan;
   // Hover cell mirror — paste reads the latest cursor cell without re-binding
   // the keyboard effect on every mouse move.
   const hoverCellRef = useRef(hoverCell);
@@ -699,16 +707,14 @@ export function BuilderPage() {
   const twinRef = useRef(twin);
   twinRef.current = twin;
 
-  const ZOOM_MIN = 0.3;
-  const ZOOM_MAX = 3;
-  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-
   // Active canvas projection — ISO diamonds, FLAT top-down cells, or the
   // in-between blend while a view morph is running. At rest `isoBlend` is
   // exactly 0 or 1, and `lerpProjection` returns the canonical FLAT / ISO
   // projection objects for those values. The PROCESS view ignores it (its
   // canvas is a freeform pixel space).
   const proj = useMemo(() => lerpProjection(isoBlend), [isoBlend]);
+  const projRef = useRef(proj);
+  projRef.current = proj;
 
   // Track the stage element's pixel size. The SVG inside uses a viewBox
   // sized to match — `[-w/2, -h/2, w, h]` — so 1 user-space unit equals
@@ -728,65 +734,103 @@ export function BuilderPage() {
     return () => ro.disconnect();
   }, []);
 
-  /** Pan that puts the factory footprint's centre at the stage centre under
-   *  projection `p`. Shared by reset and the view-switcher (which re-centres
-   *  for the projection it's ABOUT to activate, not the current one). */
-  const centerPan = useCallback((p: Projection) => {
+  /**
+   * Projected bounds of everything on the floor, in stage pixels at 1x.
+   *
+   * All four footprint corners go in, not just the origin: under the iso
+   * projection a station's extent runs diagonally, so a bbox built from
+   * origins alone clips the far edge of the floor.
+   */
+  const floorBounds = useCallback((p: Projection) => {
     const t = twinRef.current;
-    const c = p.project(t.gridW / 2, t.gridH / 2);
-    return { x: -c.sx, y: -c.sy };
+    const pts: { sx: number; sy: number }[] = [];
+    for (const w of t.workstations) {
+      const fp = wsFootprint(w);
+      const { x, y } = w.position;
+      pts.push(
+        p.project(x, y),
+        p.project(x + fp.w, y),
+        p.project(x, y + fp.d),
+        p.project(x + fp.w, y + fp.d),
+      );
+    }
+    // An empty floor still deserves a sensible frame — fall back to the grid.
+    if (pts.length === 0) {
+      pts.push(
+        p.project(0, 0),
+        p.project(t.gridW, 0),
+        p.project(0, t.gridH),
+        p.project(t.gridW, t.gridH),
+      );
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of pts) {
+      if (q.sx < minX) minX = q.sx;
+      if (q.sy < minY) minY = q.sy;
+      if (q.sx > maxX) maxX = q.sx;
+      if (q.sy > maxY) maxY = q.sy;
+    }
+    return { minX, minY, maxX, maxY };
   }, []);
 
-  /** Frame every block on the process canvas. Content centre goes to the
-   *  viewBox origin, which IS the stage centre under the centred viewBox. */
-  const fitProcessCam = useCallback(() => {
-    const b = processContentBounds(twinRef.current);
-    if (!b) return { x: 0, y: 0, z: 1 };
-    const bw = b.maxX - b.minX + 80;
-    const bh = b.maxY - b.minY + 80;
-    const z = clampZoom(Math.min(stageSize.w / bw, stageSize.h / bh, 1));
-    return { x: -((b.minX + bw / 2 - 40) * z), y: -((b.minY + bh / 2 - 40) * z), z };
-  }, [stageSize.w, stageSize.h]);
-
-  const resetView = useCallback(() => {
-    if (canvasModeRef.current === 'process') {
-      setProcessCam(fitProcessCam());
-      return;
-    }
-    setPan(centerPan(proj));
-    setZoom(1);
-  }, [proj, centerPan, fitProcessCam]);
-
-  /** Zoom toward a screen point (relative to canvas top-left). Keeps the
-   *  point under the cursor anchored as zoom changes. */
-  const zoomAt = useCallback((cx: number, cy: number, factor: number) => {
-    if (!stageRef.current) return;
-    const rect = stageRef.current.getBoundingClientRect();
-    const dx = cx - rect.width / 2;
-    const dy = cy - rect.height / 2;
-    const z = zoomRef.current;
-    const p = panRef.current;
-    const newZ = clampZoom(z * factor);
-    if (newZ === z) return;
-    setZoom(newZ);
-    setPan({
-      x: dx - ((dx - p.x) / z) * newZ,
-      y: dy - ((dy - p.y) / z) * newZ,
-    });
+  /**
+   * The floor camera, as one value.
+   *
+   * `pan` and `zoom` stay separate state because dozens of render sites read
+   * them, but every *write* funnels through `writeFloorCam` so a burst of
+   * wheel events composes instead of each event reading the same stale
+   * render. The ref is re-synced on render, which also picks up the writes
+   * the view-morph tween makes directly.
+   */
+  const floorCamRef = useRef<Cam>(CAM_IDENTITY);
+  floorCamRef.current = { x: pan.x, y: pan.y, z: zoom };
+  const writeFloorCam = useCallback((update: (c: Cam) => Cam) => {
+    const next = update(floorCamRef.current);
+    floorCamRef.current = next;
+    setPan({ x: next.x, y: next.y });
+    setZoom(next.z);
   }, []);
 
-  /** Zoom about the stage centre. In both cameras the centre is the origin of
-   *  the offset space, so no pan compensation is needed — which is exactly why
-   *  the old HUD buttons drifted: they changed zoom and left pan alone in a
-   *  space where the anchor was the top-left corner. */
-  const zoomStep = useCallback((factor: number) => {
+  /** One camera interface over two independent cameras. Which one a gesture
+   *  drives is a function of the active view, so the shared gesture layer
+   *  never has to know there are two. */
+  const readCam = useCallback(
+    (): Cam =>
+      canvasModeRef.current === 'process' ? processCamRef.current : floorCamRef.current,
+    [],
+  );
+  const writeCam = useCallback(
+    (update: (c: Cam) => Cam) => {
+      if (canvasModeRef.current === 'process') setProcessCam((c) => update(c));
+      else writeFloorCam(update);
+    },
+    [writeFloorCam],
+  );
+
+  /** Frame everything — the ⛶ button and Cmd-0. Means the same thing in all
+   *  three views: show me all of my content. */
+  const fitView = useCallback(() => {
     if (canvasModeRef.current === 'process') {
-      setProcessCam((c) => ({ ...c, z: clampZoom(c.z * factor) }));
+      setProcessCam(
+        fitBounds(
+          processContentBounds(twinRef.current) ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+          stageSize,
+        ),
+      );
       return;
     }
-    const r = stageRef.current?.getBoundingClientRect();
-    zoomAt(r ? r.width / 2 : 0, r ? r.height / 2 : 0, factor);
-  }, [zoomAt]);
+    writeFloorCam(() => fitBounds(floorBounds(projRef.current), stageSize));
+  }, [floorBounds, stageSize, writeFloorCam]);
+
+  /** Wheel, pinch, space-drag, middle-drag, +/-, Cmd-0 — the same gestures
+   *  every canvas in the app responds to. */
+  const cam = useCanvasCamera({
+    ref: stageRef,
+    origin: 'center',
+    read: readCam,
+    write: writeCam,
+    fit: fitView,
+  });
 
   /**
    * Switch the canvas view. 2D ↔ ISO runs the projection-blend morph — the
@@ -808,25 +852,31 @@ export function BuilderPage() {
     }
     setCanvasMode(m);
     if (m === 'process') {
-      // Deliberately does NOT touch the process camera — losing your framing
-      // on every 2D → PROCESS → 2D round trip is exactly the friction this
-      // pass is removing. The floor camera is left alone too; it is a
-      // separate space and will be waiting when you switch back.
-      setIsoBlend(0);
+      // Touches neither camera. Both are preserved, so a 2D → PROCESS → 2D
+      // round trip puts you back exactly where you were — the same rule the
+      // simulation views follow.
       return;
     }
     const toBlend = m === 'iso' ? 1 : 0;
     const fromBlend = isoBlendRef.current;
-    const panTo = centerPan(m === 'iso' ? ISO_PROJECTION : FLAT_PROJECTION);
+    // Hold your framing through the projection change: whatever world point
+    // is at the stage centre stays there, at the zoom you were already at.
+    // Re-centring on the grid and snapping back to 100% — which is what this
+    // used to do — threw away your position on every single view switch.
+    const camNow = floorCamRef.current;
+    const world = lerpProjection(fromBlend).unproject(
+      -camNow.x / camNow.z,
+      -camNow.y / camNow.z,
+    );
+    const anchor = lerpProjection(toBlend).project(world.x, world.y);
+    const panTo = { x: -anchor.sx * camNow.z, y: -anchor.sy * camNow.z };
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (canvasMode === 'process' || reduceMotion || fromBlend === toBlend) {
       setPan(panTo);
-      setZoom(1);
       setIsoBlend(toBlend);
       return;
     }
-    const panFrom = panRef.current;
-    const zoomFrom = zoom;
+    const panFrom = { x: camNow.x, y: camNow.y };
     const duration = SW_MOTION.slow;
     const t0 = performance.now();
     const step = (now: number) => {
@@ -839,7 +889,6 @@ export function BuilderPage() {
         x: panFrom.x + (panTo.x - panFrom.x) * e,
         y: panFrom.y + (panTo.y - panFrom.y) * e,
       });
-      setZoom(zoomFrom + (1 - zoomFrom) * e);
       morphRaf.current = u < 1 ? requestAnimationFrame(step) : null;
     };
     morphRaf.current = requestAnimationFrame(step);
@@ -918,24 +967,6 @@ export function BuilderPage() {
     setExtraSelectedWs(new Set());
   }, [hoverCell, drop, tool, addWorkstation, canvasMode]);
 
-  const beginPanFromPoint = useCallback((startX: number, startY: number) => {
-    const isProcess = canvasModeRef.current === 'process';
-    const p0 = isProcess ? { ...processCamRef.current } : { ...panRef.current };
-    setIsPanning(true);
-    function move(ev: MouseEvent) {
-      const nx = p0.x + (ev.clientX - startX);
-      const ny = p0.y + (ev.clientY - startY);
-      if (isProcess) setProcessCam((c) => ({ ...c, x: nx, y: ny }));
-      else setPan({ x: nx, y: ny });
-    }
-    function up() {
-      setIsPanning(false);
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    }
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  }, []);
 
   /** Project a screen point to SVG user-space — the same coordinate system
    *  the canvas <g> renders in after applying `translate(pan) scale(zoom)`.
@@ -1027,12 +1058,12 @@ export function BuilderPage() {
     // unambiguous. On the floor the click-to-place path owns the gesture.
     if (drop.kind !== 'none' && canvasMode !== 'process') return;
     if (e.button !== 0) return;
-    if (spacePan) return; // capture-phase listener handles space-pan
+    if (cam.spacePan) return; // the shared capture-phase listener owns space-pan
     const t = e.target as Element;
     // Only react to background drags — let entity clicks bubble.
     if (t.tagName !== 'svg' && !(t as SVGElement).getAttribute?.('data-canvas-bg')) return;
     if (canvasMode === 'process') {
-      beginPanFromPoint(e.clientX, e.clientY);
+      cam.beginPan(e.clientX, e.clientY);
       return;
     }
     if (tool === 'select') {
@@ -1040,60 +1071,10 @@ export function BuilderPage() {
       beginSelectRect(e.clientX, e.clientY, e.shiftKey);
       return;
     }
-    beginPanFromPoint(e.clientX, e.clientY);
+    cam.beginPan(e.clientX, e.clientY);
   };
 
-  // Wheel gesture. React's wheel listener is passive at the root, so we attach
-  // a non-passive native listener to call preventDefault and keep the page from
-  // scrolling under the canvas. Convention (shared with the
-  // process grid): trackpad pinch (ctrlKey) or a mouse wheel (line-mode delta,
-  // or a large discrete vertical step with no horizontal component) zooms
-  // toward the cursor; a plain trackpad two-finger swipe pans.
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    function onWheel(ev: WheelEvent) {
-      // The process view attaches its own non-passive wheel listener. Bail
-      // BEFORE preventDefault so both do not act on the same event — that
-      // double-handling multiplied the zoom factor twice per notch.
-      if (canvasModeRef.current === 'process') return;
-      ev.preventDefault();
-      const isPinch = ev.ctrlKey || ev.metaKey;
-      const isMouseWheel =
-        ev.deltaMode !== 0 || (ev.deltaX === 0 && Math.abs(ev.deltaY) >= 50);
-      if (isPinch || isMouseWheel) {
-        const rect = el!.getBoundingClientRect();
-        const cx = ev.clientX - rect.left;
-        const cy = ev.clientY - rect.top;
-        // Stronger response when ctrlKey is set so pinch feels natural.
-        const k = ev.ctrlKey ? 0.012 : 0.0015;
-        const factor = Math.exp(-ev.deltaY * k);
-        zoomAt(cx, cy, factor);
-        return;
-      }
-      // Two-finger swipe → pan. `pan` is in screen pixels (same space as the
-      // mouse-drag pan), so subtract the raw deltas for 1:1 tracking.
-      setPan((p) => ({ x: p.x - ev.deltaX, y: p.y - ev.deltaY }));
-    }
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [zoomAt]);
 
-  // Space-held or middle-mouse-button pan, intercepted in capture phase so it
-  // wins over entity drag handlers.
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    function onDownCapture(ev: MouseEvent) {
-      const wantsPan = spacePanRef.current || ev.button === 1;
-      if (!wantsPan) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      beginPanFromPoint(ev.clientX, ev.clientY);
-    }
-    el.addEventListener('mousedown', onDownCapture, true);
-    return () => el.removeEventListener('mousedown', onDownCapture, true);
-  }, [beginPanFromPoint]);
 
   // ── Drag-to-move ───────────────────────────────────────────────────────────
   // Keep zoom in a ref so the drag closure always reads the latest zoom
@@ -1265,27 +1246,8 @@ export function BuilderPage() {
       const tag = (e.target as Element)?.tagName;
       const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 
-      // View shortcuts work even outside a selection.
-      if (!inField && e.code === 'Space' && !spacePanRef.current && !e.repeat) {
-        e.preventDefault();
-        setSpacePan(true);
-        return;
-      }
-      if (!inField && (e.metaKey || e.ctrlKey) && e.key === '0') {
-        e.preventDefault();
-        resetView();
-        return;
-      }
-      if (!inField && (e.key === '+' || e.key === '=')) {
-        e.preventDefault();
-        zoomStep(1.15);
-        return;
-      }
-      if (!inField && (e.key === '-' || e.key === '_')) {
-        e.preventDefault();
-        zoomStep(1 / 1.15);
-        return;
-      }
+      // Camera keys (Space-pan, Cmd-0, +/-) live in `useCanvasCamera` so the
+      // simulation floor answers to exactly the same ones.
       // [ / ] — collapse or restore the side panels (Figma convention), so the
       // canvas can be taken full-width without reaching for the headers.
       if (!inField && !e.metaKey && !e.ctrlKey && e.key === '[') {
@@ -1388,16 +1350,9 @@ export function BuilderPage() {
         }
       }
     }
-    function onKeyUp(e: KeyboardEvent) {
-      if (e.code === 'Space') setSpacePan(false);
-    }
     window.addEventListener('keydown', onKey);
-    window.addEventListener('keyup', onKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('keyup', onKeyUp);
-    };
-  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, duplicateWorkstation, resetView, zoomStep, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, duplicateWorkstation, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
 
   // ── Save / Save As ─────────────────────────────────────────────────────────
   // Two flows:
@@ -1951,15 +1906,17 @@ export function BuilderPage() {
           // Void ground with a faint overhead glow — the SVG above it keeps
           // its background transparent so this vignette reads through.
           background: `radial-gradient(120% 90% at 50% 12%, ${alpha(SW_COLORS.paperDeep, 0.55)} 0%, ${SW_COLORS.void} 70%)`,
-          cursor: spacePan
-            ? (isPanning ? 'grabbing' : 'grab')
-            : isPanning
+          cursor: cam.spacePan
+            ? (cam.panning ? 'grabbing' : 'grab')
+            : cam.panning
               ? 'grabbing'
               : drop.kind !== 'none'
                 ? 'crosshair'
                 : tool === 'select'
                   ? 'crosshair'
-                  : 'default',
+                  // Dragging the background pans in every view, so every view
+                  // shows the grab hand for it.
+                  : 'grab',
           touchAction: 'none',
         }}
       >
@@ -2195,9 +2152,8 @@ export function BuilderPage() {
             setProcessPositions={setProcessPositions}
             connect={connect}
             cam={processCam}
-            onCam={setProcessCam}
             stageSize={stageSize}
-            onFitRequest={() => setProcessCam(fitProcessCam())}
+            onFitRequest={fitView}
             onPickFromPort={(wsId, portId) =>
               setConnect((c) => ({ ...c, fromWsId: wsId, fromPort: portId }))
             }
@@ -2240,53 +2196,12 @@ export function BuilderPage() {
           />
         )}
 
-        {/* Zoom & view controls — HUD pill, Make-style: quiet buttons on a
-            steel glass slab, numeric readout between − and +. */}
-        <StageOverlay
-          style={{
-            position: 'absolute',
-            bottom: 14,
-            right: 14,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 2,
-            background: alpha(SW_COLORS.steel, 0.95),
-            backdropFilter: 'blur(8px)',
-            WebkitBackdropFilter: 'blur(8px)',
-            padding: 2,
-            borderRadius: SW_RADIUS.md,
-            border: `1px solid ${SW_COLORS.line}`,
-            boxShadow: SW_SHADOWS.hud,
-            zIndex: 5,
-          }}
-        >
-          <ZoomHudBtn onClick={() => zoomStep(1 / 1.15)} title="Zoom out  (−)">
-            −
-          </ZoomHudBtn>
-          <button
-            onClick={resetView}
-            title="Reset view  (⌘0)"
-            style={{
-              ...SW_TYPE.numeric,
-              color: SW_COLORS.ink,
-              background: 'transparent',
-              border: 'none',
-              padding: '0 8px',
-              height: 28,
-              minWidth: 52,
-              cursor: 'pointer',
-            }}
-          >
-            {Math.round((canvasMode === 'process' ? processCam.z : zoom) * 100)}%
-          </button>
-          <ZoomHudBtn onClick={() => zoomStep(1.15)} title="Zoom in  (+)">
-            +
-          </ZoomHudBtn>
-          <div style={{ width: 1, alignSelf: 'stretch', background: SW_COLORS.lineSoft, margin: '3px 2px' }} />
-          <ZoomHudBtn onClick={resetView} title="Reset zoom & pan">
-            ⛶
-          </ZoomHudBtn>
-        </StageOverlay>
+        {/* Zoom & framing — the same control the simulation floor uses. */}
+        <ZoomHud
+          zoom={canvasMode === 'process' ? processCam.z : zoom}
+          onZoomStep={cam.zoomStep}
+          onFit={fitView}
+        />
 
         {/* Bottom-left counter strip */}
         <div
@@ -2373,55 +2288,18 @@ export function BuilderPage() {
           )}
         </div>
 
-        {/* Top-center canvas-mode toggle — sits at the same vertical baseline
+        {/* Top-centre canvas-mode toggle — sits at the same vertical baseline
             as the CONTROLS dropdown so the two read as one row of overlays. */}
-        <div
-          role="tablist"
-          style={{
-            position: 'absolute',
-            top: 12,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 6,
-            display: 'flex',
-            gap: 2,
-            background: alpha(SW_COLORS.void, 0.92),
-            backdropFilter: 'blur(8px)',
-            WebkitBackdropFilter: 'blur(8px)',
-            padding: 2,
-            borderRadius: SW_RADIUS.sm + 2,
-            border: `1px solid ${SW_COLORS.line}`,
-          }}
+        <ViewSwitch
+          value={canvasMode}
+          onChange={switchCanvasMode}
           title="Switch the canvas: 2D top-down plan (default) · ISO isometric · PROCESS PML block diagram with input/output ports"
-        >
-          {(['2d', 'iso', 'process'] as const).map((m) => (
-            <button
-              key={m}
-              role="tab"
-              aria-selected={canvasMode === m}
-              onClick={() => switchCanvasMode(m)}
-              onMouseEnter={(e) => {
-                if (canvasMode !== m) e.currentTarget.style.color = SW_COLORS.ink;
-              }}
-              onMouseLeave={(e) => {
-                if (canvasMode !== m) e.currentTarget.style.color = SW_COLORS.muted;
-              }}
-              style={{
-                ...SW_TYPE.kicker,
-                letterSpacing: '0.08em',
-                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
-                color: canvasMode === m ? SW_COLORS.void : SW_COLORS.muted,
-                border: 'none',
-                padding: '7px 13px',
-                cursor: 'pointer',
-                borderRadius: SW_RADIUS.sm,
-                transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
-              }}
-            >
-              {m === '2d' ? '2D' : m === 'iso' ? 'ISO' : 'PROCESS'}
-            </button>
-          ))}
-        </div>
+          options={[
+            { value: '2d', label: '2D' },
+            { value: 'iso', label: 'ISO' },
+            { value: 'process', label: 'PROCESS' },
+          ]}
+        />
 
         {/* Floor-overlay lens switch — moved here from the inspector so it
             reads as a canvas view-mode control. It drives what every station
@@ -4491,7 +4369,6 @@ interface BuilderProcessViewProps {
   /** This view's own camera. Separate from the floor's pan/zoom because the
    *  two are unrelated coordinate spaces — see `processCam` on the page. */
   cam: ProcessCam;
-  onCam: (next: ProcessCam | ((prev: ProcessCam) => ProcessCam)) => void;
   /** Live stage size in CSS px; drives the centred viewBox. */
   stageSize: { w: number; h: number };
   /** Ask the page to frame all content (same path as Cmd-0 / ⛶). */
@@ -4573,7 +4450,6 @@ function BuilderProcessView({
   onPickFromPort,
   onPickToPort,
   cam,
-  onCam,
   stageSize,
   onFitRequest,
 }: BuilderProcessViewProps) {
@@ -4662,46 +4538,9 @@ function BuilderProcessView({
       inPortLabel: string;
     }[];
 
-  const ZOOM_MIN = 0.3;
-  const ZOOM_MAX = 3;
-  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-
-  // Wheel. Non-passive and native, matching the floor canvas: trackpad pinch
-  // (ctrlKey) or a mouse wheel zooms toward the cursor; a plain two-finger
-  // swipe pans. The swipe branch is not optional — dropping the old
-  // scroll-box container took the native scrollbars with it, and this is now
-  // the only way to trackpad-pan.
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    function onWheel(ev: WheelEvent) {
-      ev.preventDefault();
-      const isPinch = ev.ctrlKey || ev.metaKey;
-      const isMouseWheel = ev.deltaMode !== 0 || (ev.deltaX === 0 && Math.abs(ev.deltaY) >= 50);
-      if (isPinch || isMouseWheel) {
-        const rect = el!.getBoundingClientRect();
-        // Offset from the stage centre — the origin of the centred viewBox.
-        const dx = ev.clientX - rect.left - rect.width / 2;
-        const dy = ev.clientY - rect.top - rect.height / 2;
-        const k = ev.ctrlKey ? 0.012 : 0.0015;
-        const factor = Math.exp(-ev.deltaY * k);
-        onCam((c) => {
-          const nz = clampZoom(c.z * factor);
-          if (nz === c.z) return c;
-          return {
-            x: dx - ((dx - c.x) / c.z) * nz,
-            y: dy - ((dy - c.y) / c.z) * nz,
-            z: nz,
-          };
-        });
-        return;
-      }
-      onCam((c) => ({ ...c, x: c.x - ev.deltaX, y: c.y - ev.deltaY }));
-    }
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [onCam]);
+  // The camera lives at page level, and every gesture that drives it —
+  // wheel, pinch, swipe, space-drag, +/-, Cmd-0 — is installed once on the
+  // stage by `useCanvasCamera`. This view just renders through it.
 
   const svgRef = useRef<SVGGElement | null>(null);
   /** Screen point → process-world px. The ref is on the INNER <g>, which
@@ -4905,7 +4744,6 @@ function BuilderProcessView({
   return (
     <>
     <div
-      ref={wrapRef}
       style={{
         position: 'absolute',
         inset: 0,
@@ -4916,14 +4754,10 @@ function BuilderProcessView({
         // background, so it tracks the camera instead of the element.
         overflow: 'hidden',
         backgroundColor: SW_COLORS.paperDeep,
-        cursor:
-          drop.kind !== 'none'
-            ? 'crosshair'
-            : connect.on
-              ? 'crosshair'
-              : dragWsId
-                ? 'grabbing'
-                : 'grab',
+        // Only the states this view knows about. Everything else — the
+        // grab hand, space-pan, mid-pan grabbing — is the stage's cursor
+        // showing through, so it reads the same in every view.
+        cursor: connect.on ? 'crosshair' : dragWsId ? 'grabbing' : undefined,
       }}
     >
       <svg
@@ -7190,40 +7024,6 @@ function InspectorStat({ label, value, unit, tone }: { label: string; value: str
 
 /** Quiet square button for the zoom HUD — transparent at rest, steel on
  *  hover, numeric glyph. The HUD slab supplies the border and ground. */
-function ZoomHudBtn({
-  children,
-  onClick,
-  title,
-}: {
-  children: ReactNode;
-  onClick: () => void;
-  title?: string;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        ...SW_TYPE.numeric,
-        width: 30,
-        height: 28,
-        borderRadius: SW_RADIUS.sm,
-        border: 'none',
-        background: hover ? SW_COLORS.steelLite : 'transparent',
-        color: hover ? SW_COLORS.ink : SW_COLORS.muted,
-        display: 'grid',
-        placeItems: 'center',
-        cursor: 'pointer',
-        transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
 
 function CountChip({ label, value }: { label: string; value: number }) {
   return (
@@ -7266,42 +7066,18 @@ function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode })
     { key: 'kpis',       bg: SW_COLORS.brandDeep, label: 'NN%',     meaning: 'utilisation' },
   ];
   return (
-    <div
-      style={{
-        position: 'absolute',
-        bottom: 56,
-        right: 14,
-        zIndex: 5,
-        background: alpha(SW_COLORS.steel, 0.95),
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-        border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: SW_RADIUS.sm + 2,
-        boxShadow: SW_SHADOWS.hud,
-        padding: '6px 8px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-        fontFamily: SW_FONTS.mono,
-        fontSize: 9,
-        color: SW_COLORS.muted,
-        letterSpacing: '0.03em',
-        pointerEvents: 'none',
-      }}
-      aria-label="Canvas legend"
-    >
+    <CanvasLegend label={canvasMode === 'process' ? 'PROCESS' : canvasMode === 'iso' ? 'ISO' : '2D'}>
       <div
         style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
           fontFamily: SW_FONTS.mono,
-          fontSize: 8,
-          fontWeight: 900,
-          color: SW_COLORS.ink,
-          letterSpacing: '0.15em',
+          fontSize: 9,
+          color: SW_COLORS.muted,
+          letterSpacing: '0.03em',
         }}
       >
-        LEGEND
-      </div>
-
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <LegendLine color={SW_COLORS.brand}  width={2.4} label="flow" />
         <LegendLine color={SW_COLORS.bobbin} width={1.8} dash="6 4" label="operator" />
@@ -7344,7 +7120,8 @@ function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode })
           </div>
         );
       })()}
-    </div>
+      </div>
+    </CanvasLegend>
   );
 }
 

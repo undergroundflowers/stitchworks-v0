@@ -27,6 +27,10 @@ export {
 export { TimeChip, TimeDisplay, type TimeKind } from './TimeDisplay';
 export { StageOverlay } from './StageOverlay';
 export { StationGlyph } from './StationGlyph';
+export { ZoomHud } from './ZoomHud';
+export { CanvasLegend } from './CanvasLegend';
+export { ViewSwitch } from './ViewSwitch';
+export { useCanvasCamera, type CanvasCameraApi } from './useCanvasCamera';
 export {
   Dialog,
   ConfirmProvider,

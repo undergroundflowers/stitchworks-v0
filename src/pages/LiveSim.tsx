@@ -21,7 +21,19 @@ import {
   UtilizationBarChart,
   WipChart,
 } from '../components/charts';
-import { Button, ToggleGroup, HudSelect, TimeDisplay, ViewTitle, EmptyState, type HudSelectOption } from '../components';
+import {
+  Button,
+  ToggleGroup,
+  HudSelect,
+  TimeDisplay,
+  CanvasLegend,
+  ViewSwitch,
+  ViewTitle,
+  EmptyState,
+  ZoomHud,
+  useCanvasCamera,
+  type HudSelectOption,
+} from '../components';
 import { SimStationDetail } from '../components/SimStationDetail';
 import {
   buildSimConfigFromTwin,
@@ -54,7 +66,7 @@ import {
   parseHHMM,
 } from '../simulation/timeUnit';
 import { useProject, useGarments, type OrderDraft } from '../store';
-import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
+import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, CAM_IDENTITY, type Cam, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, getBlockKind, getBlockParams, apparelRoleFor } from '../domain/pml';
@@ -175,6 +187,26 @@ export function LiveSimPage() {
   // User-edited bundle override; null means "follow the seed (twin or system)".
   const [bundleOverride, setBundleOverride] = useState<number | null>(null);
   const [view, setView] = useState<SimView>('iso');
+  /**
+   * One camera per view, preserved across switches.
+   *
+   * ISO, TOP, HEAT, LOGIC and PML are genuinely different coordinate spaces,
+   * so they cannot share a camera — but each keeps its own, and each is
+   * waiting where you left it. This used to snap every view back to 1x on
+   * every switch, which made comparing two views of the same line a chore.
+   */
+  const [simCams, setSimCams] = useState<Record<SimView, Cam>>({
+    iso: CAM_IDENTITY,
+    top: CAM_IDENTITY,
+    heat: CAM_IDENTITY,
+    logic: CAM_IDENTITY,
+    pml: CAM_IDENTITY,
+  });
+  const camFor = (v: SimView) => ({
+    cam: simCams[v],
+    onCam: (update: (c: Cam) => Cam) =>
+      setSimCams((m) => ({ ...m, [v]: update(m[v]) })),
+  });
   // Per-station "sim vs theory" drawer — selected by clicking a station in the
   // ISO/TOP views. Keyed by opId (what maps to a StationView); clicking a
   // second machine that runs the same op shows that op's queue, which is the
@@ -948,7 +980,7 @@ export function LiveSimPage() {
         }}
       >
         {view === 'iso' && (
-          <PanZoomViewport viewKey="iso">
+          <PanZoomViewport {...camFor('iso')}>
             <SimIsoView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
@@ -964,7 +996,7 @@ export function LiveSimPage() {
           </PanZoomViewport>
         )}
         {view === 'top' && (
-          <PanZoomViewport viewKey="top">
+          <PanZoomViewport {...camFor('top')}>
             <SimTopView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
@@ -979,7 +1011,7 @@ export function LiveSimPage() {
           </PanZoomViewport>
         )}
         {view === 'heat' && (
-          <PanZoomViewport viewKey="heat">
+          <PanZoomViewport {...camFor('heat')}>
             <SimHeatView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
@@ -992,7 +1024,7 @@ export function LiveSimPage() {
           </PanZoomViewport>
         )}
         {view === 'logic' && (
-          <PanZoomViewport viewKey="logic">
+          <PanZoomViewport {...camFor('logic')}>
             <SimLogicView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
@@ -1005,7 +1037,7 @@ export function LiveSimPage() {
           </PanZoomViewport>
         )}
         {view === 'pml' && (
-          <PanZoomViewport viewKey="pml">
+          <PanZoomViewport {...camFor('pml')}>
             <SimPmlView
               garment={garment}
               operators={effectiveOperators}
@@ -1019,44 +1051,17 @@ export function LiveSimPage() {
             of buried in the HUD strip. Same pill styling as before; just
             absolutely-positioned and given a translucent backdrop so it
             stays legible over any view. */}
-        <div
-          style={{
-            position: 'absolute',
-            top: 16,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            display: 'flex',
-            gap: 2,
-            background: '#0a0d12cc',
-            border: '1px solid #ffffff20',
-            padding: 3,
-            borderRadius: 8,
-            backdropFilter: 'blur(6px)',
-            zIndex: 6,
-          }}
-        >
-          {(['iso', 'top', 'heat', 'logic', 'pml'] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              style={{
-                background: view === v ? SW_COLORS.brand : 'transparent',
-                color: view === v ? '#fff' : '#ffffffaa',
-                border: 'none',
-                cursor: 'pointer',
-                padding: '6px 14px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
-                letterSpacing: '0.1em',
-                borderRadius: 4,
-              }}
-              title={v === 'pml' ? 'PML — block-graph snapshot of the active twin' : undefined}
-            >
-              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : v === 'logic' ? 'LOGIC' : '⚙ PML'}
-            </button>
-          ))}
-        </div>
+        <ViewSwitch
+          value={view}
+          onChange={setView}
+          options={[
+            { value: 'iso', label: 'ISO 3D' },
+            { value: 'top', label: 'TOP 2D' },
+            { value: 'heat', label: 'HEAT' },
+            { value: 'logic', label: 'LOGIC' },
+            { value: 'pml', label: '\u2699 PML', title: 'PML — block-graph snapshot of the active twin' },
+          ]}
+        />
 
         {/* Legend overlay — view-aware key for every glyph on the floor. */}
         <SimLegend view={view} />
@@ -1870,6 +1875,61 @@ interface SimLegendEntry {
   hint: string;
 }
 
+function SimLegend({ view }: { view: SimView }) {
+  const entries = legendEntriesForView(view);
+  const viewLabel =
+    view === 'iso' ? 'ISO 3D'
+      : view === 'top' ? 'TOP 2D'
+        : view === 'heat' ? 'HEAT'
+          : view === 'logic' ? 'LOGIC'
+            : 'PML';
+
+  return (
+    <CanvasLegend label={viewLabel} width={320}>
+    {entries.map((e, i) => (
+      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        <div
+          style={{
+            width: 36,
+            height: 28,
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {e.glyph}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 800,
+              color: SW_COLORS.ink,
+              letterSpacing: '0.04em',
+            }}
+          >
+            {e.label}
+          </div>
+          <div
+            style={{
+              fontFamily: SW_FONTS.body,
+              fontSize: 10.5,
+              color: SW_COLORS.muted,
+              lineHeight: 1.35,
+              marginTop: 2,
+            }}
+          >
+            {e.hint}
+          </div>
+        </div>
+      </div>
+    ))}
+    </CanvasLegend>
+  );
+}
+
 function legendEntriesForView(view: SimView): SimLegendEntry[] {
   switch (view) {
     case 'iso':
@@ -2021,97 +2081,51 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
 }
 
 /**
- * Wraps a simulation view in a pan/zoom viewport. Wheel zooms toward the
- * cursor, left-drag on empty space pans, and a small control puck in the
- * bottom-right offers +/- buttons plus a reset. The transform resets when
- * the active `viewKey` changes so switching ISO ↔ TOP doesn't strand the
- * user in a far-off corner of the previous view.
+ * Wraps a simulation view in a pan/zoom viewport.
+ *
+ * Gestures, zoom range, step size, keys and the HUD all come from the shared
+ * camera layer, so a pinch, a space-drag or ⌘0 does exactly what it does on
+ * the Build floor. Only the *mechanism* differs: this viewport sizes a
+ * wrapper div by percentage rather than transforming an inner SVG group,
+ * because the sim views are whole SVGs of their own and a CSS `scale` would
+ * rasterise them at 1x and stretch the bitmap.
+ *
+ * The camera is owned by the page and keyed by view, so switching ISO → TOP
+ * → ISO returns you to the framing you left — the same rule the Build floor
+ * and PROCESS canvas follow. It used to reset on every switch.
  */
-function PanZoomViewport({ viewKey, children }: { viewKey: string; children: React.ReactNode }) {
-  const [tf, setTf] = useState({ x: 0, y: 0, s: 1 });
+function PanZoomViewport({
+  cam,
+  onCam,
+  children,
+}: {
+  cam: Cam;
+  onCam: (update: (c: Cam) => Cam) => void;
+  children: React.ReactNode;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const panRef = useRef<{ sx: number; sy: number; tx: number; ty: number } | null>(null);
-  const [panning, setPanning] = useState(false);
+  const camRef = useRef(cam);
+  camRef.current = cam;
 
-  // Reset the transform whenever the user picks a different view, so each
-  // view starts neutral instead of inheriting the previous zoom level.
-  useEffect(() => {
-    setTf({ x: 0, y: 0, s: 1 });
-  }, [viewKey]);
-
-  // Wheel-to-zoom needs a non-passive listener so we can preventDefault and
-  // stop the parent page from scrolling underneath the simulation floor.
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      // Pinch (ctrlKey) or a mouse wheel zooms toward the cursor; a plain
-      // trackpad two-finger swipe pans. tf.x/tf.y are screen-space (same as the
-      // mouse-drag pan below), so subtract the raw deltas for 1:1 tracking.
-      const isPinch = e.ctrlKey || e.metaKey;
-      const isMouseWheel =
-        e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50);
-      if (!(isPinch || isMouseWheel)) {
-        setTf((t) => ({ ...t, x: t.x - e.deltaX, y: t.y - e.deltaY }));
-        return;
-      }
-      const rect = el.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      setTf((t) => {
-        const factor = Math.exp(-e.deltaY * 0.0015);
-        const next = Math.max(0.3, Math.min(6, t.s * factor));
-        const ratio = next / t.s;
-        return { s: next, x: cx - (cx - t.x) * ratio, y: cy - (cy - t.y) * ratio };
-      });
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
-
-  useEffect(() => {
-    if (!panning) return;
-    const onMove = (e: MouseEvent) => {
-      const s = panRef.current;
-      if (!s) return;
-      setTf((t) => ({ ...t, x: s.tx + (e.clientX - s.sx), y: s.ty + (e.clientY - s.sy) }));
-    };
-    const onUp = () => {
-      panRef.current = null;
-      setPanning(false);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [panning]);
+  const api = useCanvasCamera({
+    ref: containerRef,
+    // The wrapper grows from its top-left corner, so that is the camera's
+    // zero — unlike the SVG canvases, which render through a centred viewBox.
+    origin: 'topLeft',
+    read: () => camRef.current,
+    write: onCam,
+    // Every sim view sizes its own viewBox to its content, so at 1x
+    // everything is already on screen. "Frame everything" is the identity
+    // camera here — the same promise, a cheaper implementation.
+    fit: () => onCam(() => CAM_IDENTITY),
+  });
 
   const startPan = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     // Let buttons / inputs handle their own clicks — only grab empty space.
     const target = e.target as HTMLElement | null;
     if (target && target.closest('button, input, select, textarea, a, [role="button"]')) return;
-    panRef.current = { sx: e.clientX, sy: e.clientY, tx: tf.x, ty: tf.y };
-    setPanning(true);
-  };
-
-  // Compute the next scale inside the functional updater so back-to-back
-  // button clicks chain correctly instead of all reading the same stale
-  // `tf.s` from closure and overwriting each other.
-  const zoomBy = (factor: number) => {
-    const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cx = rect.width / 2;
-    const cy = rect.height / 2;
-    setTf((t) => {
-      const next = Math.max(0.3, Math.min(6, t.s * factor));
-      const ratio = next / t.s;
-      return { s: next, x: cx - (cx - t.x) * ratio, y: cy - (cy - t.y) * ratio };
-    });
+    api.beginPan(e.clientX, e.clientY);
   };
 
   return (
@@ -2122,203 +2136,28 @@ function PanZoomViewport({ viewKey, children }: { viewKey: string; children: Rea
         position: 'absolute',
         inset: 0,
         overflow: 'hidden',
-        cursor: panning ? 'grabbing' : 'grab',
+        cursor: api.panning ? 'grabbing' : 'grab',
       }}
     >
       {/* Sizing-based zoom (vs CSS `transform: scale`) so SVG children
           re-render at the zoomed pixel resolution and stay vector-sharp.
-          CSS scale would rasterize the layer at 1× and stretch the bitmap,
+          CSS scale would rasterize the layer at 1x and stretch the bitmap,
           which is what was causing the blur at higher zoom levels. */}
       <div
         style={{
           position: 'absolute',
           top: 0,
           left: 0,
-          width: `${tf.s * 100}%`,
-          height: `${tf.s * 100}%`,
-          transform: `translate(${tf.x}px, ${tf.y}px)`,
+          width: `${cam.z * 100}%`,
+          height: `${cam.z * 100}%`,
+          transform: `translate(${cam.x}px, ${cam.y}px)`,
           transformOrigin: '0 0',
         }}
       >
         {children}
       </div>
 
-      {/* Control puck — sits above the transformed content, beneath the
-          main HUD overlays (which use zIndex 5). Stops propagation so its
-          buttons don't double as a pan handle. */}
-      <div
-        onMouseDown={(e) => e.stopPropagation()}
-        style={{
-          position: 'absolute',
-          right: 24,
-          bottom: 24,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 4,
-          padding: 4,
-          background: '#0a0d12cc',
-          border: '1px solid #ffffff20',
-          borderRadius: SW_RADIUS.sm,
-          backdropFilter: 'blur(6px)',
-          zIndex: 4,
-        }}
-      >
-        <PzButton onClick={() => zoomBy(1.25)} title="Zoom in">+</PzButton>
-        <div
-          style={{
-            minWidth: 44,
-            textAlign: 'center',
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 800,
-            color: alpha(SW_COLORS.ink, 0.8),
-            letterSpacing: '0.1em',
-          }}
-        >
-          {Math.round(tf.s * 100)}%
-        </div>
-        <PzButton onClick={() => zoomBy(1 / 1.25)} title="Zoom out">−</PzButton>
-        <div style={{ width: 1, height: 18, background: '#ffffff20', margin: '0 2px' }} />
-        <PzButton onClick={() => setTf({ x: 0, y: 0, s: 1 })} title="Reset view">⟲</PzButton>
-      </div>
-    </div>
-  );
-}
-
-function PzButton({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title?: string }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        width: 24,
-        height: 24,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'transparent',
-        border: '1px solid #ffffff15',
-        borderRadius: 4,
-        color: '#fff',
-        fontFamily: SW_FONTS.mono,
-        fontSize: 13,
-        fontWeight: 900,
-        cursor: 'pointer',
-        padding: 0,
-        lineHeight: 1,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function SimLegend({ view }: { view: SimView }) {
-  const [open, setOpen] = useState(false);
-  const entries = legendEntriesForView(view);
-  const viewLabel =
-    view === 'iso' ? 'ISO 3D'
-      : view === 'top' ? 'TOP 2D'
-        : view === 'heat' ? 'HEAT'
-          : view === 'logic' ? 'LOGIC'
-            : 'PML';
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        left: 24,
-        bottom: 24,
-        width: open ? 320 : 'auto',
-        maxHeight: 'calc(100% - 48px)',
-        background: '#0a0d12e8',
-        border: '1px solid #ffffff20',
-        borderRadius: SW_RADIUS.sm,
-        boxShadow: '0 10px 40px rgba(0,0,0,0.45)',
-        backdropFilter: 'blur(6px)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        zIndex: 5,
-      }}
-    >
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '8px 12px',
-          background: 'transparent',
-          border: 'none',
-          borderBottom: open ? '1px solid #ffffff15' : 'none',
-          color: '#fff',
-          fontFamily: SW_FONTS.mono,
-          fontSize: 10,
-          fontWeight: 900,
-          letterSpacing: '0.2em',
-          cursor: 'pointer',
-          textAlign: 'left',
-        }}
-        title={open ? 'Collapse legend' : 'Expand legend'}
-      >
-        <span style={{ color: SW_COLORS.brand }}>▣</span>
-        <span>LEGEND · {viewLabel}</span>
-        <span style={{ flex: 1 }} />
-        <span style={{ color: '#ffffff80', fontSize: 11 }}>{open ? '▾' : '▸'}</span>
-      </button>
-      {open && (
-        <div
-          style={{
-            padding: '8px 12px 12px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            overflow: 'auto',
-          }}
-        >
-          {entries.map((e, i) => (
-            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-              <div
-                style={{
-                  width: 36,
-                  height: 28,
-                  flexShrink: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                {e.glyph}
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div
-                  style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 11,
-                    fontWeight: 800,
-                    color: '#fff',
-                    letterSpacing: '0.04em',
-                  }}
-                >
-                  {e.label}
-                </div>
-                <div
-                  style={{
-                    fontFamily: SW_FONTS.body,
-                    fontSize: 10.5,
-                    color: '#ffffff90',
-                    lineHeight: 1.35,
-                    marginTop: 2,
-                  }}
-                >
-                  {e.hint}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <ZoomHud zoom={cam.z} onZoomStep={api.zoomStep} onFit={() => onCam(() => CAM_IDENTITY)} />
     </div>
   );
 }
