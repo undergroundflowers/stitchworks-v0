@@ -168,6 +168,9 @@ export interface TwinState {
      *  for Bundle source). Ignored when the catalogId doesn't resolve to a
      *  PML primitive. */
     blockParams?: Partial<PmlBlockParams>;
+    /** Freeform PROCESS-canvas position, when the block was dropped there.
+     *  Set at creation so a drop is a single undo step. */
+    processPos?: Vec2;
   }) => string;
   updateWorkstation: (id: string, patch: Partial<Omit<Workstation, 'id'>>) => void;
   removeWorkstation: (id: string) => void;
@@ -594,6 +597,7 @@ export const useTwin = create<TwinState>()(
           rotation: input.rotation,
           name: resolvedName,
           blockParams: input.blockParams,
+          processPos: input.processPos,
         });
         set((s) =>
           updateActive(s, (twin) => ({

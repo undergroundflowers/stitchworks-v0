@@ -32,6 +32,7 @@ import {
 } from './iso';
 import {
   pmlKindFromFixtureId,
+  inferBlockKindFromCatalog,
   type PmlBlockOverride,
   type PmlBlockParams,
 } from './pml';
@@ -833,6 +834,10 @@ export function makeWorkstation(input: {
   rotation?: Rotation;
   name?: string;
   blockParams?: Partial<PmlBlockParams>;
+  /** Freeform position on the PROCESS canvas. Set at creation when the block
+   *  was dropped there, so placing a block costs ONE undo step rather than an
+   *  add followed by a separate position write. */
+  processPos?: Vec2;
 }): Workstation {
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === input.catalogId);
   const fallbackName = fixture?.label ?? input.catalogId;
@@ -854,6 +859,11 @@ export function makeWorkstation(input: {
   // SelectOutput on first drop — no Inspector round-trip needed.
   const pmlKind = pmlKindFromFixtureId(input.catalogId);
 
+  // A processPos needs a block override to live on. When the fixture is not a
+  // PML primitive, pin the catalog-inferred kind — the same thing
+  // `setProcessPositions` does when it materialises an override.
+  const blockKind = pmlKind ?? (input.processPos ? inferBlockKindFromCatalog(input.catalogId) : null);
+
   return {
     id: newWorkstationId(),
     ...(input.lineId ? { lineId: input.lineId } : {}),
@@ -870,10 +880,11 @@ export function makeWorkstation(input: {
       machineId: isMachine ? input.catalogId : null,
     },
     kpiTargets: {},
-    block: pmlKind
+    block: blockKind
       ? {
-          kind: pmlKind,
+          kind: blockKind,
           ...(input.blockParams ? { params: { ...input.blockParams } } : {}),
+          ...(input.processPos ? { processPos: { ...input.processPos } } : {}),
         }
       : undefined,
   };

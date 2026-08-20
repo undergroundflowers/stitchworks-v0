@@ -33,12 +33,9 @@ export const PROCESS_BLOCK_H = 56;
 // block (and short, legible wires between them).
 export const PROCESS_GAP_X = 104; // horizontal gap between columns → 160px step
 export const PROCESS_ROW_GAP = 64; // vertical gap between rows → 120px step (holds the label)
-export const PROCESS_LANE_GAP = 28; // gap between department lanes
-export const PROCESS_LANE_PAD_TOP = 28; // label strip height inside a lane
-export const PROCESS_LANE_PAD_BOTTOM = 24;
-export const PROCESS_LANE_LABEL_W = 140;
-export const PROCESS_PAD_X = 24 + PROCESS_LANE_LABEL_W;
-export const PROCESS_PAD_TOP = 64;
+export const PROCESS_GROUP_GAP = 52; // vertical gap between line groups
+export const PROCESS_PAD_X = 24;
+export const PROCESS_PAD_TOP = 24;
 
 /** Columns per row before the sequence wraps. Keeps a long tandem line as a
  *  readable grid instead of an endless horizontal strip. */
@@ -46,27 +43,6 @@ export const PROCESS_ROW_MAX = 16;
 
 const COL_W = PROCESS_BLOCK_W + PROCESS_GAP_X;
 const ROW_H = PROCESS_BLOCK_H + PROCESS_ROW_GAP;
-
-export interface ProcessLane {
-  /** Real sewing-line id, or the synthetic keys `'__unassigned__'` /
-   *  `'__pool__'`. Lanes are per-line: the floor is free space, so a line is
-   *  the only real grouping a block can belong to. */
-  lineId: string | null;
-  synthetic: boolean;
-  /** Top Y of the lane band, in SVG px. */
-  y: number;
-  /** Band height, in SVG px (grows with the number of wrapped rows). */
-  height: number;
-  /** Workstation ids placed in this lane (flow order). */
-  wsIds: string[];
-}
-
-export interface ProcessSeedLayout {
-  /** Top-left (x,y) in SVG px for every workstation. */
-  positions: Map<string, { x: number; y: number }>;
-  /** Lane bands, top→bottom — for backdrop rendering + drop-target hit tests. */
-  lanes: ProcessLane[];
-}
 
 /**
  * Topological order of `ids` over the flow-connector graph, tie-broken by
@@ -131,17 +107,19 @@ function placeSerpentine(
   return rows;
 }
 
-const laneHeight = (rows: number) =>
-  PROCESS_LANE_PAD_TOP + Math.max(1, rows) * ROW_H + PROCESS_LANE_PAD_BOTTOM;
+const groupHeight = (rows: number) => Math.max(1, rows) * ROW_H + PROCESS_GROUP_GAP;
 
 /**
- * Compute the full seed layout: one lane per department (reading order), flow
- * blocks sequenced + serpentine-wrapped, then orphan blocks, then a final
- * ResourcePool lane.
+ * Seed position for every block: lines in floor order, each flow-sequenced and
+ * serpentine-wrapped, then unlined blocks, then resource pools.
+ *
+ * The drawn lane bands are gone — they were computed from this seed and never
+ * from where blocks actually sat, so the moment anyone dragged a block they
+ * stopped describing anything. The *grouping* survives as bands of rows, which
+ * is what made the diagram readable; only the rectangles went.
  */
-export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
+export function computeProcessSeedPositions(twin: Twin): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
-  const lanes: ProcessLane[] = [];
 
   const posX = new Map<string, number>();
   const isPool = new Map<string, boolean>();
@@ -190,14 +168,8 @@ export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
       .filter((w) => w.lineId === l.id && !isPool.get(w.id))
       .map((w) => w.id);
     if (ids.length === 0) return;
-    const rows = placeSerpentine(
-      flowOrder(ids, posX, succ, indeg),
-      cursorY + PROCESS_LANE_PAD_TOP,
-      positions,
-    );
-    const height = laneHeight(rows);
-    lanes.push({ lineId: l.id, synthetic: false, y: cursorY, height, wsIds: ids });
-    cursorY += height + PROCESS_LANE_GAP;
+    const rows = placeSerpentine(flowOrder(ids, posX, succ, indeg), cursorY, positions);
+    cursorY += groupHeight(rows);
   });
 
   // Blocks that belong to no line — expected now, not defensive: the floor is
@@ -207,29 +179,49 @@ export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
     .filter((w) => !isPool.get(w.id) && !(w.lineId && lineIds.has(w.lineId)))
     .map((w) => w.id);
   if (orphan.length > 0) {
-    const rows = placeSerpentine(
-      flowOrder(orphan, posX, succ, indeg),
-      cursorY + PROCESS_LANE_PAD_TOP,
-      positions,
-    );
-    const height = laneHeight(rows);
-    lanes.push({ lineId: '__unassigned__', synthetic: true, y: cursorY, height, wsIds: orphan });
-    cursorY += height + PROCESS_LANE_GAP;
+    const rows = placeSerpentine(flowOrder(orphan, posX, succ, indeg), cursorY, positions);
+    cursorY += groupHeight(rows);
   }
 
   // Resource-pool lane — index order (no flow), serpentine-wrapped.
   const pools = twin.workstations.filter((w) => isPool.get(w.id)).map((w) => w.id);
   if (pools.length > 0) {
-    const rows = placeSerpentine(pools, cursorY + PROCESS_LANE_PAD_TOP, positions);
-    const height = laneHeight(rows);
-    lanes.push({ lineId: '__pool__', synthetic: true, y: cursorY, height, wsIds: pools });
-    cursorY += height + PROCESS_LANE_GAP;
+    const rows = placeSerpentine(pools, cursorY, positions);
+    cursorY += groupHeight(rows);
   }
 
-  return { positions, lanes };
+  return positions;
 }
 
-/** Convenience wrapper returning just the position map. */
-export function seedProcessLayout(twin: Twin): Map<string, { x: number; y: number }> {
-  return computeProcessSeedLayout(twin).positions;
+/**
+ * Where every block actually sits: its authored `processPos` when it has one,
+ * otherwise its seed. The single source of truth for the editor, for
+ * fit-to-content, and for anything else that needs to know where a block is.
+ */
+export function resolveProcessPositions(twin: Twin): Map<string, { x: number; y: number }> {
+  const seed = computeProcessSeedPositions(twin);
+  const out = new Map<string, { x: number; y: number }>();
+  for (const ws of twin.workstations) {
+    const authored = ws.block?.processPos;
+    out.set(ws.id, authored ?? seed.get(ws.id) ?? { x: PROCESS_PAD_X, y: PROCESS_PAD_TOP });
+  }
+  return out;
+}
+
+/** Bounding box of every block on the process canvas, in SVG px. Null when the
+ *  twin has no blocks — the caller decides what to frame instead. */
+export function processContentBounds(
+  twin: Twin,
+): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  const pos = resolveProcessPositions(twin);
+  if (pos.size === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pos.values()) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + PROCESS_BLOCK_W);
+    // Blocks carry a name label beneath the symbol; leave room for it.
+    maxY = Math.max(maxY, p.y + PROCESS_BLOCK_H + 22);
+  }
+  return { minX, minY, maxX, maxY };
 }

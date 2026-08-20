@@ -95,7 +95,15 @@ import {
 import { classify } from '../simulation/queueing';
 import { defaultDist } from '../simulation/distributions';
 import { runPmlOnTwin } from '../simulation/pml-runner';
-import { computeProcessSeedLayout } from '../domain/processLayout';
+import {
+  resolveProcessPositions,
+  processContentBounds,
+  computeProcessSeedPositions,
+  PROCESS_BLOCK_W,
+  PROCESS_BLOCK_H,
+  PROCESS_PAD_X,
+  PROCESS_PAD_TOP,
+} from '../domain/processLayout';
 
 // ============================================================================
 // CONSTANTS
@@ -600,6 +608,21 @@ export function BuilderPage() {
     return { x: -c.sx, y: -c.sy };
   });
   const [zoom, setZoom] = useState(1);
+  /**
+   * The PROCESS view's own camera, independent of the floor's `pan`/`zoom`.
+   *
+   * The two are unrelated coordinate spaces — the floor's pan is in projected
+   * iso/flat pixels and gets re-centred through `centerPan(projection)`, while
+   * the process canvas is a flat diagram of blocks. Sharing one camera meant
+   * `resetView` fed the process view a large negative floor pan, which under
+   * its old scroll-box model parked the whole diagram somewhere you could not
+   * scroll back to.
+   *
+   * Page-level rather than inside BuilderProcessView because the zoom HUD and
+   * the +/-/Cmd-0 keys are page-level, and because the process view unmounts
+   * on every canvas-mode flip. Framing survives a round trip to 2D and back.
+   */
+  const [processCam, setProcessCam] = useState({ x: 0, y: 0, z: 1 });
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
   const [spacePan, setSpacePan] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -659,6 +682,12 @@ export function BuilderPage() {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef(pan);
   panRef.current = pan;
+  const processCamRef = useRef(processCam);
+  processCamRef.current = processCam;
+  // Read by listeners that must behave differently per view without being
+  // re-bound (the non-passive wheel listener in particular).
+  const canvasModeRef = useRef(canvasMode);
+  canvasModeRef.current = canvasMode;
   const spacePanRef = useRef(false);
   spacePanRef.current = spacePan;
   // Hover cell mirror — paste reads the latest cursor cell without re-binding
@@ -708,10 +737,25 @@ export function BuilderPage() {
     return { x: -c.sx, y: -c.sy };
   }, []);
 
+  /** Frame every block on the process canvas. Content centre goes to the
+   *  viewBox origin, which IS the stage centre under the centred viewBox. */
+  const fitProcessCam = useCallback(() => {
+    const b = processContentBounds(twinRef.current);
+    if (!b) return { x: 0, y: 0, z: 1 };
+    const bw = b.maxX - b.minX + 80;
+    const bh = b.maxY - b.minY + 80;
+    const z = clampZoom(Math.min(stageSize.w / bw, stageSize.h / bh, 1));
+    return { x: -((b.minX + bw / 2 - 40) * z), y: -((b.minY + bh / 2 - 40) * z), z };
+  }, [stageSize.w, stageSize.h]);
+
   const resetView = useCallback(() => {
+    if (canvasModeRef.current === 'process') {
+      setProcessCam(fitProcessCam());
+      return;
+    }
     setPan(centerPan(proj));
     setZoom(1);
-  }, [proj, centerPan]);
+  }, [proj, centerPan, fitProcessCam]);
 
   /** Zoom toward a screen point (relative to canvas top-left). Keeps the
    *  point under the cursor anchored as zoom changes. */
@@ -730,6 +774,19 @@ export function BuilderPage() {
       y: dy - ((dy - p.y) / z) * newZ,
     });
   }, []);
+
+  /** Zoom about the stage centre. In both cameras the centre is the origin of
+   *  the offset space, so no pan compensation is needed — which is exactly why
+   *  the old HUD buttons drifted: they changed zoom and left pan alone in a
+   *  space where the anchor was the top-left corner. */
+  const zoomStep = useCallback((factor: number) => {
+    if (canvasModeRef.current === 'process') {
+      setProcessCam((c) => ({ ...c, z: clampZoom(c.z * factor) }));
+      return;
+    }
+    const r = stageRef.current?.getBoundingClientRect();
+    zoomAt(r ? r.width / 2 : 0, r ? r.height / 2 : 0, factor);
+  }, [zoomAt]);
 
   /**
    * Switch the canvas view. 2D ↔ ISO runs the projection-blend morph — the
@@ -751,8 +808,10 @@ export function BuilderPage() {
     }
     setCanvasMode(m);
     if (m === 'process') {
-      setPan({ x: 0, y: 0 });
-      setZoom(1);
+      // Deliberately does NOT touch the process camera — losing your framing
+      // on every 2D → PROCESS → 2D round trip is exactly the friction this
+      // pass is removing. The floor camera is left alone too; it is a
+      // separate space and will be waiting when you switch back.
       setIsoBlend(0);
       return;
     }
@@ -810,6 +869,10 @@ export function BuilderPage() {
   const onCanvasMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!stageRef.current) return;
+      // hoverCell is an iso/flat FLOOR cell. In PROCESS the cursor is over an
+      // unrelated pixel space, and tracking it there is what made Cmd-V paste
+      // at a bogus cell while the process view was open.
+      if (canvasMode === 'process') return;
       const rect = stageRef.current.getBoundingClientRect();
       // Stage pixel offset from element centre, undone by the wrapper's
       // CSS transform (`translate(pan) scale(zoom)`). Because the SVG's
@@ -823,10 +886,13 @@ export function BuilderPage() {
       const w = proj.unproject(sx, sy);
       setHoverCell({ x: Math.floor(w.x), y: Math.floor(w.y) });
     },
-    [pan, zoom, proj],
+    [pan, zoom, proj, canvasMode],
   );
 
   const onCanvasClick = useCallback(() => {
+    // PROCESS places blocks at the cursor in its own space — see dropAtCursor
+    // in BuilderProcessView. This handler would drop them on the floor grid.
+    if (canvasMode === 'process') return;
     if (!hoverCell) return;
     if (drop.kind === 'ws') {
       // Stations drop wherever the user clicked. The floor is free space —
@@ -850,13 +916,17 @@ export function BuilderPage() {
     // No tool: clicking empty canvas clears selection.
     setSelected(null);
     setExtraSelectedWs(new Set());
-  }, [hoverCell, drop, tool, addWorkstation]);
+  }, [hoverCell, drop, tool, addWorkstation, canvasMode]);
 
   const beginPanFromPoint = useCallback((startX: number, startY: number) => {
-    const p0 = { ...panRef.current };
+    const isProcess = canvasModeRef.current === 'process';
+    const p0 = isProcess ? { ...processCamRef.current } : { ...panRef.current };
     setIsPanning(true);
     function move(ev: MouseEvent) {
-      setPan({ x: p0.x + (ev.clientX - startX), y: p0.y + (ev.clientY - startY) });
+      const nx = p0.x + (ev.clientX - startX);
+      const ny = p0.y + (ev.clientY - startY);
+      if (isProcess) setProcessCam((c) => ({ ...c, x: nx, y: ny }));
+      else setPan({ x: nx, y: ny });
     }
     function up() {
       setIsPanning(false);
@@ -952,12 +1022,19 @@ export function BuilderPage() {
   );
 
   const onPanStart = (e: React.MouseEvent) => {
-    if (drop.kind !== 'none') return;
+    // An armed drop still pans on the process canvas: the block is placed on
+    // click (mouseup without movement), so dragging the background is
+    // unambiguous. On the floor the click-to-place path owns the gesture.
+    if (drop.kind !== 'none' && canvasMode !== 'process') return;
     if (e.button !== 0) return;
     if (spacePan) return; // capture-phase listener handles space-pan
     const t = e.target as Element;
     // Only react to background drags — let entity clicks bubble.
     if (t.tagName !== 'svg' && !(t as SVGElement).getAttribute?.('data-canvas-bg')) return;
+    if (canvasMode === 'process') {
+      beginPanFromPoint(e.clientX, e.clientY);
+      return;
+    }
     if (tool === 'select') {
       e.preventDefault();
       beginSelectRect(e.clientX, e.clientY, e.shiftKey);
@@ -976,6 +1053,10 @@ export function BuilderPage() {
     const el = stageRef.current;
     if (!el) return;
     function onWheel(ev: WheelEvent) {
+      // The process view attaches its own non-passive wheel listener. Bail
+      // BEFORE preventDefault so both do not act on the same event — that
+      // double-handling multiplied the zoom factor twice per notch.
+      if (canvasModeRef.current === 'process') return;
       ev.preventDefault();
       const isPinch = ev.ctrlKey || ev.metaKey;
       const isMouseWheel =
@@ -1197,12 +1278,12 @@ export function BuilderPage() {
       }
       if (!inField && (e.key === '+' || e.key === '=')) {
         e.preventDefault();
-        setZoom((z) => clampZoom(z * 1.15));
+        zoomStep(1.15);
         return;
       }
       if (!inField && (e.key === '-' || e.key === '_')) {
         e.preventDefault();
-        setZoom((z) => clampZoom(z / 1.15));
+        zoomStep(1 / 1.15);
         return;
       }
       // [ / ] — collapse or restore the side panels (Figma convention), so the
@@ -1316,7 +1397,7 @@ export function BuilderPage() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, duplicateWorkstation, resetView, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
+  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, duplicateWorkstation, resetView, zoomStep, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
 
   // ── Save / Save As ─────────────────────────────────────────────────────────
   // Two flows:
@@ -2113,10 +2194,10 @@ export function BuilderPage() {
             removeConnector={removeConnector}
             setProcessPositions={setProcessPositions}
             connect={connect}
-            zoom={zoom}
-            pan={pan}
-            onPan={setPan}
-            onZoom={setZoom}
+            cam={processCam}
+            onCam={setProcessCam}
+            stageSize={stageSize}
+            onFitRequest={() => setProcessCam(fitProcessCam())}
             onPickFromPort={(wsId, portId) =>
               setConnect((c) => ({ ...c, fromWsId: wsId, fromPort: portId }))
             }
@@ -2179,7 +2260,7 @@ export function BuilderPage() {
             zIndex: 5,
           }}
         >
-          <ZoomHudBtn onClick={() => setZoom((z) => clampZoom(z / 1.15))} title="Zoom out  (−)">
+          <ZoomHudBtn onClick={() => zoomStep(1 / 1.15)} title="Zoom out  (−)">
             −
           </ZoomHudBtn>
           <button
@@ -2196,9 +2277,9 @@ export function BuilderPage() {
               cursor: 'pointer',
             }}
           >
-            {Math.round(zoom * 100)}%
+            {Math.round((canvasMode === 'process' ? processCam.z : zoom) * 100)}%
           </button>
-          <ZoomHudBtn onClick={() => setZoom((z) => clampZoom(z * 1.15))} title="Zoom in  (+)">
+          <ZoomHudBtn onClick={() => zoomStep(1.15)} title="Zoom in  (+)">
             +
           </ZoomHudBtn>
           <div style={{ width: 1, alignSelf: 'stretch', background: SW_COLORS.lineSoft, margin: '3px 2px' }} />
@@ -4382,6 +4463,7 @@ interface BuilderProcessViewProps {
     position: { x: number; y: number };
     presetLabel?: string;
     blockParams?: Record<string, unknown>;
+    processPos?: { x: number; y: number };
   }) => string;
   moveWorkstation: (id: string, position: { x: number; y: number }) => void;
   updateWorkstation: (id: string, patch: Partial<Workstation>) => void;
@@ -4406,12 +4488,21 @@ interface BuilderProcessViewProps {
    *  the source is already chosen. Implementations should call
    *  addConnector and then advance the connect chain. */
   onPickToPort: (wsId: string, portId: string) => void;
-  /** Shared zoom/pan state — the same store that drives the iso canvas,
-   *  so the bottom-right ⊖/⊕/⤒ controls work identically across modes. */
-  zoom: number;
-  pan: { x: number; y: number };
-  onPan: (p: { x: number; y: number } | ((prev: { x: number; y: number }) => { x: number; y: number })) => void;
-  onZoom: (z: number | ((prev: number) => number)) => void;
+  /** This view's own camera. Separate from the floor's pan/zoom because the
+   *  two are unrelated coordinate spaces — see `processCam` on the page. */
+  cam: ProcessCam;
+  onCam: (next: ProcessCam | ((prev: ProcessCam) => ProcessCam)) => void;
+  /** Live stage size in CSS px; drives the centred viewBox. */
+  stageSize: { w: number; h: number };
+  /** Ask the page to frame all content (same path as Cmd-0 / ⛶). */
+  onFitRequest: () => void;
+}
+
+/** Pan (screen px, offset from stage centre) + zoom for the process canvas. */
+interface ProcessCam {
+  x: number;
+  y: number;
+  z: number;
 }
 
 /** Layout result for a single workstation block. */
@@ -4481,20 +4572,16 @@ function BuilderProcessView({
   connect,
   onPickFromPort,
   onPickToPort,
-  zoom,
-  pan,
-  onPan,
-  onZoom,
+  cam,
+  onCam,
+  stageSize,
+  onFitRequest,
 }: BuilderProcessViewProps) {
   // Minimal AnyLogic-style nodes: a small category-coloured symbol square with
   // the station name beneath it. BLOCK_W/H is the symbol footprint that the
   // ports attach to; the wider column/row spacing lives in the seed layout.
-  const BLOCK_W = 56;
-  const BLOCK_H = 56;
-  const LANE_PAD_TOP = 28;
-  const LANE_LABEL_W = 140;
-  const PAD_X = 24 + LANE_LABEL_W;
-  const PAD_TOP = 64;
+  const BLOCK_W = PROCESS_BLOCK_W;
+  const BLOCK_H = PROCESS_BLOCK_H;
 
   // ── Interaction state ─────────────────────────────────────────────────
   // Declared up-front because the layout/extent pass below reads the live
@@ -4514,19 +4601,19 @@ function BuilderProcessView({
     setHoverPort(v);
   };
   const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
+  // Two-stage arm for AUTO-ARRANGE (see the button).
+  const [arrangeArmed, setArrangeArmed] = useState(false);
+  const arrangeTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (arrangeTimer.current) window.clearTimeout(arrangeTimer.current); }, []);
 
-  // Department-swim-lane seed: flow blocks sequenced along the connector graph
-  // and serpentine-wrapped into rows, so a long tandem line reads as a compact
-  // grid instead of an endless strip. Recomputed only when the twin changes.
-  const seed = useMemo(() => computeProcessSeedLayout(twin), [twin]);
+  // Authored `processPos` when the block has one, otherwise the flow-ordered
+  // serpentine seed. One resolver, shared with fit-to-content on the page.
+  const resolved = useMemo(() => resolveProcessPositions(twin), [twin]);
 
-  // Resolve every workstation to a node. Position priority:
-  //   authored block.processPos  →  swim-lane seed  →  origin.
   const positions = new Map<string, ProcessNode>();
   twin.workstations.forEach((ws) => {
     const block = getBlockSpec(ws);
-    const sp = seed.positions.get(ws.id) ?? { x: PAD_X, y: PAD_TOP };
-    const p = ws.block?.processPos ?? sp;
+    const p = resolved.get(ws.id) ?? { x: PROCESS_PAD_X, y: PROCESS_PAD_TOP };
     positions.set(ws.id, {
       ws,
       block,
@@ -4545,19 +4632,6 @@ function BuilderProcessView({
     if (wsId === dragWsId && dragNodePos) return dragNodePos;
     return { x: n.x, y: n.y };
   };
-
-  // Canvas extent — fit the lane backdrop AND any freely-placed blocks so the
-  // scroll area always reaches the furthest node (+ margins).
-  let extentX = 1280;
-  let extentY = 640;
-  for (const ln of seed.lanes) extentY = Math.max(extentY, ln.y + ln.height + 48);
-  positions.forEach((n) => {
-    const live = n.ws.id === dragWsId && dragNodePos ? dragNodePos : n;
-    extentX = Math.max(extentX, live.x + n.w + 220);
-    extentY = Math.max(extentY, live.y + n.h + 120);
-  });
-  const W = extentX;
-  const H = extentY;
 
   // Pre-resolve connector wire endpoints. Honour the connector's named
   // `fromPort` / `toPort` when set; otherwise default to the source's
@@ -4592,76 +4666,55 @@ function BuilderProcessView({
   const ZOOM_MAX = 3;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 
-  // Drag-to-pan: capture the starting pan + pointer, then translate as the
-  // mouse moves. We only start a pan when the user mouse-downs on empty
-  // diagram space (not on a block or port), so block selection still works.
-  const onBackgroundMouseDown = (e: React.MouseEvent) => {
-    if (e.target !== e.currentTarget) return;
-    e.preventDefault();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const p0 = pan;
-    const move = (ev: MouseEvent) => {
-      onPan({ x: p0.x + (ev.clientX - startX), y: p0.y + (ev.clientY - startY) });
-    };
-    const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  };
+  // Wheel. Non-passive and native, matching the floor canvas: trackpad pinch
+  // (ctrlKey) or a mouse wheel zooms toward the cursor; a plain two-finger
+  // swipe pans. The swipe branch is not optional — dropping the old
+  // scroll-box container took the native scrollbars with it, and this is now
+  // the only way to trackpad-pan.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    function onWheel(ev: WheelEvent) {
+      ev.preventDefault();
+      const isPinch = ev.ctrlKey || ev.metaKey;
+      const isMouseWheel = ev.deltaMode !== 0 || (ev.deltaX === 0 && Math.abs(ev.deltaY) >= 50);
+      if (isPinch || isMouseWheel) {
+        const rect = el!.getBoundingClientRect();
+        // Offset from the stage centre — the origin of the centred viewBox.
+        const dx = ev.clientX - rect.left - rect.width / 2;
+        const dy = ev.clientY - rect.top - rect.height / 2;
+        const k = ev.ctrlKey ? 0.012 : 0.0015;
+        const factor = Math.exp(-ev.deltaY * k);
+        onCam((c) => {
+          const nz = clampZoom(c.z * factor);
+          if (nz === c.z) return c;
+          return {
+            x: dx - ((dx - c.x) / c.z) * nz,
+            y: dy - ((dy - c.y) / c.z) * nz,
+            z: nz,
+          };
+        });
+        return;
+      }
+      onCam((c) => ({ ...c, x: c.x - ev.deltaX, y: c.y - ev.deltaY }));
+    }
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [onCam]);
 
-  // Wheel: ctrl/meta-wheel zooms around the cursor; plain wheel falls through
-  // to the container's native overflow scroll so the user can still trackpad-pan.
-  const onWheel = (e: React.WheelEvent) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    onZoom((z) => clampZoom(z * factor));
-  };
-
-  // ── Drop-to-place (PROCESS) ─────────────────────────────────────────────
-  // Clicking inside a department lane while a ws drop tool is armed adds a
-  // new workstation to that dept. Iso position is placed inside the dept's
-  // iso bounds so the ISO view also reflects the new station. The PROCESS
-  // lane re-sorts by ws.position.x, so we push the new station to the
-  // right end by using `bounds.x + bounds.w - 1` (clamped to >= bounds.x).
-  // Drop a station into a lane. Lanes are per-line now, so the drop simply
-  // tags the new station with that line and parks it to the right of the
-  // line's existing members; there is no zone rect to clamp inside.
-  const handleDropWsInLane = (lineId: string) => {
-    if (drop.kind !== 'ws') return false;
-    const occupied = twin.workstations.filter((w) => w.lineId === lineId);
-    const nextX = occupied.length > 0
-      ? Math.max(...occupied.map((w) => w.position.x)) + 1
-      : 0;
-    const nextY = occupied.length > 0
-      ? Math.min(...occupied.map((w) => w.position.y))
-      : 0;
-    const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
-    const id = addWorkstation({
-      lineId,
-      catalogId: drop.catalogId,
-      position: { x: nextX, y: nextY },
-      presetLabel: preset?.label,
-      blockParams: preset?.defaultParams,
-    });
-    onSelect({ kind: 'ws', id });
-    setDrop({ kind: 'none' });
-    return true;
-  };
-
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const svgRef = useRef<SVGGElement | null>(null);
+  /** Screen point → process-world px. The ref is on the INNER <g>, which
+   *  carries the pan/zoom transform, so this needs no extra maths and block
+   *  drag, the wire rubber-band and cursor drop are all correct by
+   *  construction. */
   const screenToSvg = (clientX: number, clientY: number) => {
     const el = svgRef.current;
     if (!el) return { x: 0, y: 0 };
     const ctm = el.getScreenCTM();
     if (!ctm) return { x: 0, y: 0 };
     const inv = ctm.inverse();
-    const pt = el.createSVGPoint();
-    pt.x = clientX;
-    pt.y = clientY;
+    const pt = new DOMPoint(clientX, clientY);
     return pt.matrixTransform(inv);
   };
 
@@ -4670,7 +4723,94 @@ function BuilderProcessView({
   // once on drop (snapped to an 8px grid) as `block.processPos`. No
   // department reassignment — physical/org membership is edited in the 2D /
   // ISO views; this canvas is purely the logical-graph layout.
-  const snap8 = (v: number) => Math.max(0, Math.round(v / 8) * 8);
+  // Frame the diagram on first mount. Without this the camera starts at
+  // {0,0,1}, which under a centred viewBox puts the content's top-left at the
+  // stage centre — i.e. most of the diagram off-screen to the bottom-right.
+  const didFit = useRef(false);
+  useEffect(() => {
+    if (didFit.current) return;
+    if (twin.workstations.length === 0) return;
+    if (stageSize.w <= 0 || stageSize.h <= 0) return;
+    didFit.current = true;
+    onFitRequest();
+  }, [twin.workstations.length, stageSize.w, stageSize.h, onFitRequest]);
+
+  // Grid, regenerated each frame for whatever the camera can currently see.
+  // That is what makes the canvas unbounded: there is no sheet with edges,
+  // just lines drawn where you happen to be looking — including at negative
+  // coordinates, which the old positive-quadrant sheet could not reach.
+  const gridLines = (() => {
+    const step = 24;
+    const halfW = stageSize.w / 2;
+    const halfH = stageSize.h / 2;
+    const x0 = (-halfW - cam.x) / cam.z;
+    const x1 = (halfW - cam.x) / cam.z;
+    const y0 = (-halfH - cam.y) / cam.z;
+    const y1 = (halfH - cam.y) / cam.z;
+    // Coarsen rather than emit thousands of nodes when zoomed far out.
+    const span = Math.max((x1 - x0) / step, (y1 - y0) / step);
+    const s2 = span > 400 ? step * 4 : step;
+    const gx0 = Math.floor(x0 / s2) * s2;
+    const gy0 = Math.floor(y0 / s2) * s2;
+    const out: ReactNode[] = [];
+    for (let x = gx0; x <= x1; x += s2) {
+      out.push(
+        <line key={`gx${x}`} x1={x} y1={y0} x2={x} y2={y1} stroke={alpha(SW_COLORS.paperEdge, 0.5)} strokeWidth={1 / cam.z} />,
+      );
+    }
+    for (let y = gy0; y <= y1; y += s2) {
+      out.push(
+        <line key={`gy${y}`} x1={x0} y1={y} x2={x1} y2={y} stroke={alpha(SW_COLORS.paperEdge, 0.5)} strokeWidth={1 / cam.z} />,
+      );
+    }
+    return out;
+  })();
+
+  // No non-negative clamp: the canvas extends in every direction, and
+  // clamping here was the second half of why you could not work to the left
+  // of where the seed happened to put things.
+  const snap8 = (v: number) => Math.round(v / 8) * 8;
+
+  /** Which line a newly-dropped block joins, now that there are no lanes to
+   *  drop into: inherit from the selected block ("I am extending this line"),
+   *  else the only line if there is exactly one, else none — an unlined block
+   *  is a normal thing to author on a free floor. */
+  const inferLineIdForNewBlock = (): string | undefined => {
+    if (selected?.kind === 'ws') {
+      const cur = twin.workstations.find((w) => w.id === selected.id);
+      if (cur?.lineId) return cur.lineId;
+    }
+    const lines = twin.lines ?? [];
+    return lines.length === 1 ? lines[0].id : undefined;
+  };
+
+  /** Place an armed palette block where the user clicked. */
+  const dropAtCursor = (clientX: number, clientY: number): boolean => {
+    if (drop.kind !== 'ws') return false;
+    const p = screenToSvg(clientX, clientY);
+    const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
+    const lineId = inferLineIdForNewBlock();
+    // The floor cell is still required — a block is a workstation and shows
+    // up in the 2D/ISO views too. Park it to the right of its line's existing
+    // members so stations do not pile up on the origin over there.
+    const members = twin.workstations.filter((w) => lineId && w.lineId === lineId);
+    const position = members.length > 0
+      ? { x: Math.max(...members.map((w) => w.position.x)) + 1, y: Math.min(...members.map((w) => w.position.y)) }
+      : { x: 0, y: 0 };
+    const id = addWorkstation({
+      ...(lineId ? { lineId } : {}),
+      catalogId: drop.catalogId,
+      position,
+      // Written at creation, not as a follow-up setProcessPositions call —
+      // otherwise a single drop costs two undo steps.
+      processPos: { x: snap8(p.x - BLOCK_W / 2), y: snap8(p.y - BLOCK_H / 2) },
+      presetLabel: preset?.label,
+      blockParams: preset?.defaultParams,
+    });
+    onSelect({ kind: 'ws', id });
+    setDrop({ kind: 'none' });
+    return true;
+  };
   const beginBlockDrag = (node: ProcessNode, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
@@ -4765,14 +4905,17 @@ function BuilderProcessView({
   return (
     <>
     <div
+      ref={wrapRef}
       style={{
         position: 'absolute',
         inset: 0,
-        overflow: 'auto',
+        // No `overflow: auto`. The canvas is not a sheet inside a scroll box
+        // any more — it is an unbounded camera over an inner <g>, and a scroll
+        // container would clamp panning to the positive quadrant again. The
+        // grid is drawn in SVG (see `gridLines`) rather than as a CSS
+        // background, so it tracks the camera instead of the element.
+        overflow: 'hidden',
         backgroundColor: SW_COLORS.paperDeep,
-        backgroundImage:
-          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
-        backgroundSize: '24px 24px',
         cursor:
           drop.kind !== 'none'
             ? 'crosshair'
@@ -4782,30 +4925,13 @@ function BuilderProcessView({
                 ? 'grabbing'
                 : 'grab',
       }}
-      onClick={(e) => {
-        if (e.target !== e.currentTarget) return;
-        onSelect(null);
-        setSelectedConnId(null);
-      }}
-      onMouseDown={onBackgroundMouseDown}
-      onWheel={onWheel}
     >
       <svg
-        ref={svgRef}
-        viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="xMinYMin meet"
-        width={W}
-        height={H}
-        style={{
-          display: 'block',
-          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-          transformOrigin: '0 0',
-        }}
-        onClick={(e) => {
-          if (e.target !== e.currentTarget) return;
-          onSelect(null);
-          setSelectedConnId(null);
-        }}
+        width="100%"
+        height="100%"
+        viewBox={`${-stageSize.w / 2} ${-stageSize.h / 2} ${stageSize.w} ${stageSize.h}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ display: 'block' }}
       >
         <defs>
           <marker
@@ -4821,112 +4947,25 @@ function BuilderProcessView({
           </marker>
         </defs>
 
-        {/* Title strip */}
-        <text
-          x={W / 2}
-          y={32}
-          textAnchor="middle"
-          fill={SW_COLORS.muted}
-          fontFamily={SW_FONTS.mono}
-          fontSize={12}
-          fontWeight={800}
-          letterSpacing="2px"
-        >
-          {twin.name.toUpperCase()} · PROCESS · PML BLOCKS WITH I/O PORTS
-        </text>
+        {/* Background plate. Carries `data-canvas-bg` so the page's single
+            background-drag handler treats it exactly like the floor canvas's,
+            and owns the click that clears selection or places an armed block. */}
+        <rect
+          data-canvas-bg="true"
+          x={-stageSize.w / 2}
+          y={-stageSize.h / 2}
+          width={stageSize.w}
+          height={stageSize.h}
+          fill="transparent"
+          onClick={(e) => {
+            if (dropAtCursor(e.clientX, e.clientY)) return;
+            onSelect(null);
+            setSelectedConnId(null);
+          }}
+        />
 
-        {/* Lane backdrops + labels, one band per department (plus orphan /
-            resource-pool lanes). Sized from the seed layout so wrapped lanes
-            keep their blocks inside the band. A lane fades when a *different*
-            station is the focus. */}
-        {(() => {
-          const focusActive = selected !== null;
-          const selectedWsLineId =
-            selected?.kind === 'ws'
-              ? twin.workstations.find((w) => w.id === selected.id)?.lineId ?? null
-              : null;
-          return seed.lanes.map((ln) => {
-            const line = ln.synthetic
-              ? null
-              : (twin.lines ?? []).find((l) => l.id === ln.lineId);
-            const isPool = ln.lineId === '__pool__';
-            const accent = line ? DEPT_COLOR_HEX[line.color] : SW_COLORS.muted;
-            const laneArmed = !!line && drop.kind === 'ws';
-            const laneFocused = line ? selectedWsLineId === line.id : false;
-            const laneOpacity = focusActive && !laneFocused ? FOCUS_DIM : 1;
-            const title = line
-              ? line.name.toUpperCase()
-              : isPool
-                ? 'RESOURCE POOLS'
-                : 'UNASSIGNED';
-            const sub = line
-              ? line.productionSystem
-              : isPool
-                ? 'referenced by Services'
-                : 'not on a line';
-            const countLabel = isPool
-              ? `${ln.wsIds.length} POOL${ln.wsIds.length === 1 ? '' : 'S'}`
-              : `${ln.wsIds.length} BLOCK${ln.wsIds.length === 1 ? '' : 'S'}`;
-            return (
-              <g
-                key={`lane-${ln.lineId ?? 'x'}`}
-                transform={`translate(0, ${ln.y})`}
-                style={{ opacity: laneOpacity, transition: 'opacity 160ms' }}
-              >
-                <rect
-                  x={LANE_LABEL_W}
-                  y={4}
-                  width={Math.max(40, W - LANE_LABEL_W - 16)}
-                  height={ln.height - 12}
-                  fill={laneArmed ? accent + '20' : accent + '0a'}
-                  stroke={laneArmed ? accent : accent + '40'}
-                  strokeDasharray={laneArmed ? '6 4' : '2 4'}
-                  strokeWidth={laneArmed ? 2 : 1}
-                  rx={4}
-                  style={{ cursor: laneArmed ? 'crosshair' : 'default' }}
-                  onClick={(e) => {
-                    if (drop.kind === 'ws' && line) {
-                      e.stopPropagation();
-                      handleDropWsInLane(line.id);
-                    }
-                  }}
-                />
-                <rect x={12} y={LANE_PAD_TOP} width={6} height={BLOCK_H} fill={accent} rx={2} />
-                <text
-                  x={26}
-                  y={LANE_PAD_TOP + 16}
-                  fontFamily={SW_FONTS.display}
-                  fontSize={11}
-                  fontWeight={900}
-                  fill={SW_COLORS.ink}
-                  letterSpacing="0.1em"
-                >
-                  {title}
-                </text>
-                <text
-                  x={26}
-                  y={LANE_PAD_TOP + 32}
-                  fontFamily={SW_FONTS.mono}
-                  fontSize={9}
-                  fontWeight={700}
-                  fill={SW_COLORS.muted}
-                >
-                  {countLabel}
-                </text>
-                <text
-                  x={26}
-                  y={LANE_PAD_TOP + 48}
-                  fontFamily={SW_FONTS.mono}
-                  fontSize={9}
-                  fontWeight={500}
-                  fill={SW_COLORS.muted}
-                >
-                  {sub}
-                </text>
-              </g>
-            );
-          });
-        })()}
+        <g ref={svgRef} transform={`translate(${cam.x} ${cam.y}) scale(${cam.z})`}>
+          {gridLines}
 
         {/* Connector wires (drawn before blocks so blocks sit on top).
             Wires stay full opacity when either endpoint is part of the focus,
@@ -5079,6 +5118,49 @@ function BuilderProcessView({
                   strokeWidth={3}
                 />
               )}
+              {/* Line tag. This is what replaced the dashed lane bands: the
+                  band showed membership but could not be interrogated per
+                  block, and it was drawn from the seed rather than from where
+                  blocks actually sat, so it went stale the moment anyone
+                  dragged one. No line → no tag; absence is the signal. */}
+              {n.line && (() => {
+                const accent = DEPT_COLOR_HEX[n.line.color];
+                // Line names read "Line 1 · T-shirt (knit)" — take the part
+                // before the separator so the tag is the line, not a truncated
+                // garment with a dangling middle dot.
+                const code = n.line.name
+                  .split('\u00b7')[0]
+                  .trim()
+                  .toUpperCase()
+                  .replace(/\s+/g, '')
+                  .slice(0, 6);
+                const tagW = Math.max(22, Math.min(64, code.length * 5.4 + 10));
+                return (
+                  <g pointerEvents="none">
+                    <title>{n.line.name}</title>
+                    <rect
+                      x={0}
+                      y={-15}
+                      width={tagW}
+                      height={12}
+                      rx={3}
+                      fill={alpha(accent, 0.18)}
+                      stroke={alpha(accent, 0.55)}
+                      strokeWidth={1}
+                    />
+                    <text
+                      x={5}
+                      y={-6}
+                      fontFamily={SW_FONTS.mono}
+                      fontSize={8}
+                      fontWeight={700}
+                      fill={accent}
+                    >
+                      {code}
+                    </text>
+                  </g>
+                );
+              })()}
               {/* Symbol — a solid, category-coloured square holding the PML
                   glyph (AnyLogic-style). Nothing else lives on the block face. */}
               <rect x={0} y={0} width={n.w} height={n.h} rx={12} fill={tint.stroke} />
@@ -5234,59 +5316,64 @@ function BuilderProcessView({
           );
         })}
 
-        {/* Empty state */}
-        {twin.workstations.length === 0 && (
-          <text
-            x={W / 2}
-            y={H / 2}
-            textAnchor="middle"
-            fontFamily={SW_FONTS.body}
-            fontSize={14}
-            fill={SW_COLORS.muted}
-          >
-            No workstations yet — pick a workstation from the palette and click a department lane.
-          </text>
-        )}
-
-        {/* Legend */}
-        <g transform={`translate(${W - 320}, ${H - 76})`}>
-          <rect width={300} height={62} fill={SW_COLORS.paper} stroke={SW_COLORS.line} rx={4} />
-          <text
-            x={12}
-            y={18}
-            fontFamily={SW_FONTS.mono}
-            fontSize={10}
-            fontWeight={900}
-            fill={SW_COLORS.ink}
-            letterSpacing="0.15em"
-          >
-            PML LEGEND
-          </text>
-          <text x={12} y={34} fontFamily={SW_FONTS.mono} fontSize={9} fill={SW_COLORS.muted}>
-            ◯ input port (left) · ● output port (right)
-          </text>
-          <text x={12} y={48} fontFamily={SW_FONTS.mono} fontSize={9} fill={SW_COLORS.muted}>
-            drag block to move · drag port→port to wire · click wire + Del
-          </text>
         </g>
       </svg>
+
+      {/* Empty state — an HTML overlay so it neither scales with the camera
+          nor needs a canvas extent to position against. */}
+      {twin.workstations.length === 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            ...SW_TYPE.body,
+            color: SW_COLORS.muted,
+          }}
+        >
+          No blocks yet — pick one from the palette and click anywhere on the canvas.
+        </div>
+      )}
     </div>
-    {/* Auto-arrange — reset every block to the department swim-lane layout.
-        A clean way out of a tangled canvas; preserves dept grouping. */}
+    {/* Auto-arrange — reflow every block into the flow-ordered serpentine
+        seed. A clean way out of a tangled canvas.
+
+        Two-stage, because this silently discarded every hand-placed position:
+        the first click arms it and the label says so, a second click within
+        4s commits. It commits immediately when nothing has been hand-placed,
+        since there is nothing to lose. */}
     <button
       type="button"
       onClick={() => {
-        const layout = computeProcessSeedLayout(twin);
+        const hasAuthored = twin.workstations.some((w) => w.block?.processPos);
+        if (hasAuthored && !arrangeArmed) {
+          setArrangeArmed(true);
+          if (arrangeTimer.current) window.clearTimeout(arrangeTimer.current);
+          arrangeTimer.current = window.setTimeout(() => setArrangeArmed(false), 4000);
+          return;
+        }
+        if (arrangeTimer.current) window.clearTimeout(arrangeTimer.current);
+        setArrangeArmed(false);
+        const seeded = computeProcessSeedPositions(twin);
         const entries = twin.workstations
           .map((ws) => {
-            const pos = layout.positions.get(ws.id);
+            const pos = seeded.get(ws.id);
             return pos ? { wsId: ws.id, pos } : null;
           })
           .filter(Boolean) as { wsId: string; pos: { x: number; y: number } }[];
         if (entries.length > 0) setProcessPositions(entries);
         setSelectedConnId(null);
+        onFitRequest();
       }}
-      title="Reset all blocks to the department swim-lane layout"
+      onBlur={() => setArrangeArmed(false)}
+      title={
+        arrangeArmed
+          ? 'Click again to overwrite every hand-placed position (undo with Cmd-Z)'
+          : 'Reflow all blocks into the flow-ordered layout'
+      }
       style={{
         position: 'absolute',
         bottom: 92,
@@ -5301,11 +5388,11 @@ function BuilderProcessView({
         fontSize: 11,
         fontWeight: 800,
         letterSpacing: '0.06em',
-        color: SW_COLORS.ink,
-        boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+        color: arrangeArmed ? SW_COLORS.brandText : SW_COLORS.ink,
+        boxShadow: SW_SHADOWS.hud,
       }}
     >
-      ⤢ AUTO-ARRANGE
+      {arrangeArmed ? '⤢ OVERWRITE ALL POSITIONS?' : '⤢ AUTO-ARRANGE'}
     </button>
     <ProcessCodeView twin={twin} />
     </>
