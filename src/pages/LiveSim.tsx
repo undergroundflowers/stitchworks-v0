@@ -54,7 +54,7 @@ import {
   parseHHMM,
 } from '../simulation/timeUnit';
 import { useProject, useGarments, type OrderDraft } from '../store';
-import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
+import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, getBlockKind, getBlockParams, apparelRoleFor } from '../domain/pml';
@@ -80,7 +80,6 @@ import type { GarmentTemplate } from '../domain/garments';
  * SNL bobbin looks the same everywhere it appears.
  */
 function stationAsset(machineCode: string | undefined): {
-  color: string;
   glyph: string;
   label: string;
   isManual: boolean;
@@ -91,10 +90,9 @@ function stationAsset(machineCode: string | undefined): {
   if (!spec) {
     // Unknown machine type — neutral steel placeholder. Keeps the
     // workstation visually distinguishable from typed peers.
-    return { color: SW_PAL.steel, glyph: '?', label: machineCode ?? 'UNKNOWN', isManual: false };
+    return { glyph: '?', label: machineCode ?? 'UNKNOWN', isManual: false };
   }
   return {
-    color: spec.color,
     glyph: spec.icon,
     label: spec.shortName,
     isManual: !!spec.isManual,
@@ -3145,7 +3143,6 @@ function IsoSewingStation({
   // separately via the badge above, the base alarm ring, and the
   // utilization pip.
   const asset = stationAsset(s.machineCode);
-  const machineHead = asset.color;
 
   return (
     <g transform={`translate(${origin.sx}, ${origin.sy})`}>
@@ -3191,36 +3188,15 @@ function IsoSewingStation({
           />
         );
       })()}
-      {/* Sewing-machine table */}
+      {/* Station body — drawn by the shared fixture catalog so the Sim floor
+          and the Builder floor cannot drift apart. Falls back to a plain
+          table when the machine code resolves to no fixture. Total height
+          matches the old hand-rolled table + head (0.8 + 0.6 = 1.4), so
+          nothing above it relayouts. */}
       <g>
-        {CuboidFaces({
-          w,
-          d,
-          h: 0.8,
-          top: SW_PAL.cream,
-          left: SW_PAL.creamLo,
-          right: SW_PAL.cream,
-        })}
-      </g>
-      {/* Machine head on top — colour comes from the asset library
-          (`MACHINE_CATALOG[machineCode].color`), so an SNL bobbin, a 4OL,
-          and a flatlock each read as visually distinct equipment that
-          stays consistent across views and runs. */}
-      <g
-        transform={(() => {
-          const a = isoProj(0, d * 0.3, 0.8);
-          const o = isoProj(0, 0, 0);
-          return `translate(${a.sx - o.sx}, ${a.sy - o.sy})`;
-        })()}
-      >
-        {CuboidFaces({
-          w: w * 0.75,
-          d: d * 0.4,
-          h: 0.6,
-          top: machineHead,
-          left: shade(machineHead, -0.2),
-          right: machineHead,
-        })}
+        {isoFixtureForMachineCode(s.machineCode ?? '')?.draw({ w, d, h: 1.4 }) ?? (
+          CuboidFaces({ w, d, h: 0.8, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream })
+        )}
       </g>
       {/* Utilization pip on the machine head — small status light, doesn't
           recolour the equipment. Reads green / yellow / red against an
@@ -3231,7 +3207,7 @@ function IsoSewingStation({
         const pipCol = isHot
           ? SW_COLORS.alarm
           : occupancy > 0.7
-            ? SW_PAL.yellow
+            ? SW_COLORS.warn
             : SW_COLORS.ok;
         return (
           <circle
@@ -3250,9 +3226,6 @@ function IsoSewingStation({
         return (
           <g transform={`translate(${p.sx}, ${p.sy})`} pointerEvents="none">
             <rect x={-42} y={-32} width={84} height={30} rx={4} fill="#0a0d12" stroke="#ffffff20" strokeWidth={1} />
-            {/* Asset-typed colour chip on the left edge of the badge so the
-                badge itself echoes the catalog colour of the workstation. */}
-            <rect x={-42} y={-32} width={4} height={30} fill={asset.color} />
             <text
               x={-32}
               y={-21}
@@ -3271,7 +3244,7 @@ function IsoSewingStation({
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={800}
-              fill={asset.color}
+              fill={SW_COLORS.muted}
               letterSpacing="0.05em"
             >
               {asset.glyph} {asset.label}
@@ -3443,19 +3416,24 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
 
   // Asset-family palette — keeps service blocks visually grouped on the
   // floor while staying distinct from the brand-coloured sewing line.
+  // One neutral surface for every ambient prop. Category is spelled out in
+  // the badge below; it does not also need a colour. Twelve tinted cuboids
+  // scattered across the floor competed with the sim's own state colours —
+  // the only thing on this canvas that should catch the eye is a station in
+  // trouble.
   const palette: Record<string, { top: string; left: string; right: string; label: string }> = {
-    cut:   { top: SW_PAL.green,  left: shade(SW_PAL.green, -0.25), right: SW_PAL.green,  label: 'CUT'   },
-    fix:   { top: SW_PAL.cream,  left: SW_PAL.creamLo,             right: SW_PAL.cream,  label: 'FIX'   },
-    store: { top: SW_PAL.yellow, left: SW_PAL.yellowLo,            right: SW_PAL.yellow, label: 'STORE' },
-    mh:    { top: SW_PAL.steel,  left: shade(SW_PAL.steel, -0.25), right: SW_PAL.steel,  label: 'MH'    },
-    buf:   { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'BUF'   },
-    op:    { top: SW_PAL.red,    left: SW_PAL.redLo,               right: SW_PAL.red,    label: 'OPR'   },
-    conv:  { top: SW_PAL.metal,  left: SW_PAL.metalLo,             right: SW_PAL.metal,  label: 'CONV'  },
-    zone:  { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'ZONE'  },
-    arch:  { top: SW_PAL.steel,  left: SW_PAL.creamLo,             right: SW_PAL.steel,  label: 'ARCH'  },
-    util:  { top: SW_PAL.steel,  left: shade(SW_PAL.steel, -0.3),  right: SW_PAL.steel,  label: 'UTIL'  },
-    pml:   { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'PML'   },
-    sew:   { top: SW_PAL.cream,  left: SW_PAL.creamLo,             right: SW_PAL.cream,  label: 'SEW'   },
+    cut:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'CUT'   },
+    fix:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'FIX'   },
+    store: { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'STORE' },
+    mh:    { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'MH'    },
+    buf:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'BUF'   },
+    op:    { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'OPR'   },
+    conv:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'CONV'  },
+    zone:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'ZONE'  },
+    arch:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'ARCH'  },
+    util:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'UTIL'  },
+    pml:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'PML'   },
+    sew:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'SEW'   },
   };
   const pal = palette[amb.cat] ?? palette.fix;
 
@@ -3527,7 +3505,7 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
           const p = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, figH + 0.25);
           return (
             <g transform={`translate(${p.sx - o.sx}, ${p.sy - o.sy})`}>
-              <rect x={-12} y={-9} width={24} height={10} rx={2} fill="#0a0d12cc" stroke={amb.deptColor} strokeWidth={0.8} />
+              <rect x={-12} y={-9} width={24} height={10} rx={2} fill={alpha(SW_COLORS.void, 0.8)} stroke={alpha(SW_COLORS.ink, 0.25)} strokeWidth={0.8} />
               <text
                 x={0}
                 y={-2}
@@ -3535,7 +3513,7 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
                 fontFamily={SW_FONTS.mono}
                 fontSize={6}
                 fontWeight={900}
-                fill={amb.deptColor}
+                fill={SW_COLORS.muted}
                 letterSpacing="0.1em"
               >
                 {badgeCode}
@@ -3587,7 +3565,7 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
         const p = isoProj(amb.w / 2, amb.d / 2, h + 0.15);
         return (
           <g transform={`translate(${p.sx}, ${p.sy})`}>
-            <rect x={-12} y={-9} width={24} height={10} rx={2} fill="#0a0d12cc" stroke={amb.deptColor} strokeWidth={0.8} />
+            <rect x={-12} y={-9} width={24} height={10} rx={2} fill={alpha(SW_COLORS.void, 0.8)} stroke={alpha(SW_COLORS.ink, 0.25)} strokeWidth={0.8} />
             <text
               x={0}
               y={-2}
@@ -3595,7 +3573,7 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
               fontFamily={SW_FONTS.mono}
               fontSize={6}
               fontWeight={900}
-              fill={amb.deptColor}
+              fill={SW_COLORS.muted}
               letterSpacing="0.1em"
             >
               {pal.label}
@@ -4116,12 +4094,11 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
         const isHot = i === bottleneckOpIndex && s.queueLen > 0;
         const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
         const utilCol = isHot ? SW_COLORS.alarm : occupancy >= 0.85 ? SW_COLORS.warn : SW_COLORS.ok;
-        // Card accent = machine-type colour from the asset library. Stays
-        // stable as the sim runs; bottleneck state is communicated by a
-        // separate red outline + alarm pip below, not by recolouring the
-        // identity strip itself.
+        // The card is neutral steel; machine type is spelled out in the card
+        // body rather than encoded as a colour. Bottleneck state gets the red
+        // outline + alarm pip below — the only thing here worth a colour.
         const cardAsset = stationAsset(s.machineCode);
-        const accent = cardAsset.color;
+        const accent = SW_COLORS.steel;
         const pcsHr = stationsThroughput[i];
         const queueOver = s.queueLen > 8;
 

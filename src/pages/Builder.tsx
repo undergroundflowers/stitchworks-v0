@@ -28,7 +28,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_MOTION, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { HudSelect, StageOverlay, ViewTitle, useConfirm } from '../components';
+import { HudSelect, StageOverlay, StationGlyph, ViewTitle, useConfirm } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { ServiceQueueParams } from '../components/ServiceQueueParams';
 import {
@@ -47,7 +47,6 @@ import {
   FLAT_CELL,
   ISO_FIXTURE_TO_MACHINE_CODE,
 } from '../domain';
-import { WorkstationSprite as MachineTopSprite } from '../assets/workstations';
 import {
   useTwin,
   selectActiveTwin,
@@ -2776,9 +2775,24 @@ function Palette(props: PaletteProps) {
                             gap: 4,
                           }}
                         >
-                          <svg width={56} height={42} viewBox="-32 -24 64 48" style={{ display: 'block' }}>
-                            {a.draw({ w: a.w, d: a.d, h: a.h }) as ReactNode}
-                          </svg>
+                          {/* Machines show their family mark + type code — the
+                              same thing they will look like once dropped on the
+                              floor. Non-machine fixtures keep the isometric
+                              cuboid, which is what distinguishes a rack from a
+                              trolley. */}
+                          {ISO_FIXTURE_TO_MACHINE_CODE[a.id] ? (
+                            <svg width={56} height={42} style={{ display: 'block' }}>
+                              <StationGlyph
+                                code={ISO_FIXTURE_TO_MACHINE_CODE[a.id]}
+                                width={56}
+                                height={42}
+                              />
+                            </svg>
+                          ) : (
+                            <svg width={56} height={42} viewBox="-32 -24 64 48" style={{ display: 'block' }}>
+                              {a.draw({ w: a.w, d: a.d, h: a.h }) as ReactNode}
+                            </svg>
+                          )}
                           <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, textAlign: 'center', lineHeight: 1.2 }}>
                             {a.label}
                           </div>
@@ -3614,54 +3628,26 @@ function operatorIdLabel(name: string): string {
  */
 function FlatStationBody({ ws, fixture }: { ws: Workstation; fixture: IsoFixture }) {
   const { w: fw, d: fd } = wsFootprint(ws);
-  const base = wsBaseFootprint(ws);
   const W = fw * FLAT_CELL;
   const H = fd * FLAT_CELL;
   const code = ISO_FIXTURE_TO_MACHINE_CODE[ws.catalogId];
-  const rot = (((ws.rotation ?? 0) % 360) + 360) % 360;
-  const isZone = fixture.cat === 'zone';
+  // Machines get their family mark and type code; everything else (racks,
+  // trolleys, buffers, zones) gets the same box with an abbreviated label,
+  // because there is no mechanism to draw.
+  //
+  // No rotation is applied here: `wsFootprint` already reports the footprint
+  // the station occupies AFTER rotation, so the box is the right shape
+  // already, and the mark and its code stay axis-aligned. The old sprite
+  // rotated its artwork inside the box because a drawn machine has a front;
+  // a diagonal stroke does not.
   return (
-    <g>
-      {/* Footprint base — the "table" every station sits on. Zones stay
-          translucent so the floor grid reads through them. */}
-      <rect
-        x={1}
-        y={1}
-        width={W - 2}
-        height={H - 2}
-        rx={3}
-        fill={SW_COLORS.paperEdge}
-        fillOpacity={isZone ? 0.35 : 1}
-        stroke={SW_COLORS.ink}
-        strokeOpacity={0.35}
-        strokeWidth={1}
-      />
-      {code ? (
-        <g
-          transform={`translate(${W / 2} ${H / 2}) rotate(${rot}) translate(${-(base.w * FLAT_CELL) / 2} ${-(base.d * FLAT_CELL) / 2})`}
-        >
-          <MachineTopSprite
-            code={code}
-            withTable={false}
-            width={base.w * FLAT_CELL}
-            height={base.d * FLAT_CELL}
-          />
-        </g>
-      ) : (
-        <text
-          x={W / 2}
-          y={H / 2 + 3}
-          textAnchor="middle"
-          fontFamily={SW_FONTS.mono}
-          fontSize={8}
-          fontWeight={800}
-          fill={SW_COLORS.muted}
-          style={{ pointerEvents: 'none', letterSpacing: '0.04em' }}
-        >
-          {fixture.label.split('·')[0].trim().slice(0, 10).toUpperCase()}
-        </text>
-      )}
-    </g>
+    <StationGlyph
+      code={code}
+      label={code ? undefined : fixture.label.split('\u00b7')[0].trim()}
+      width={W}
+      height={H}
+      muted={fixture.cat === 'zone'}
+    />
   );
 }
 

@@ -26,6 +26,7 @@ export {
 } from './StationTimeseriesChart';
 export { TimeChip, TimeDisplay, type TimeKind } from './TimeDisplay';
 export { StageOverlay } from './StageOverlay';
+export { StationGlyph } from './StationGlyph';
 export {
   Dialog,
   ConfirmProvider,
