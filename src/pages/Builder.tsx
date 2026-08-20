@@ -2,8 +2,8 @@
  * Factory Builder — the authoring surface for the new Twin model.
  *
  * Architecture (locked 2026-05-07):
- *   • Two drawable layers: Department (zoned regions) + Workstation (machines,
- *     tables, racks). Departments and Workstations have geometry on the canvas.
+ *   • One drawable layer: Workstation (machines, tables, racks) placed freely
+ *     on an unzoned floor. Sewing lines group stations logically, not spatially.
  *   • Three lenses (Operations · Resources · KPIs) decorate the same scene.
  *     Toggling a lens never changes the underlying data — it changes overlays
  *     and which inspector group is highlighted.
@@ -26,7 +26,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_MOTION, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { HudSelect, StageOverlay, ViewTitle, useConfirm } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
@@ -43,6 +43,7 @@ import {
   type Projection,
   ISO_PROJECTION,
   FLAT_PROJECTION,
+  lerpProjection,
   FLAT_CELL,
   ISO_FIXTURE_TO_MACHINE_CODE,
 } from '../domain';
@@ -50,18 +51,16 @@ import { WorkstationSprite as MachineTopSprite } from '../assets/workstations';
 import {
   useTwin,
   selectActiveTwin,
-  type DepartmentColorKey,
+  type EntityColorKey,
 } from '../store/twin';
 import { useProject, useFactoryLibrary, useGarments } from '../store';
 import type {
   Assignment,
-  Department,
   Workstation,
   Connector,
   ConnectorKind,
   Operator,
   SewingLine,
-  ProductionSystemKey,
   LinePolicy,
 } from '../domain/twin';
 import { defaultPolicyFor, lineSystemBadge, shareDebtForLine, validateTwinWarnings } from '../domain/twin';
@@ -123,7 +122,7 @@ type DropTool =
       presetId?: import('../domain/apparelPresets').ApparelPresetId;
     };
 
-const DEPT_COLOR_HEX: Record<DepartmentColorKey, string> = {
+const DEPT_COLOR_HEX: Record<EntityColorKey, string> = {
   fabric: SW_COLORS.fabric,
   thread: SW_COLORS.thread,
   brand: SW_COLORS.brand,
@@ -260,30 +259,35 @@ const btnSec = (): CSSProperties => ({
 
 const sectionLabel: CSSProperties = {
   fontFamily: SW_FONTS.mono,
-  fontSize: 9,
-  fontWeight: 700,
+  fontSize: 11,
+  fontWeight: 600,
   color: SW_COLORS.muted,
-  letterSpacing: '1.5px',
+  letterSpacing: '0.14em',
   textTransform: 'uppercase',
+  lineHeight: 1.1,
   marginBottom: 6,
 };
 
+// Field label + control pair — the inspector's field anatomy: a quiet
+// Plex Sans label over a 32px paper well with a hairline edge.
 const fieldLabel: CSSProperties = {
-  fontFamily: SW_FONTS.mono,
-  fontSize: 10,
-  fontWeight: 600,
+  fontFamily: SW_FONTS.body,
+  fontSize: 12,
+  fontWeight: 500,
+  letterSpacing: '0.005em',
   color: SW_COLORS.muted,
-  marginBottom: 3,
+  marginBottom: 5,
   display: 'block',
 };
 
 const inputBase: CSSProperties = {
   width: '100%',
-  padding: '5px 8px',
-  fontSize: 12,
+  height: 32,
+  padding: '0 12px',
+  fontSize: 13,
   fontFamily: SW_FONTS.body,
   border: `1px solid ${SW_COLORS.line}`,
-  borderRadius: 4,
+  borderRadius: 6,
   background: SW_COLORS.paper,
   color: SW_COLORS.ink,
 };
@@ -318,7 +322,7 @@ const RAIL_W = 26;
  * doesn't subscribe back to React during this call.
  */
 function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
-  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  selected: { kind: 'ws'; id: string } | null;
   lineDeepLink: string | null;
 } {
   const scenarioId = searchParams.get('scenario');
@@ -355,7 +359,7 @@ function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
     ? (twinForLine.lines ?? []).find((l) => l.id === lineId) ?? null
     : null;
   return {
-    selected: line ? { kind: 'dept', id: line.deptId } : null,
+    selected: null,
     lineDeepLink: line?.id ?? null,
   };
 }
@@ -373,12 +377,6 @@ export function BuilderPage() {
   const scenarios = useTwin((s) => s.scenarios);
   const canonical = useTwin((s) => s.canonical);
 
-  // Only used to lazily materialise the implicit sewing floor when a twin
-  // somehow has no departments at all — never surfaced as an authoring tool.
-  const addDepartment = useTwin((s) => s.addDepartment);
-  const moveDepartment = useTwin((s) => s.moveDepartment);
-  const updateDepartment = useTwin((s) => s.updateDepartment);
-  const removeDepartment = useTwin((s) => s.removeDepartment);
   const addLine = useTwin((s) => s.addLine);
   const updateLine = useTwin((s) => s.updateLine);
   const removeLine = useTwin((s) => s.removeLine);
@@ -456,7 +454,7 @@ export function BuilderPage() {
     resolveDeepLinkInitialState(searchParams),
   )[0];
   const [selected, setSelected] = useState<
-    { kind: 'dept' | 'ws'; id: string } | null
+    { kind: 'ws'; id: string } | null
   >(initialSelection.selected);
   /** Additional workstation ids selected via SHIFT+click. The `selected`
    *  anchor (when it's a workstation) is always implicitly part of the
@@ -482,6 +480,20 @@ export function BuilderPage() {
     return v === 'iso' || v === 'process' || v === '2d' ? v : '2d';
   });
   useEffect(() => { localStorage.setItem('builder.canvasMode', canvasMode); }, [canvasMode]);
+  /** 0 = flat plan, 1 = isometric — the floor-view morph parameter. Driven
+   *  by the rAF tween in `switchCanvasMode`; the active projection derives
+   *  from this, so while the tween runs every polygon on the floor
+   *  re-projects continuously and the plan visibly tips up into the iso
+   *  stage (and lays back flat on the way out) instead of snapping. */
+  const [isoBlend, setIsoBlend] = useState<number>(() => (canvasMode === 'iso' ? 1 : 0));
+  const isoBlendRef = useRef(isoBlend);
+  isoBlendRef.current = isoBlend;
+  /** Live rAF id of the in-flight view morph, so a second view switch (or
+   *  unmount) can cancel a running tween instead of fighting it. */
+  const morphRaf = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (morphRaf.current !== null) cancelAnimationFrame(morphRaf.current);
+  }, []);
 
   // Dev-time escape hatch — exposes the live useTwin hook on `window` so
   // browser-console tests / e2e harnesses can mutate the same store
@@ -663,9 +675,12 @@ export function BuilderPage() {
   const ZOOM_MAX = 3;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 
-  // Active canvas projection — ISO diamonds or FLAT top-down cells. The
-  // PROCESS view ignores it (its canvas is a freeform pixel space).
-  const proj = canvasMode === 'iso' ? ISO_PROJECTION : FLAT_PROJECTION;
+  // Active canvas projection — ISO diamonds, FLAT top-down cells, or the
+  // in-between blend while a view morph is running. At rest `isoBlend` is
+  // exactly 0 or 1, and `lerpProjection` returns the canonical FLAT / ISO
+  // projection objects for those values. The PROCESS view ignores it (its
+  // canvas is a freeform pixel space).
+  const proj = useMemo(() => lerpProjection(isoBlend), [isoBlend]);
 
   // Track the stage element's pixel size. The SVG inside uses a viewBox
   // sized to match — `[-w/2, -h/2, w, h]` — so 1 user-space unit equals
@@ -717,6 +732,61 @@ export function BuilderPage() {
     });
   }, []);
 
+  /**
+   * Switch the canvas view. 2D ↔ ISO runs the projection-blend morph — the
+   * plan tips up into the isometric stage over SW_MOTION.slow, with pan and
+   * zoom re-framing along the same tween so the factory stays centred
+   * throughout. PROCESS is an unrelated pixel space, so entering or leaving
+   * it re-frames instantly (there is nothing continuous to morph through).
+   * Honors prefers-reduced-motion by jumping straight to the target.
+   */
+  const switchCanvasMode = (m: CanvasMode) => {
+    if (m === canvasMode) return;
+    // Disarm any pending drop — the palette flips with the view, so an
+    // armed BLOCKS drop must not land via the STATIONS placement path
+    // (and vice versa).
+    setDrop({ kind: 'none' });
+    if (morphRaf.current !== null) {
+      cancelAnimationFrame(morphRaf.current);
+      morphRaf.current = null;
+    }
+    setCanvasMode(m);
+    if (m === 'process') {
+      setPan({ x: 0, y: 0 });
+      setZoom(1);
+      setIsoBlend(0);
+      return;
+    }
+    const toBlend = m === 'iso' ? 1 : 0;
+    const fromBlend = isoBlendRef.current;
+    const panTo = centerPan(m === 'iso' ? ISO_PROJECTION : FLAT_PROJECTION);
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (canvasMode === 'process' || reduceMotion || fromBlend === toBlend) {
+      setPan(panTo);
+      setZoom(1);
+      setIsoBlend(toBlend);
+      return;
+    }
+    const panFrom = panRef.current;
+    const zoomFrom = zoom;
+    const duration = SW_MOTION.slow;
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const u = Math.min(1, (now - t0) / duration);
+      // Ease-out cubic — close cousin of SW_MOTION.standard, cheap to eval
+      // per frame without a bezier solver.
+      const e = 1 - Math.pow(1 - u, 3);
+      setIsoBlend(fromBlend + (toBlend - fromBlend) * e);
+      setPan({
+        x: panFrom.x + (panTo.x - panFrom.x) * e,
+        y: panFrom.y + (panTo.y - panFrom.y) * e,
+      });
+      setZoom(zoomFrom + (1 - zoomFrom) * e);
+      morphRaf.current = u < 1 ? requestAnimationFrame(step) : null;
+    };
+    morphRaf.current = requestAnimationFrame(step);
+  };
+
   /** Every apparel category, resolved and kept in catalogue order, so the
    *  STATIONS palette can render one continuous scroller with a section
    *  header per category instead of a tab strip. Search narrows within
@@ -757,67 +827,15 @@ export function BuilderPage() {
     [pan, zoom, proj],
   );
 
-  /** Which department owns a station dropped at `cell`.
-   *
-   *  Departments are plumbing in a sewing-floor tool — the user places
-   *  stations freely and never authors a zone. So: a cell inside an existing
-   *  zone joins that zone; anything else joins the sewing floor, which is
-   *  created on demand and expanded to contain the cell. `Workstation.deptId`
-   *  stays non-nullable, which keeps PROCESS lanes, the sim engine and the
-   *  importers working unchanged. */
-  const resolveDropDept = useCallback(
-    (cell: { x: number; y: number }): string => {
-      const inside = twin.departments.find(
-        (d) =>
-          cell.x >= d.bounds.x &&
-          cell.x < d.bounds.x + d.bounds.w &&
-          cell.y >= d.bounds.y &&
-          cell.y < d.bounds.y + d.bounds.h,
-      );
-      if (inside) return inside.id;
-
-      const floor =
-        twin.departments.find((d) => d.kind === 'Sewing') ?? twin.departments[0];
-      if (!floor) {
-        return addDepartment({
-          name: 'Sewing Floor',
-          kind: 'Sewing',
-          color: 'blue',
-          bounds: { x: cell.x, y: cell.y, w: 1, h: 1 },
-        });
-      }
-
-      // Grow the floor so the dropped station sits inside its zone rather
-      // than orphaned beside it.
-      const x0 = Math.min(floor.bounds.x, cell.x);
-      const y0 = Math.min(floor.bounds.y, cell.y);
-      const x1 = Math.max(floor.bounds.x + floor.bounds.w, cell.x + 1);
-      const y1 = Math.max(floor.bounds.y + floor.bounds.h, cell.y + 1);
-      if (
-        x0 !== floor.bounds.x ||
-        y0 !== floor.bounds.y ||
-        x1 !== floor.bounds.x + floor.bounds.w ||
-        y1 !== floor.bounds.y + floor.bounds.h
-      ) {
-        updateDepartment(floor.id, { bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } });
-      }
-      return floor.id;
-    },
-    [twin.departments, addDepartment, updateDepartment],
-  );
-
   const onCanvasClick = useCallback(() => {
     if (!hoverCell) return;
     if (drop.kind === 'ws') {
-      // Stations drop anywhere on the canvas — the user never has to draw a
-      // zone first. A cell inside an existing zone joins it; anywhere else
-      // joins the sewing floor, which grows to swallow the new cell.
-      const deptId = resolveDropDept(hoverCell);
+      // Stations drop wherever the user clicked. The floor is free space —
+      // there is no zone to join and nothing grows to swallow the cell.
       // When the drop originated from the BLOCKS palette (apparel preset),
       // stamp the preset's default params + auto-name with its label.
       const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
       const id = addWorkstation({
-        deptId,
         catalogId: drop.catalogId,
         position: { x: hoverCell.x, y: hoverCell.y },
         presetLabel: preset?.label,
@@ -833,7 +851,7 @@ export function BuilderPage() {
     // No tool: clicking empty canvas clears selection.
     setSelected(null);
     setExtraSelectedWs(new Set());
-  }, [hoverCell, drop, tool, addWorkstation, resolveDropDept]);
+  }, [hoverCell, drop, tool, addWorkstation]);
 
   const beginPanFromPoint = useCallback((startX: number, startY: number) => {
     const p0 = { ...panRef.current };
@@ -1004,7 +1022,7 @@ export function BuilderPage() {
   zoomRef.current = zoom;
 
   const startEntityDrag = useCallback(
-    (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => {
+    (kind: 'ws', id: string, e: React.MouseEvent) => {
       e.stopPropagation();
       const startX = e.clientX;
       const startY = e.clientY;
@@ -1029,44 +1047,18 @@ export function BuilderPage() {
       //    as one rigid group — the user's explicit ask.
       //  • SHIFT-drag intentionally moves only the grabbed station so a user
       //    can nudge one member without losing the rest of the selection.
-      //  • Grabbing a department drags the dept rect AND every workstation
-      //    whose initial coords lay inside its bounds, so the equipment
-      //    stays nested rather than getting left behind.
       const wsSnap: { id: string; x0: number; y0: number }[] = [];
-      const deptSnap: { id: string; x0: number; y0: number; w: number; h: number }[] = [];
 
-      if (kind === 'ws') {
-        const ids = new Set<string>();
-        ids.add(id);
-        if (!e.shiftKey && inMulti) {
-          for (const wid of selectedWsIdsRef.current) ids.add(wid);
-        }
-        for (const w of t0.workstations) {
-          if (ids.has(w.id)) wsSnap.push({ id: w.id, x0: w.position.x, y0: w.position.y });
-        }
-      } else {
-        const dept = t0.departments.find((x) => x.id === id);
-        if (!dept) return;
-        deptSnap.push({
-          id: dept.id,
-          x0: dept.bounds.x,
-          y0: dept.bounds.y,
-          w: dept.bounds.w,
-          h: dept.bounds.h,
-        });
-        for (const w of t0.workstations) {
-          if (
-            w.position.x >= dept.bounds.x &&
-            w.position.x < dept.bounds.x + dept.bounds.w &&
-            w.position.y >= dept.bounds.y &&
-            w.position.y < dept.bounds.y + dept.bounds.h
-          ) {
-            wsSnap.push({ id: w.id, x0: w.position.x, y0: w.position.y });
-          }
-        }
+      const ids = new Set<string>();
+      ids.add(id);
+      if (!e.shiftKey && inMulti) {
+        for (const wid of selectedWsIdsRef.current) ids.add(wid);
+      }
+      for (const w of t0.workstations) {
+        if (ids.has(w.id)) wsSnap.push({ id: w.id, x0: w.position.x, y0: w.position.y });
       }
 
-      if (wsSnap.length === 0 && deptSnap.length === 0) return;
+      if (wsSnap.length === 0) return;
 
       let moved = false;
       function onMove(ev: MouseEvent) {
@@ -1080,9 +1072,6 @@ export function BuilderPage() {
         for (const s of wsSnap) {
           moveWorkstation(s.id, { x: s.x0 + dx, y: s.y0 + dy });
         }
-        for (const s of deptSnap) {
-          moveDepartment(s.id, { x: s.x0 + dx, y: s.y0 + dy, w: s.w, h: s.h });
-        }
       }
       function onUp() {
         window.removeEventListener('mousemove', onMove);
@@ -1091,7 +1080,7 @@ export function BuilderPage() {
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     },
-    [moveWorkstation, moveDepartment, proj],
+    [moveWorkstation, proj],
   );
 
   // ── Select / Copy / Paste ──────────────────────────────────────────────────
@@ -1146,7 +1135,6 @@ export function BuilderPage() {
   const pasteClipboard = useCallback(() => {
     const cb = clipboardRef.current;
     if (!cb || cb.workstations.length === 0) return;
-    const t = twinRef.current;
     // Anchor target: prefer the hover cell so the user can aim the paste.
     // Falls back to +2 of the original anchor when the cursor is off-stage
     // (e.g. focused on a side panel), matching the "duplicate-ish" idiom.
@@ -1155,26 +1143,13 @@ export function BuilderPage() {
     const ty = hc ? hc.y : cb.anchor.y + 2;
     const dx = tx - cb.anchor.x;
     const dy = ty - cb.anchor.y;
-    const snaps = cb.workstations
-      .map((w) => {
-        const nx = w.position.x + dx;
-        const ny = w.position.y + dy;
-        const dept = t.departments.find(
-          (d) =>
-            nx >= d.bounds.x &&
-            nx < d.bounds.x + d.bounds.w &&
-            ny >= d.bounds.y &&
-            ny < d.bounds.y + d.bounds.h,
-        );
-        if (!dept) return null;
-        return {
-          ...w,
-          _srcId: w.id,
-          deptId: dept.id,
-          position: { x: nx, y: ny },
-        };
-      })
-      .filter((s): s is Workstation & { _srcId: string } => Boolean(s));
+    // Every buffered station pastes — the floor is free space, so there is
+    // no zone to land inside and nothing to reject a paste for.
+    const snaps: (Workstation & { _srcId: string })[] = cb.workstations.map((w) => ({
+      ...w,
+      _srcId: w.id,
+      position: { x: w.position.x + dx, y: w.position.y + dy },
+    }));
     if (snaps.length === 0) return;
     const result = pasteWorkstations({
       snapshots: snaps,
@@ -1318,17 +1293,11 @@ export function BuilderPage() {
         for (const id of extraSelectedWs) ids.add(id);
         for (const id of ids) rotateWorkstation(id, dir);
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Delete the entire ws selection set (anchor + extras). Departments
-        // are still removed only when they are the lone anchor — multi-select
-        // is workstation-only.
+        // Delete the entire ws selection set (anchor + extras).
         const ids = new Set<string>();
         if (selected?.kind === 'ws') ids.add(selected.id);
         for (const id of extraSelectedWs) ids.add(id);
-        if (ids.size > 0) {
-          for (const id of ids) removeWorkstation(id);
-        } else if (selected?.kind === 'dept') {
-          removeDepartment(selected.id);
-        }
+        for (const id of ids) removeWorkstation(id);
         setSelected(null);
         setExtraSelectedWs(new Set());
       } else if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
@@ -1348,7 +1317,7 @@ export function BuilderPage() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
+  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, duplicateWorkstation, resetView, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
 
   // ── Save / Save As ─────────────────────────────────────────────────────────
   // Two flows:
@@ -1579,20 +1548,18 @@ export function BuilderPage() {
                 ...btnSec(),
                 background:
                   errorCount > 0
-                    ? `${SW_COLORS.alarm}24`
+                    ? SW_COLORS.alarmWell
                     : warnCount > 0
-                      ? '#FFF6E0'
-                      : pmlIssues.length === 0
-                        ? '#E7F7EE'
-                        : SW_COLORS.paperDeep,
+                      ? alpha(SW_COLORS.warn, 0.10)
+                      : alpha(SW_COLORS.ok, 0.10),
                 borderColor:
                   errorCount > 0
-                    ? SW_COLORS.alarm
+                    ? SW_COLORS.alarm + '55'
                     : warnCount > 0
-                      ? SW_COLORS.thread
-                      : SW_COLORS.line,
+                      ? SW_COLORS.warn + '55'
+                      : SW_COLORS.okDeep,
                 color:
-                  errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
+                  errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.warn : SW_COLORS.ok,
                 fontFamily: SW_FONTS.mono,
                 fontSize: 10,
                 fontWeight: 800,
@@ -1616,10 +1583,10 @@ export function BuilderPage() {
                   width: 360,
                   maxHeight: 320,
                   overflowY: 'auto',
-                  background: SW_COLORS.paper,
+                  background: SW_COLORS.steel,
                   border: `1px solid ${SW_COLORS.line}`,
                   borderRadius: 6,
-                  boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+                  boxShadow: SW_SHADOWS.hud,
                   padding: 8,
                 }}
               >
@@ -1631,7 +1598,7 @@ export function BuilderPage() {
                     iss.level === 'error'
                       ? SW_COLORS.alarm
                       : iss.level === 'warn'
-                        ? SW_COLORS.thread
+                        ? SW_COLORS.warn
                         : SW_COLORS.muted;
                   const glyph =
                     iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
@@ -1690,8 +1657,8 @@ export function BuilderPage() {
                 disabled={!canSimulate}
                 style={{
                   ...btnPrim(),
-                  background: canSimulate ? SW_COLORS.ok : SW_COLORS.line,
-                  color: canSimulate ? '#fff' : SW_COLORS.muted,
+                  background: canSimulate ? SW_COLORS.brand : SW_COLORS.steel,
+                  color: canSimulate ? SW_COLORS.void : SW_COLORS.muted,
                   cursor: canSimulate ? 'pointer' : 'not-allowed',
                   opacity: canSimulate ? 1 : 0.65,
                 }}
@@ -1713,9 +1680,9 @@ export function BuilderPage() {
               }}
               title={`Leader on latest sim · ${Math.round(bestScenario.throughput).toLocaleString()} pcs/hr · ${bestScenario.eff.toFixed(1)}% eff — click to switch`}
               style={{
-                background: activeScenarioId === bestScenario.id ? SW_COLORS.ok : SW_COLORS.paper,
-                border: `1.5px solid ${SW_COLORS.ok}`,
-                color: activeScenarioId === bestScenario.id ? '#fff' : SW_COLORS.ok,
+                background: activeScenarioId === bestScenario.id ? SW_COLORS.okDeep : alpha(SW_COLORS.ok, 0.10),
+                border: `1px solid ${SW_COLORS.okDeep}`,
+                color: activeScenarioId === bestScenario.id ? SW_COLORS.void : SW_COLORS.ok,
                 padding: '5px 9px',
                 fontFamily: SW_FONTS.display,
                 fontSize: 10,
@@ -1887,7 +1854,10 @@ export function BuilderPage() {
         />
       )}
 
-      {/* CANVAS */}
+      {/* CANVAS — the stage ground sits a full surface step below the panels
+          (void, not paper) with the blueprint grid painted on it, so the
+          floor plan reads as the brightest thing on screen and the side
+          panels read as chrome floating above it. */}
       <div
         ref={stageRef}
         onMouseMove={onCanvasMouseMove}
@@ -1898,7 +1868,9 @@ export function BuilderPage() {
           gridRow: '2',
           position: 'relative',
           overflow: 'hidden',
-          background: SW_COLORS.paper,
+          // Void ground with a faint overhead glow — the SVG above it keeps
+          // its background transparent so this vignette reads through.
+          background: `radial-gradient(120% 90% at 50% 12%, ${alpha(SW_COLORS.paperDeep, 0.55)} 0%, ${SW_COLORS.void} 70%)`,
           cursor: spacePan
             ? (isPanning ? 'grabbing' : 'grab')
             : isPanning
@@ -1995,7 +1967,7 @@ export function BuilderPage() {
         )}
 
         {/* Empty-state hint */}
-        {twin.departments.length === 0 && drop.kind === 'none' && (
+        {twin.workstations.length === 0 && drop.kind === 'none' && (
           <div
             style={{
               position: 'absolute',
@@ -2013,7 +1985,7 @@ export function BuilderPage() {
               Empty factory
             </div>
             <div style={{ fontSize: 13 }}>
-              Pick a department from the palette to start.
+              Pick a station from the palette and click anywhere to place it.
             </div>
           </div>
         )}
@@ -2188,49 +2160,52 @@ export function BuilderPage() {
           />
         )}
 
-        {/* Zoom & view controls */}
+        {/* Zoom & view controls — HUD pill, Make-style: quiet buttons on a
+            steel glass slab, numeric readout between − and +. */}
         <StageOverlay
           style={{
             position: 'absolute',
             bottom: 14,
             right: 14,
             display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paper,
-            padding: 3,
-            borderRadius: 6,
+            alignItems: 'center',
+            gap: 2,
+            background: alpha(SW_COLORS.steel, 0.95),
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            padding: 2,
+            borderRadius: SW_RADIUS.md,
             border: `1px solid ${SW_COLORS.line}`,
+            boxShadow: SW_SHADOWS.hud,
             zIndex: 5,
           }}
         >
-          <button
-            onClick={() => setZoom((z) => clampZoom(z / 1.15))}
-            style={{ ...btnSec(), padding: '4px 10px' }}
-            title="Zoom out  (−)"
-          >
+          <ZoomHudBtn onClick={() => setZoom((z) => clampZoom(z / 1.15))} title="Zoom out  (−)">
             −
-          </button>
+          </ZoomHudBtn>
           <button
             onClick={resetView}
-            style={{ ...btnSec(), padding: '4px 8px', minWidth: 56 }}
             title="Reset view  (⌘0)"
+            style={{
+              ...SW_TYPE.numeric,
+              color: SW_COLORS.ink,
+              background: 'transparent',
+              border: 'none',
+              padding: '0 8px',
+              height: 28,
+              minWidth: 52,
+              cursor: 'pointer',
+            }}
           >
             {Math.round(zoom * 100)}%
           </button>
-          <button
-            onClick={() => setZoom((z) => clampZoom(z * 1.15))}
-            style={{ ...btnSec(), padding: '4px 10px' }}
-            title="Zoom in  (+)"
-          >
+          <ZoomHudBtn onClick={() => setZoom((z) => clampZoom(z * 1.15))} title="Zoom in  (+)">
             +
-          </button>
-          <button
-            onClick={resetView}
-            style={{ ...btnSec(), padding: '4px 8px' }}
-            title="Reset zoom & pan"
-          >
+          </ZoomHudBtn>
+          <div style={{ width: 1, alignSelf: 'stretch', background: SW_COLORS.lineSoft, margin: '3px 2px' }} />
+          <ZoomHudBtn onClick={resetView} title="Reset zoom & pan">
             ⛶
-          </button>
+          </ZoomHudBtn>
         </StageOverlay>
 
         {/* Bottom-left counter strip */}
@@ -2245,7 +2220,7 @@ export function BuilderPage() {
             alignItems: 'center',
           }}
         >
-          <CountChip label="DEPTS" value={twin.departments.length} />
+          <CountChip label="LINES" value={(twin.lines ?? []).length} />
           <CountChip label="STATIONS" value={twin.workstations.length} />
         </div>
 
@@ -2266,12 +2241,12 @@ export function BuilderPage() {
             left: 12,
             zIndex: 6,
             display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paper + 'cc',
+            gap: 2,
+            background: alpha(SW_COLORS.void, 0.92),
             backdropFilter: 'blur(8px)',
             WebkitBackdropFilter: 'blur(8px)',
-            padding: 3,
-            borderRadius: 6,
+            padding: 2,
+            borderRadius: SW_RADIUS.sm + 2,
             border: `1px solid ${SW_COLORS.line}`,
           }}
           title="Draw a directed flow / operator / material link between two workstations"
@@ -2281,17 +2256,22 @@ export function BuilderPage() {
               setDrop({ kind: 'none' });
               setConnect((c) => ({ ...c, on: !c.on, fromWsId: null, fromPort: null }));
             }}
+            onMouseEnter={(e) => {
+              if (!connect.on) e.currentTarget.style.color = SW_COLORS.ink;
+            }}
+            onMouseLeave={(e) => {
+              if (!connect.on) e.currentTarget.style.color = SW_COLORS.muted;
+            }}
             style={{
-              background: connect.on ? SW_COLORS.brand : 'transparent',
-              color: connect.on ? SW_COLORS.paper : SW_COLORS.muted,
-              border: 'none',
-              padding: '6px 12px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
+              ...SW_TYPE.kicker,
               letterSpacing: '0.08em',
+              background: connect.on ? SW_COLORS.brand : 'transparent',
+              color: connect.on ? SW_COLORS.void : SW_COLORS.muted,
+              border: 'none',
+              padding: '7px 13px',
               cursor: 'pointer',
-              borderRadius: 4,
+              borderRadius: SW_RADIUS.sm,
+              transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
             }}
           >
             ➜ CONNECT
@@ -2316,6 +2296,7 @@ export function BuilderPage() {
         {/* Top-center canvas-mode toggle — sits at the same vertical baseline
             as the CONTROLS dropdown so the two read as one row of overlays. */}
         <div
+          role="tablist"
           style={{
             position: 'absolute',
             top: 12,
@@ -2323,12 +2304,12 @@ export function BuilderPage() {
             transform: 'translateX(-50%)',
             zIndex: 6,
             display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paper + 'cc',
+            gap: 2,
+            background: alpha(SW_COLORS.void, 0.92),
             backdropFilter: 'blur(8px)',
             WebkitBackdropFilter: 'blur(8px)',
-            padding: 3,
-            borderRadius: 6,
+            padding: 2,
+            borderRadius: SW_RADIUS.sm + 2,
             border: `1px solid ${SW_COLORS.line}`,
           }}
           title="Switch the canvas: 2D top-down plan (default) · ISO isometric · PROCESS PML block diagram with input/output ports"
@@ -2336,39 +2317,28 @@ export function BuilderPage() {
           {(['2d', 'iso', 'process'] as const).map((m) => (
             <button
               key={m}
-              onClick={() => {
-                if (m !== canvasMode) {
-                  // Disarm any pending drop — the palette flips with the view,
-                  // so an armed BLOCKS drop must not land via the STATIONS
-                  // placement path (and vice versa).
-                  setDrop({ kind: 'none' });
-                  // All three views share one pan/zoom, but the same pan
-                  // points at different spots in each space (iso diamonds ·
-                  // flat cells · process pixels) — re-frame for the view
-                  // being switched TO so content never lands off-screen.
-                  if (m === 'process') {
-                    setPan({ x: 0, y: 0 });
-                  } else {
-                    setPan(centerPan(m === 'iso' ? ISO_PROJECTION : FLAT_PROJECTION));
-                  }
-                  setZoom(1);
-                }
-                setCanvasMode(m);
+              role="tab"
+              aria-selected={canvasMode === m}
+              onClick={() => switchCanvasMode(m)}
+              onMouseEnter={(e) => {
+                if (canvasMode !== m) e.currentTarget.style.color = SW_COLORS.ink;
+              }}
+              onMouseLeave={(e) => {
+                if (canvasMode !== m) e.currentTarget.style.color = SW_COLORS.muted;
               }}
               style={{
-                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
-                color: canvasMode === m ? SW_COLORS.paper : SW_COLORS.muted,
-                border: 'none',
-                padding: '6px 12px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
+                ...SW_TYPE.kicker,
                 letterSpacing: '0.08em',
+                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
+                color: canvasMode === m ? SW_COLORS.void : SW_COLORS.muted,
+                border: 'none',
+                padding: '7px 13px',
                 cursor: 'pointer',
-                borderRadius: 4,
+                borderRadius: SW_RADIUS.sm,
+                transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
               }}
             >
-              {m === '2d' ? '▦ 2D' : m === 'iso' ? '◈ ISO' : '⚙ PROCESS'}
+              {m === '2d' ? '2D' : m === 'iso' ? 'ISO' : 'PROCESS'}
             </button>
           ))}
         </div>
@@ -2381,19 +2351,20 @@ export function BuilderPage() {
             = ink so it reads distinctly from the brand-green toggle above. */}
         {canvasMode !== 'process' && (
           <div
+            role="tablist"
             style={{
               position: 'absolute',
-              top: 50,
+              top: 52,
               left: '50%',
               transform: 'translateX(-50%)',
               zIndex: 6,
               display: 'flex',
-              gap: 4,
-              background: SW_COLORS.paper + 'cc',
+              gap: 2,
+              background: alpha(SW_COLORS.void, 0.92),
               backdropFilter: 'blur(8px)',
               WebkitBackdropFilter: 'blur(8px)',
-              padding: 3,
-              borderRadius: 6,
+              padding: 2,
+              borderRadius: SW_RADIUS.sm + 2,
               border: `1px solid ${SW_COLORS.line}`,
             }}
             title="Floor overlay — what each station shows · OPERATIONS: operation code · RESOURCES: worker count · KPIS: utilisation heat-map"
@@ -2407,18 +2378,25 @@ export function BuilderPage() {
             ).map(([l, label]) => (
               <button
                 key={l}
+                role="tab"
+                aria-selected={lens === l}
                 onClick={() => setLens(l)}
+                onMouseEnter={(e) => {
+                  if (lens !== l) e.currentTarget.style.color = SW_COLORS.ink;
+                }}
+                onMouseLeave={(e) => {
+                  if (lens !== l) e.currentTarget.style.color = SW_COLORS.muted;
+                }}
                 style={{
-                  background: lens === l ? SW_COLORS.ink : 'transparent',
-                  color: lens === l ? SW_COLORS.paper : SW_COLORS.muted,
-                  border: 'none',
-                  padding: '6px 12px',
-                  fontFamily: SW_FONTS.display,
-                  fontSize: 10,
-                  fontWeight: 900,
+                  ...SW_TYPE.kicker,
                   letterSpacing: '0.08em',
+                  background: lens === l ? SW_COLORS.steelLite : 'transparent',
+                  color: lens === l ? SW_COLORS.ink : SW_COLORS.muted,
+                  border: 'none',
+                  padding: '7px 13px',
                   cursor: 'pointer',
-                  borderRadius: 4,
+                  borderRadius: SW_RADIUS.sm,
+                  transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
                 }}
               >
                 {label}
@@ -2457,11 +2435,6 @@ export function BuilderPage() {
         twin={twin}
         selected={selected}
         lens={lens}
-        onUpdateDept={(id, patch) => updateDepartment(id, patch)}
-        onRemoveDept={(id) => {
-          removeDepartment(id);
-          setSelected(null);
-        }}
         onUpdateWs={(id, patch) => updateWorkstation(id, patch)}
         onRemoveWs={(id) => {
           removeWorkstation(id);
@@ -2472,15 +2445,12 @@ export function BuilderPage() {
         onSetKpiTargets={setKpiTargets}
         onSetBlock={setBlock}
         onRemoveConnector={removeConnector}
-        onAddLine={(deptId) => {
-          const dept = twin.departments.find((d) => d.id === deptId);
-          if (!dept) return;
-          const n = (twin.lines ?? []).filter((l) => l.deptId === deptId).length + 1;
+        onAddLine={() => {
+          const n = (twin.lines ?? []).length + 1;
           addLine({
-            deptId,
             name: `Line ${String.fromCharCode(64 + n)} · new`,
             productionSystem: 'PBS',
-            color: dept.color,
+            color: 'blue',
             garmentId: undefined,
           });
         }}
@@ -2653,7 +2623,8 @@ function Palette(props: PaletteProps) {
         gridColumn: '1',
         gridRow: '2',
         borderRight: `1px solid ${SW_COLORS.line}`,
-        background: SW_COLORS.paper,
+        borderTop: `3px solid ${SW_COLORS.brand}`,
+        background: SW_COLORS.steel,
         display: 'flex',
         flexDirection: 'column',
         minHeight: 0,
@@ -2664,7 +2635,9 @@ function Palette(props: PaletteProps) {
           stations, PROCESS always authors with blocks). */}
       <div
         style={{
-          padding: '8px 12px',
+          height: 40,
+          flex: 'none',
+          padding: '0 12px',
           borderBottom: `1px solid ${SW_COLORS.line}`,
           display: 'flex',
           alignItems: 'center',
@@ -2672,24 +2645,21 @@ function Palette(props: PaletteProps) {
           gap: 8,
         }}
       >
-        <span style={{ fontFamily: SW_FONTS.display, fontSize: 12, fontWeight: 900, letterSpacing: '2px', color: SW_COLORS.ink }}>
-          PALETTE
-        </span>
+        <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.ink }}>Palette</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span
             title="Palette follows the view — STATIONS in 2D/ISO · BLOCKS in PROCESS"
             style={{
-              background: SW_COLORS.ink,
-              color: SW_COLORS.paper,
+              ...SW_TYPE.kicker,
+              fontSize: 10,
+              letterSpacing: '0.08em',
+              background: SW_COLORS.steelLite,
+              color: SW_COLORS.ink,
               borderRadius: 4,
               padding: '5px 8px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
             }}
           >
-            {props.tab === 'ws' ? 'STATIONS' : 'BLOCKS'}
+            {props.tab === 'ws' ? 'STN' : 'BLK'}
           </span>
           <PaneCollapseButton side="left" onClick={props.onCollapse} />
         </div>
@@ -2755,7 +2725,7 @@ function Palette(props: PaletteProps) {
                       alignItems: 'center',
                       gap: 6,
                       padding: '6px 10px',
-                      background: SW_COLORS.paperDeep,
+                      background: SW_COLORS.steel,
                       // Per-axis shorthands, not borderTop/borderLeft/… —
                       // mixing side longhands with the `border` shorthand the
                       // station cards use makes React warn when it reconciles
@@ -2795,7 +2765,7 @@ function Palette(props: PaletteProps) {
                           onClick={() => props.onPickWs(a.id)}
                           title={a.label}
                           style={{
-                            background: armed ? SW_COLORS.brandLite : SW_COLORS.paperDeep,
+                            background: armed ? SW_COLORS.brandLite : SW_COLORS.paper,
                             border: `1px solid ${armed ? SW_COLORS.brand : SW_COLORS.line}`,
                             borderRadius: 6,
                             padding: 6,
@@ -2886,72 +2856,39 @@ function PmlPalettePane({
                 {presets.length}
               </span>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(40px, 1fr))',
+                gap: 6,
+              }}
+            >
               {presets.map((preset: ApparelBlockPreset) => {
                 const baseSpec = PML_BLOCK_LIBRARY[preset.baseKind];
                 const fixtureId = pmlFixtureId(preset.baseKind);
                 const armed = drop.kind === 'ws' && drop.catalogId === fixtureId;
                 const tint = PML_CATEGORY_TINT[baseSpec.category];
+                const ports = `${baseSpec.inputs.length} IN · ${baseSpec.outputs.length} OUT${baseSpec.usesResources ? ' · uses resources' : ''}`;
                 return (
                   <button
                     key={preset.id}
                     onClick={() => onPickWs(fixtureId, preset.id)}
-                    title={`${preset.label} — ${preset.blurb}${preset.example ? '\n\n' + preset.example : ''}`}
+                    aria-label={preset.label}
+                    title={`${preset.label} — ${preset.blurb}\n${ports}${preset.example ? '\n\n' + preset.example : ''}`}
                     style={{
                       background: armed ? SW_COLORS.brandLite : tint.fill,
                       border: `1px solid ${armed ? SW_COLORS.brand : tint.stroke}`,
-                      borderLeft: `4px solid ${tint.stroke}`,
                       borderRadius: 6,
-                      padding: '8px 6px',
+                      padding: 0,
+                      aspectRatio: '1 / 1',
+                      minWidth: 0,
                       cursor: 'pointer',
                       display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'flex-start',
-                      gap: 4,
-                      textAlign: 'left',
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
-                      <span
-                        style={{
-                          width: 20,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          color: tint.stroke,
-                          flexShrink: 0,
-                        }}
-                      >
-                        <baseSpec.Icon size={18} color={tint.stroke} title={preset.label} />
-                      </span>
-                      <span
-                        style={{
-                          fontFamily: SW_FONTS.display,
-                          fontSize: 11,
-                          fontWeight: 800,
-                          color: SW_COLORS.ink,
-                          flex: 1,
-                          minWidth: 0,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {preset.label}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        fontFamily: SW_FONTS.mono,
-                        fontSize: 9,
-                        fontWeight: 700,
-                        color: SW_COLORS.muted,
-                        letterSpacing: '0.06em',
-                      }}
-                    >
-                      {baseSpec.inputs.length} IN · {baseSpec.outputs.length} OUT
-                      {baseSpec.usesResources && ' · ⚡'}
-                    </div>
+                    <baseSpec.Icon size={20} color={tint.stroke} title={preset.label} />
                   </button>
                 );
               })}
@@ -2972,7 +2909,7 @@ interface CanvasSVGProps {
   lens: Lens;
   hoverCell: { x: number; y: number } | null;
   drop: DropTool;
-  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  selected: { kind: 'ws'; id: string } | null;
   /** Full set of workstation ids currently in the selection (primary +
    *  marquee-extended). Every id in here gets the selection ring on the
    *  canvas. Passed in addition to `selected` so the Inspector still
@@ -2993,11 +2930,11 @@ interface CanvasSVGProps {
    *  1:1 viewBox and to compute which cells are currently on screen. */
   stageSize: { w: number; h: number };
   onSelect: (
-    s: { kind: 'dept' | 'ws'; id: string } | null,
+    s: { kind: 'ws'; id: string } | null,
     modifiers?: { shift: boolean },
   ) => void;
   onRemoveConnector: (id: string) => void;
-  onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
+  onStartDrag: (kind: 'ws', id: string, e: React.MouseEvent) => void;
   /** Clipboard ghost — when non-empty AND no other tool is armed, the canvas
    *  paints translucent footprints at the cursor previewing where ⌘V would
    *  drop the buffered cluster. Lets users aim a paste without guessing. */
@@ -3032,10 +2969,8 @@ function CanvasSVG(props: CanvasSVGProps) {
   // opacity (1 for focused, FOCUS_DIM for unfocused, 1 when nothing selected).
   const focusActive = selectedWsIds.size > 0 || selected !== null;
   const dim = (focused: boolean) => (focusActive && !focused ? FOCUS_DIM : 1);
-  const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
-  // A line is in focus if it lives in the selected dept or holds a selected ws.
+  // A line is in focus when it holds a selected workstation.
   const lineFocused = (line: SewingLine) =>
-    selectedDeptId === line.deptId ||
     twin.workstations.some((w) => w.lineId === line.id && selectedWsIds.has(w.id));
 
   // Grid subdivision density. As the user zooms in, each integer cell is
@@ -3104,15 +3039,16 @@ function CanvasSVG(props: CanvasSVGProps) {
     >
       {/* Stage-filling background — catches pan-drag clicks anywhere the
           floor doesn't reach (paranoid safeguard; the floor below already
-          covers the visible cell range). Same hue as the stage so the seam
-          is invisible. */}
+          covers the visible cell range). Transparent so the stage's void
+          ground and vignette read through; a transparent fill still
+          hit-tests, a `none` fill would not. */}
       <rect
         data-canvas-bg="true"
         x={vbMinX}
         y={vbMinY}
         width={W}
         height={H}
-        fill={SW_COLORS.paper}
+        fill="transparent"
       />
       {/* Pan/zoom transform — applied in SVG-space rather than via CSS on
           the wrapper, so the SVG keeps filling the stage at 100% even when
@@ -3121,11 +3057,12 @@ function CanvasSVG(props: CanvasSVGProps) {
       <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
       {/* Floor base — covers the visible cell range so the surface feels
           infinite. Marked as canvas background so panning ignores entity
-          clicks but accepts background drags. */}
+          clicks but accepts background drags. Transparent (the stage ground
+          shows through) but still hit-testable. */}
       <polygon
         data-canvas-bg="true"
         points={ptsToStr([floorTL, floorTR, floorBR, floorBL])}
-        fill={SW_COLORS.paperDeep}
+        fill="transparent"
         stroke="none"
       />
 
@@ -3148,7 +3085,7 @@ function CanvasSVG(props: CanvasSVGProps) {
                 y1={a.sy}
                 x2={b.sx}
                 y2={b.sy}
-                stroke="#0F141908"
+                stroke="#E8EDF508"
                 strokeWidth={0.3}
               />
             );
@@ -3169,7 +3106,7 @@ function CanvasSVG(props: CanvasSVGProps) {
                 y1={a.sy}
                 x2={b.sx}
                 y2={b.sy}
-                stroke="#0F141908"
+                stroke="#E8EDF508"
                 strokeWidth={0.3}
               />
             );
@@ -3179,13 +3116,13 @@ function CanvasSVG(props: CanvasSVGProps) {
         const x = gMinX + i;
         const a = P(x, gMinY);
         const b = P(x, gMaxY);
-        return <line key={`v-${x}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
+        return <line key={`v-${x}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#E8EDF512" strokeWidth={0.6} />;
       })}
       {Array.from({ length: gMaxY - gMinY + 1 }, (_, i) => {
         const y = gMinY + i;
         const a = P(gMinX, y);
         const b = P(gMaxX, y);
-        return <line key={`h-${y}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
+        return <line key={`h-${y}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#E8EDF512" strokeWidth={0.6} />;
       })}
 
       {/* Original factory footprint — drawn as a faint outline so the user
@@ -3195,37 +3132,12 @@ function CanvasSVG(props: CanvasSVGProps) {
       <polygon
         points={ptsToStr([factoryTL, factoryTR, factoryBR, factoryBL])}
         fill="none"
-        stroke="#0F141930"
+        stroke="#E8EDF52E"
         strokeWidth={1.2}
         strokeDasharray="6 4"
         style={{ pointerEvents: 'none' }}
       />
 
-
-      {/* DEPARTMENTS — drawn first so they sit under workstations.
-          While a drop tool is armed (drop.kind !== 'none'), entity shapes must
-          let clicks pass through to the stage's onCanvasClick so placement
-          works *inside* a department instead of getting eaten by dept select.
-          Each shape is wrapped in a focus-dim group: when something else is
-          selected, this dept fades to FOCUS_DIM so the selection pops. */}
-      {twin.departments.map((d) => {
-        const isDeptFocused = selectedDeptId === d.id;
-        return (
-          <g
-            key={d.id}
-            style={{ opacity: dim(isDeptFocused), transition: 'opacity 160ms' }}
-          >
-            <DepartmentShape
-              dept={d}
-              selected={selected?.kind === 'dept' && selected.id === d.id}
-              placing={props.drop.kind !== 'none'}
-              projection={projection}
-              onClick={(e) => props.onSelect({ kind: 'dept', id: d.id }, { shift: e.shiftKey })}
-              onMouseDown={(e) => props.onStartDrag('dept', d.id, e)}
-            />
-          </g>
-        );
-      })}
 
       {/* SEWING LINE BANDS — translucent halo around the convex bounding box
           of each line's member workstations. Drawn above departments so the
@@ -3246,6 +3158,21 @@ function CanvasSVG(props: CanvasSVGProps) {
           cell; PBS / synchro / UPS have no rotation assignments so this
           renders nothing. */}
       <RotationCellsOverlay twin={twin} projection={projection} />
+
+      {/* CONNECTOR HIT TARGETS — mounted UNDER the workstations so a station
+          crossed by a flow line still wins the click; clicking a connector in
+          the open (between stations) still prompts delete as before. The
+          visible strokes render in a second, pointer-transparent pass above
+          the stations (see below). */}
+      <ConnectorLayer
+        twin={twin}
+        connect={props.connect}
+        onRemove={props.onRemoveConnector}
+        focusActive={focusActive}
+        focusedWsIds={selectedWsIds}
+        projection={projection}
+        layer="hit"
+      />
 
       {/* WORKSTATIONS — depth-sorted by x+y */}
       {[...twin.workstations]
@@ -3303,9 +3230,12 @@ function CanvasSVG(props: CanvasSVGProps) {
           );
         })}
 
-      {/* CONNECTORS — drawn above stations so arrows aren't occluded.
-          Connectors stay fully visible when either endpoint is in focus,
-          otherwise they fade with the rest of the scene. */}
+      {/* CONNECTORS (visual pass) — strokes/arrowheads drawn above stations
+          so arrows aren't occluded, but pointer-transparent: clicks fall
+          through to the station sprites, and connector deletion is handled
+          by the hit layer mounted under the stations. Connectors stay fully
+          visible when either endpoint is in focus, otherwise they fade with
+          the rest of the scene. */}
       <ConnectorLayer
         twin={twin}
         connect={props.connect}
@@ -3313,6 +3243,7 @@ function CanvasSVG(props: CanvasSVGProps) {
         focusActive={focusActive}
         focusedWsIds={selectedWsIds}
         projection={projection}
+        layer="visual"
       />
 
       {/* HOVER PREVIEW */}
@@ -3376,74 +3307,6 @@ function CanvasSVG(props: CanvasSVGProps) {
 
 // ── DEPARTMENT shape ──────────────────────────────────────────────────────────
 
-function DepartmentShape({
-  dept,
-  selected,
-  placing,
-  projection,
-  onClick,
-  onMouseDown,
-}: {
-  dept: Department;
-  selected: boolean;
-  placing: boolean;
-  projection: Projection;
-  onClick: (e: React.MouseEvent) => void;
-  onMouseDown: (e: React.MouseEvent) => void;
-}) {
-  const P = projection.project;
-  const tl = P(dept.bounds.x, dept.bounds.y);
-  const tr = P(dept.bounds.x + dept.bounds.w, dept.bounds.y);
-  const br = P(dept.bounds.x + dept.bounds.w, dept.bounds.y + dept.bounds.h);
-  const bl = P(dept.bounds.x, dept.bounds.y + dept.bounds.h);
-  const fill = DEPT_COLOR_HEX[dept.color] ?? SW_COLORS.paperEdge;
-  // Label centre
-  const cx = (tl.sx + tr.sx + br.sx + bl.sx) / 4;
-  const cy = (tl.sy + tr.sy + br.sy + bl.sy) / 4;
-  return (
-    <g
-      onClick={(e) => {
-        if (placing) return; // let stage's onCanvasClick handle placement
-        e.stopPropagation();
-        onClick(e);
-      }}
-      onMouseDown={(e) => {
-        if (placing) return; // don't start a dept drag while a tool is armed
-        onMouseDown(e);
-      }}
-      style={{ cursor: placing ? 'crosshair' : 'move' }}
-    >
-      {/* The plate tints the ground rather than painting it: the floor reads as
-          desaturated slate so that saturation always means *state*, and a choked
-          station is the brightest thing on the stage. The department's identity
-          is carried by the hairline and the label, not by a bright fill — these
-          opacities were tuned for a white ground, where 32% of a pale tint was
-          soft; over near-black the same figure glows. */}
-      <polygon
-        points={ptsToStr([tl, tr, br, bl])}
-        fill={fill}
-        fillOpacity={selected ? 0.26 : 0.14}
-        stroke={selected ? SW_COLORS.brand : fill}
-        strokeWidth={selected ? 3 : 1.5}
-        strokeOpacity={selected ? 1 : 0.7}
-      />
-      <text
-        x={cx}
-        y={cy}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fontFamily={SW_FONTS.display}
-        fontSize={13}
-        fontWeight={900}
-        fill={SW_COLORS.ink}
-        opacity={0.7}
-        style={{ pointerEvents: 'none', letterSpacing: '0.1em', textTransform: 'uppercase' }}
-      >
-        {dept.name}
-      </text>
-    </g>
-  );
-}
 
 // ── SEWING LINE band ──────────────────────────────────────────────────────────
 
@@ -3566,7 +3429,6 @@ function SewingLineBand({
 }) {
   const members = twin.workstations.filter((w) => w.lineId === line.id);
   if (members.length === 0) return null;
-  const dept = twin.departments.find((d) => d.id === line.deptId);
 
   // Bounding box of all member workstations, in world cells.
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -3582,13 +3444,8 @@ function SewingLineBand({
   // 0.4-cell padding so the band breathes around the equipment.
   const PAD = 0.4;
   minX -= PAD; minY -= PAD; maxX += PAD; maxY += PAD;
-  // Clip to the parent department so the band never spills onto a neighbour.
-  if (dept) {
-    minX = Math.max(minX, dept.bounds.x);
-    minY = Math.max(minY, dept.bounds.y);
-    maxX = Math.min(maxX, dept.bounds.x + dept.bounds.w);
-    maxY = Math.min(maxY, dept.bounds.y + dept.bounds.h);
-  }
+  // No clipping: the band is the hull of its own member stations, and with
+  // zones gone there is no parent rect that could clip it.
   const P = projection.project;
   const tl = P(minX, minY);
   const tr = P(maxX, minY);
@@ -3596,7 +3453,7 @@ function SewingLineBand({
   const bl = P(minX, maxY);
   const accent = DEPT_COLOR_HEX[line.color] ?? SW_COLORS.brand;
 
-  // Label anchored at the top-left corner so it doesn't fight the dept name.
+  // Label anchored at the top-left corner.
   const labelX = tl.sx + 8;
   const labelY = tl.sy + 4;
 
@@ -4332,6 +4189,7 @@ function ConnectorLayer({
   focusActive,
   focusedWsIds,
   projection,
+  layer,
 }: {
   twin: ReturnType<typeof selectActiveTwin>;
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
@@ -4341,13 +4199,58 @@ function ConnectorLayer({
   focusActive: boolean;
   focusedWsIds: Set<string>;
   projection: Projection;
+  /** Which half of the layer to paint. The component mounts twice so the
+   *  arrows can be SEEN above stations but CLICKED below them:
+   *  - 'hit'    — invisible 14px click targets, mounted under the
+   *               workstations so a station crossing a line still wins the
+   *               click (selecting a station must never surface the
+   *               delete-connector confirm).
+   *  - 'visual' — the visible strokes, arrowheads and carrier badges,
+   *               mounted above the workstations with pointer events off. */
+  layer: 'hit' | 'visual';
 }) {
   const confirm = useConfirm();
   const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
   const dim = connect.on ? 0.35 : 1; // de-emphasise existing arrows while connecting
 
+  if (layer === 'hit') {
+    return (
+      <g>
+        {(twin.connectors ?? []).map((c) => {
+          const a = wsById.get(c.fromWsId);
+          const b = wsById.get(c.toWsId);
+          if (!a || !b) return null;
+          const pa = workstationScreenCenter(a, projection);
+          const pb = workstationScreenCenter(b, projection);
+          return (
+            <line
+              key={c.id}
+              x1={pa.sx}
+              y1={pa.sy}
+              x2={pb.sx}
+              y2={pb.sy}
+              stroke="transparent"
+              strokeWidth={14}
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (await confirm({ title: 'Delete connector', message: `Delete ${CONNECTOR_LABEL[c.kind]} connector?`, confirmLabel: 'Delete', variant: 'danger' })) {
+                  onRemove(c.id);
+                }
+              }}
+              style={{ cursor: 'pointer' }}
+            >
+              <title>
+                {`${CONNECTOR_LABEL[c.kind]}${c.flow?.carrier ? ` · ${c.flow.carrier}` : ''} · ${a.name} → ${b.name} (click to delete)`}
+              </title>
+            </line>
+          );
+        })}
+      </g>
+    );
+  }
+
   return (
-    <g>
+    <g style={{ pointerEvents: 'none' }}>
       <defs>
         {(['flow', 'operator', 'material'] as ConnectorKind[]).map((k) => (
           <marker
@@ -4382,7 +4285,7 @@ function ConnectorLayer({
         // the line type at a glance without opening the inspector.
         const carrierLabel = style.label;
         return (
-          <g key={c.id} style={{ pointerEvents: 'auto', opacity: focusOpacity, transition: 'opacity 160ms' }}>
+          <g key={c.id} style={{ opacity: focusOpacity, transition: 'opacity 160ms' }}>
             <line
               x1={pa.sx}
               y1={pa.sy}
@@ -4394,26 +4297,6 @@ function ConnectorLayer({
               strokeDasharray={style.dash ?? undefined}
               markerEnd={`url(#sw-arrow-${c.kind})`}
             />
-            {/* Click target — invisible thicker line for easier hit-testing */}
-            <line
-              x1={pa.sx}
-              y1={pa.sy}
-              x2={pb.sx}
-              y2={pb.sy}
-              stroke="transparent"
-              strokeWidth={14}
-              onClick={async (e) => {
-                e.stopPropagation();
-                if (await confirm({ title: 'Delete connector', message: `Delete ${CONNECTOR_LABEL[c.kind]} connector?`, confirmLabel: 'Delete', variant: 'danger' })) {
-                  onRemove(c.id);
-                }
-              }}
-              style={{ cursor: 'pointer' }}
-            >
-              <title>
-                {`${CONNECTOR_LABEL[c.kind]}${c.flow?.carrier ? ` · ${c.flow.carrier}` : ''} · ${a.name} → ${b.name} (click to delete)`}
-              </title>
-            </line>
             {c.label ? (
               <text
                 x={mx}
@@ -4500,15 +4383,15 @@ function HoverPreview({ cell, drop, projection }: { cell: { x: number; y: number
 
 interface BuilderProcessViewProps {
   twin: ReturnType<typeof selectActiveTwin>;
-  selected: { kind: 'dept' | 'ws'; id: string } | null;
-  onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  selected: { kind: 'ws'; id: string } | null;
+  onSelect: (s: { kind: 'ws'; id: string } | null) => void;
   /** Active drop tool. `kind === 'ws'` makes a click in any dept lane
    *  drop a new workstation in that dept. */
   drop: DropTool;
   setDrop: React.Dispatch<React.SetStateAction<DropTool>>;
   /** Twin-store mutators surfaced for authoring from this view. */
   addWorkstation: (input: {
-    deptId: string;
+    lineId?: string;
     catalogId: string;
     position: { x: number; y: number };
     presetLabel?: string;
@@ -4554,18 +4437,21 @@ interface ProcessNode {
   y: number;
   w: number;
   h: number;
-  /** Department this block belongs to (already resolved from ws.deptId). */
-  dept: Department | undefined;
+  /** Sewing line this block belongs to (already resolved from ws.lineId). */
+  line: SewingLine | undefined;
 }
 
-/** Tints by PML category — keeps the diagram visually parseable at a glance. */
+/** Tints by PML category — keeps the diagram visually parseable at a glance.
+ *  Fills are dark tinted wells derived from the category accent so the cards
+ *  sit on the void stage like every other surface (the old pastel fills were
+ *  a light-theme remnant that glared inside the dark inspector). */
 const PML_CATEGORY_TINT: Record<string, { fill: string; stroke: string }> = {
-  lifecycle: { fill: '#FFF7E6', stroke: '#F2C12E' },
-  buffer:    { fill: '#EEF3FF', stroke: '#3D6EE5' },
-  service:   { fill: '#FFEBEC', stroke: '#E63946' },
-  routing:   { fill: '#F0FBF4', stroke: '#1FB36B' },
-  batch:     { fill: '#F4ECFF', stroke: '#7E5BEF' },
-  movement:  { fill: '#FDF1E0', stroke: '#C8915E' },
+  lifecycle: { fill: alpha('#F2C12E', 0.14), stroke: '#F2C12E' },
+  buffer:    { fill: alpha('#3D6EE5', 0.14), stroke: '#3D6EE5' },
+  service:   { fill: alpha('#E63946', 0.14), stroke: '#E63946' },
+  routing:   { fill: alpha('#1FB36B', 0.14), stroke: '#1FB36B' },
+  batch:     { fill: alpha('#7E5BEF', 0.14), stroke: '#7E5BEF' },
+  movement:  { fill: alpha('#C8915E', 0.14), stroke: '#C8915E' },
 };
 
 /** Picks a legible glyph colour (near-white or near-black) for a solid fill,
@@ -4662,7 +4548,7 @@ function BuilderProcessView({
       y: p.y,
       w: BLOCK_W,
       h: BLOCK_H,
-      dept: twin.departments.find((d) => d.id === ws.deptId),
+      line: (twin.lines ?? []).find((l) => l.id === ws.lineId),
     });
   });
 
@@ -4755,27 +4641,21 @@ function BuilderProcessView({
   // iso bounds so the ISO view also reflects the new station. The PROCESS
   // lane re-sorts by ws.position.x, so we push the new station to the
   // right end by using `bounds.x + bounds.w - 1` (clamped to >= bounds.x).
-  const handleDropWsInDept = (deptId: string) => {
+  // Drop a station into a lane. Lanes are per-line now, so the drop simply
+  // tags the new station with that line and parks it to the right of the
+  // line's existing members; there is no zone rect to clamp inside.
+  const handleDropWsInLane = (lineId: string) => {
     if (drop.kind !== 'ws') return false;
-    const dept = twin.departments.find((d) => d.id === deptId);
-    if (!dept) return false;
-    const occupied = twin.workstations.filter((w) => w.deptId === deptId);
-    const nextX = Math.max(
-      dept.bounds.x,
-      Math.min(
-        dept.bounds.x + dept.bounds.w - 1,
-        occupied.length > 0
-          ? Math.max(...occupied.map((w) => w.position.x)) + 1
-          : dept.bounds.x,
-      ),
-    );
-    const nextY = Math.max(
-      dept.bounds.y,
-      Math.min(dept.bounds.y + dept.bounds.h - 1, dept.bounds.y),
-    );
+    const occupied = twin.workstations.filter((w) => w.lineId === lineId);
+    const nextX = occupied.length > 0
+      ? Math.max(...occupied.map((w) => w.position.x)) + 1
+      : 0;
+    const nextY = occupied.length > 0
+      ? Math.min(...occupied.map((w) => w.position.y))
+      : 0;
     const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
     const id = addWorkstation({
-      deptId,
+      lineId,
       catalogId: drop.catalogId,
       position: { x: nextX, y: nextY },
       presetLabel: preset?.label,
@@ -4972,37 +4852,38 @@ function BuilderProcessView({
         {/* Lane backdrops + labels, one band per department (plus orphan /
             resource-pool lanes). Sized from the seed layout so wrapped lanes
             keep their blocks inside the band. A lane fades when a *different*
-            dept/ws is the focus. */}
+            station is the focus. */}
         {(() => {
           const focusActive = selected !== null;
-          const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
-          const selectedWsDeptId =
+          const selectedWsLineId =
             selected?.kind === 'ws'
-              ? twin.workstations.find((w) => w.id === selected.id)?.deptId ?? null
+              ? twin.workstations.find((w) => w.id === selected.id)?.lineId ?? null
               : null;
           return seed.lanes.map((ln) => {
-            const dept = ln.synthetic
+            const line = ln.synthetic
               ? null
-              : twin.departments.find((d) => d.id === ln.deptId);
-            const isPool = ln.deptId === '__pool__';
-            const accent = dept ? DEPT_COLOR_HEX[dept.color] : SW_COLORS.muted;
-            const laneArmed = !!dept && drop.kind === 'ws';
-            const laneFocused = dept
-              ? selectedDeptId === dept.id || selectedWsDeptId === dept.id
-              : false;
+              : (twin.lines ?? []).find((l) => l.id === ln.lineId);
+            const isPool = ln.lineId === '__pool__';
+            const accent = line ? DEPT_COLOR_HEX[line.color] : SW_COLORS.muted;
+            const laneArmed = !!line && drop.kind === 'ws';
+            const laneFocused = line ? selectedWsLineId === line.id : false;
             const laneOpacity = focusActive && !laneFocused ? FOCUS_DIM : 1;
-            const title = dept
-              ? dept.name.toUpperCase()
+            const title = line
+              ? line.name.toUpperCase()
               : isPool
                 ? 'RESOURCE POOLS'
                 : 'UNASSIGNED';
-            const sub = dept ? dept.kind : isPool ? 'referenced by Services' : 'no department';
+            const sub = line
+              ? line.productionSystem
+              : isPool
+                ? 'referenced by Services'
+                : 'not on a line';
             const countLabel = isPool
               ? `${ln.wsIds.length} POOL${ln.wsIds.length === 1 ? '' : 'S'}`
               : `${ln.wsIds.length} BLOCK${ln.wsIds.length === 1 ? '' : 'S'}`;
             return (
               <g
-                key={`lane-${ln.deptId ?? 'x'}`}
+                key={`lane-${ln.lineId ?? 'x'}`}
                 transform={`translate(0, ${ln.y})`}
                 style={{ opacity: laneOpacity, transition: 'opacity 160ms' }}
               >
@@ -5018,13 +4899,9 @@ function BuilderProcessView({
                   rx={4}
                   style={{ cursor: laneArmed ? 'crosshair' : 'default' }}
                   onClick={(e) => {
-                    if (drop.kind === 'ws' && dept) {
+                    if (drop.kind === 'ws' && line) {
                       e.stopPropagation();
-                      handleDropWsInDept(dept.id);
-                    } else if (dept) {
-                      // Click selects the dept so the inspector can edit it.
-                      e.stopPropagation();
-                      onSelect({ kind: 'dept', id: dept.id });
+                      handleDropWsInLane(line.id);
                     }
                   }}
                 />
@@ -5071,17 +4948,9 @@ function BuilderProcessView({
         {(() => {
           const focusActive = selected !== null;
           const selectedWsId = selected?.kind === 'ws' ? selected.id : null;
-          const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
           const wireFocused = (c: Connector) => {
             if (selectedWsId)
               return c.fromWsId === selectedWsId || c.toWsId === selectedWsId;
-            if (selectedDeptId) {
-              const from = twin.workstations.find((w) => w.id === c.fromWsId);
-              const to = twin.workstations.find((w) => w.id === c.toWsId);
-              return (
-                from?.deptId === selectedDeptId || to?.deptId === selectedDeptId
-              );
-            }
             return false;
           };
           return wires.map(({ c, a, b }) => {
@@ -5180,9 +5049,7 @@ function BuilderProcessView({
           };
           const bottleneck = !!n.ws.kpiObserved?.bottleneck;
           const focusActive = selected !== null;
-          const blockFocused =
-            isSelected ||
-            (selected?.kind === 'dept' && selected.id === n.ws.deptId);
+          const blockFocused = isSelected;
           const focusOpacity =
             focusActive && !blockFocused ? FOCUS_DIM : 1;
           return (
@@ -5953,10 +5820,8 @@ function LinePolicyEditor({
 
 interface InspectorProps {
   twin: ReturnType<typeof selectActiveTwin>;
-  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  selected: { kind: 'ws'; id: string } | null;
   lens: Lens;
-  onUpdateDept: (id: string, patch: Partial<Department>) => void;
-  onRemoveDept: (id: string) => void;
   onUpdateWs: (id: string, patch: Partial<Workstation>) => void;
   onRemoveWs: (id: string) => void;
   onSetOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
@@ -5966,11 +5831,11 @@ interface InspectorProps {
   onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
   onRemoveConnector: (id: string) => void;
   /** Add a new sewing line to a department. */
-  onAddLine: (deptId: string) => void;
+  onAddLine: () => void;
   /** Remove a sewing line. */
   onRemoveLine: (id: string) => void;
   /** Rename / re-style a sewing line. */
-  onUpdateLine: (id: string, patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>) => void;
+  onUpdateLine: (id: string, patch: Partial<Omit<SewingLine, 'id'>>) => void;
   /** Assign / unassign a single workstation to a line. */
   onAssignLine: (wsId: string, lineId: string | null) => void;
   /** Collapse the pane to its rail. */
@@ -5989,7 +5854,8 @@ function Inspector(props: InspectorProps) {
         gridColumn: '5',
         gridRow: '2',
         borderLeft: `1px solid ${SW_COLORS.line}`,
-        background: SW_COLORS.paper,
+        borderTop: `3px solid ${SW_COLORS.brand}`,
+        background: SW_COLORS.steel,
         display: 'flex',
         flexDirection: 'column',
         minHeight: 0,
@@ -5999,7 +5865,8 @@ function Inspector(props: InspectorProps) {
       <div
         style={{
           flex: '0 0 auto',
-          padding: '8px 12px',
+          height: 40,
+          padding: '0 12px',
           borderBottom: `1px solid ${SW_COLORS.line}`,
           display: 'flex',
           alignItems: 'center',
@@ -6007,9 +5874,7 @@ function Inspector(props: InspectorProps) {
           gap: 8,
         }}
       >
-        <span style={{ fontFamily: SW_FONTS.display, fontSize: 12, fontWeight: 900, letterSpacing: '2px', color: SW_COLORS.ink }}>
-          INSPECTOR
-        </span>
+        <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.ink }}>Inspector</span>
         <PaneCollapseButton side="right" onClick={props.onCollapse} />
       </div>
       <InspectorBody {...props} />
@@ -6033,218 +5898,158 @@ function InspectorBody(props: InspectorProps) {
     padding: 14,
   };
 
+  // Nothing selected — the Inspector falls back to factory-level authoring.
+  // Sewing lines live here because they are top-level now: the floor is free
+  // space, so a line belongs to the factory rather than to any zone, and this
+  // is the only place to create one before there is a station to select.
   if (!props.selected) {
+    const lines = props.twin.lines ?? [];
     return (
       <div style={wrapper}>
-        <div style={{ color: SW_COLORS.muted, fontSize: 12 }}>
-          Click a department or workstation to inspect its parameters.
-        </div>
-      </div>
-    );
-  }
-
-  if (props.selected.kind === 'dept') {
-    const dept = props.twin.departments.find((d) => d.id === props.selected!.id);
-    if (!dept) return <div style={wrapper}>Selection lost.</div>;
-    return (
-      <div style={wrapper}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div style={sectionLabel}>Department</div>
-          <button onClick={() => props.onRemoveDept(dept.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px' }}>
-            ✕ DELETE
-          </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 12 }}>
+          <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Factory</div>
+          <div style={{ ...SW_TYPE.title, color: SW_COLORS.ink }}>{props.twin.name}</div>
+          <div style={{ display: 'flex', gap: 6, paddingTop: 2 }}>
+            <InspectorChip edge={SW_COLORS.line}>{`${props.twin.workstations.length} STN`}</InspectorChip>
+            <InspectorChip edge={SW_COLORS.line}>{`${lines.length} LINE${lines.length === 1 ? '' : 'S'}`}</InspectorChip>
+          </div>
         </div>
 
-        <InspectorGroup id="dept.identity" title="Identity" defaultOpen>
-        <label style={fieldLabel}>Name</label>
-        <input
-          value={dept.name}
-          onChange={(e) => props.onUpdateDept(dept.id, { name: e.target.value })}
-          style={inputBase}
-        />
-
-        <div style={{ height: 10 }} />
-        <label style={fieldLabel}>Kind</label>
-        <input
-          value={dept.kind}
-          onChange={(e) => props.onUpdateDept(dept.id, { kind: e.target.value })}
-          style={inputBase}
-        />
-
-        <div style={{ height: 10 }} />
-        <label style={fieldLabel}>Colour</label>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {(Object.keys(DEPT_COLOR_HEX) as DepartmentColorKey[]).map((c) => (
-            <button
-              key={c}
-              onClick={() => props.onUpdateDept(dept.id, { color: c })}
-              title={c}
-              style={{
-                width: 22, height: 22, borderRadius: 4,
-                background: DEPT_COLOR_HEX[c],
-                border: dept.color === c ? `2px solid ${SW_COLORS.ink}` : `1px solid ${SW_COLORS.line}`,
-                cursor: 'pointer',
-                padding: 0,
-              }}
-            />
-          ))}
-        </div>
-        </InspectorGroup>
-
-        <InspectorGroup id="dept.bounds" title="Bounds (cells)" defaultOpen={false}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-          <NumField label="x" step={0.1} value={dept.bounds.x} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, x: v } })} />
-          <NumField label="y" step={0.1} value={dept.bounds.y} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, y: v } })} />
-          <NumField label="w" step={0.1} value={dept.bounds.w} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, w: v } })} />
-          <NumField label="h" step={0.1} value={dept.bounds.h} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, h: v } })} />
-        </div>
-        </InspectorGroup>
-
-        <div style={{ height: 14 }} />
-        <div style={sectionLabel}>
-          Workstations in this dept · {props.twin.workstations.filter((w) => w.deptId === dept.id).length}
+        <div style={{ ...SW_TYPE.body, color: SW_COLORS.muted, marginBottom: 12 }}>
+          Click a station to inspect it, or drop one from the palette anywhere
+          on the floor.
         </div>
 
-        {/* SEWING LINES — production lines that group workstations inside
-            this department. Authoring lives here so every department can be a
-            multi-line floor (or stay line-less for storage / QC). */}
         <InspectorGroup
-          id="dept.lines"
-          title={`Sewing lines · ${(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length}`}
+          id="factory.lines"
+          title={`Sewing lines · ${lines.length}`}
           defaultOpen
           right={
             <button
-              onClick={() => props.onAddLine(dept.id)}
+              onClick={() => props.onAddLine()}
               style={{ ...btnSec(), padding: '3px 9px', fontSize: 10 }}
-              title="Create a new production line inside this department"
+              title="Create a new production line"
             >
               + ADD LINE
             </button>
           }
         >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
-          {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).map((line) => {
-            const memberCount = props.twin.workstations.filter((w) => w.lineId === line.id).length;
-            return (
-              <div
-                key={line.id}
-                style={{
-                  border: `1px solid ${SW_COLORS.line}`,
-                  borderLeft: `4px solid ${DEPT_COLOR_HEX[line.color]}`,
-                  borderRadius: 6,
-                  padding: 8,
-                  background: SW_COLORS.paperDeep,
-                }}
-              >
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <input
-                    value={line.name}
-                    onChange={(e) => props.onUpdateLine(line.id, { name: e.target.value })}
-                    style={{ ...inputBase, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                  />
-                  <button
-                    onClick={async () => {
-                      if (memberCount > 0 && !(await confirm({ title: 'Remove line', message: `Remove ${line.name}? ${memberCount} workstation${memberCount === 1 ? '' : 's'} will become unassigned but stay placed.`, confirmLabel: 'Remove', variant: 'danger' }))) return;
-                      props.onRemoveLine(line.id);
-                    }}
-                    style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 7px', fontSize: 10 }}
-                    title="Delete this line"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 6 }}>
-                  <div>
-                    <label style={{ ...fieldLabel, marginTop: 0 }}>System</label>
-                    <select
-                      value={line.productionSystem}
-                      onChange={(e) => {
-                        const nextSystem = e.target.value as ProductionSystemKey;
-                        // Drop any per-field policy overrides when the system
-                        // changes so the new system's defaults take over.
-                        // Without this, switching PBS→synchro would strand a
-                        // 30-piece bundleSize on a takt-paced line.
-                        props.onUpdateLine(line.id, {
-                          productionSystem: nextSystem,
-                          policy: undefined,
-                        });
-                      }}
-                      style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
-                    >
-                      {(['PBS', 'modular', 'UPS', 'synchro', 'straight'] as const).map((sys) => (
-                        <option key={sys} value={sys}>
-                          {sys}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ ...fieldLabel, marginTop: 0 }}>Garment</label>
-                    <input
-                      value={line.garmentId ?? ''}
-                      onChange={(e) =>
-                        props.onUpdateLine(line.id, {
-                          garmentId: e.target.value || undefined,
-                        })
-                      }
-                      placeholder="e.g. tshirt"
-                      style={{ ...inputBase, padding: '3px 6px', fontSize: 11 }}
-                    />
-                  </div>
-                </div>
-                <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
-                  {memberCount} workstation{memberCount === 1 ? '' : 's'} on this line
-                </div>
-                <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-                  {(Object.keys(DEPT_COLOR_HEX) as DepartmentColorKey[]).map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => props.onUpdateLine(line.id, { color: c })}
-                      title={`Line accent · ${c}`}
-                      style={{
-                        width: 14, height: 14, borderRadius: 3,
-                        background: DEPT_COLOR_HEX[c],
-                        border: line.color === c ? `2px solid ${SW_COLORS.ink}` : `1px solid ${SW_COLORS.line}`,
-                        cursor: 'pointer',
-                        padding: 0,
-                      }}
-                    />
-                  ))}
-                </div>
-                <LinePolicyEditor
-                  line={line}
-                  onUpdateLine={props.onUpdateLine}
-                />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
+            {lines.length === 0 && (
+              <div style={{ ...SW_TYPE.caption, color: SW_COLORS.muted }}>
+                No production lines yet. Stations placed without one draw from
+                the factory-level operator pool.
               </div>
-            );
-          })}
-          {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length === 0 && (
-            <div style={{ fontSize: 11, color: SW_COLORS.muted, padding: '4px 0' }}>
-              No production lines defined. Click <strong>+ ADD LINE</strong> to start one.
-            </div>
-          )}
-        </div>
+            )}
+            {lines.map((line) => {
+              const memberCount = props.twin.workstations.filter((w) => w.lineId === line.id).length;
+              return (
+                <div
+                  key={line.id}
+                  style={{
+                    border: `1px solid ${SW_COLORS.line}`,
+                    borderLeft: `4px solid ${DEPT_COLOR_HEX[line.color]}`,
+                    borderRadius: SW_RADIUS.sm,
+                    padding: 8,
+                    background: SW_COLORS.paper,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input
+                      value={line.name}
+                      onChange={(e) => props.onUpdateLine(line.id, { name: e.target.value })}
+                      style={{ ...inputBase, flex: 1, height: 28, fontSize: 12 }}
+                    />
+                    <button
+                      onClick={async () => {
+                        if (
+                          await confirm({
+                            title: 'Delete line',
+                            message: `Delete "${line.name}"? Its ${memberCount} station${memberCount === 1 ? '' : 's'} stay on the floor, unassigned.`,
+                            confirmLabel: 'Delete',
+                            variant: 'danger',
+                          })
+                        ) {
+                          props.onRemoveLine(line.id);
+                        }
+                      }}
+                      style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px' }}
+                      title="Delete this line (its stations remain on the floor)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+                    <InspectorChip edge={SW_COLORS.line}>{line.productionSystem}</InspectorChip>
+                    <InspectorChip edge={SW_COLORS.line}>{`${memberCount} STN`}</InspectorChip>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <LinePolicyEditor line={line} onUpdateLine={props.onUpdateLine} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </InspectorGroup>
       </div>
     );
   }
 
+
   // Workstation
   const ws = props.twin.workstations.find((w) => w.id === props.selected!.id);
   if (!ws) return <div style={wrapper}>Selection lost.</div>;
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
-  const dept = props.twin.departments.find((d) => d.id === ws.deptId);
-  const linesInDept = (props.twin.lines ?? []).filter((l) => l.deptId === ws.deptId);
-  const wsLine = ws.lineId ? linesInDept.find((l) => l.id === ws.lineId) ?? null : null;
+  // Every line in the factory is assignable — the floor is free space, so a
+  // station's line membership is not constrained by where it physically sits.
+  const allLines = props.twin.lines ?? [];
+  const wsLine = ws.lineId ? allLines.find((l) => l.id === ws.lineId) ?? null : null;
+  // Header chips + stat tiles — all authoring data (bulletin SMV, staffing),
+  // never sim results; those stay in the Sim view.
+  const machineCode = ISO_FIXTURE_TO_MACHINE_CODE[ws.catalogId];
+  const opMeta = opMetaFor(ws, garments.byId);
+  const boundOp =
+    ws.operation.opId && ws.operation.garmentId
+      ? garments.byId[ws.operation.garmentId]?.operations.find((o) => o.id === ws.operation.opId)
+      : undefined;
 
   return (
     <div style={wrapper}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <div style={sectionLabel}>Workstation</div>
-        <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px' }}>
+      {/* Identity masthead — overline kicker, display name, chip row. The
+          name is edited in the Identity group below; this is the read view. */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+          <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Workstation</div>
+          <div style={{ ...SW_TYPE.title, color: SW_COLORS.ink, overflowWrap: 'anywhere' }}>
+            {ws.name}
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', paddingTop: 2 }}>
+            {ws.operation.opId && (
+              <InspectorChip bg={SW_COLORS.brandLite} fg={SW_COLORS.brandText} edge={SW_COLORS.brandEdge}>
+                {opMeta.code}
+              </InspectorChip>
+            )}
+            {machineCode && <InspectorChip edge={SW_COLORS.line}>{machineCode}</InspectorChip>}
+            {wsLine && (
+              <InspectorChip edge={SW_COLORS.line} swatch={DEPT_COLOR_HEX[wsLine.color]}>
+                {wsLine.name}
+              </InspectorChip>
+            )}
+          </div>
+        </div>
+        <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px', flex: 'none' }}>
           ✕ DELETE
         </button>
       </div>
+
+      {/* Stat tiles — bulletin SMV and required staffing, side by side. */}
+      {(boundOp || ws.resources.workersRequired > 0) && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '12px 0 2px' }}>
+          <InspectorStat label="SMV" value={boundOp ? boundOp.smv.toFixed(2) : '—'} unit="min" />
+          <InspectorStat label="OPR" value={String(ws.resources.workersRequired)} unit="required" />
+        </div>
+      )}
+      <div style={{ height: 10 }} />
 
       <InspectorGroup id="ws.identity" title="Identity" defaultOpen>
       <label style={fieldLabel}>Name</label>
@@ -6254,12 +6059,11 @@ function InspectorBody(props: InspectorProps) {
         style={inputBase}
       />
       <div style={{ marginTop: 4, fontSize: 11, color: SW_COLORS.muted }}>
-        Fixture: <strong style={{ color: SW_COLORS.muted }}>{fixture?.label ?? ws.catalogId}</strong>{' '}
-        · Dept: <strong style={{ color: SW_COLORS.muted }}>{dept?.name ?? '—'}</strong>
+        Fixture: <strong style={{ color: SW_COLORS.muted }}>{fixture?.label ?? ws.catalogId}</strong>
       </div>
 
-      {/* SEWING LINE — only meaningful when the parent dept has lines defined. */}
-      {linesInDept.length > 0 && (
+      {/* SEWING LINE — the only grouping a station can belong to. */}
+      {allLines.length > 0 && (
         <>
           <div style={{ height: 10 }} />
           <label style={fieldLabel}>Sewing line</label>
@@ -6270,8 +6074,8 @@ function InspectorBody(props: InspectorProps) {
             }
             style={{ ...inputBase, appearance: 'auto' }}
           >
-            <option value="">— Unassigned (dept-level fixture) —</option>
-            {linesInDept.map((l) => (
+            <option value="">— Unassigned (free-standing fixture) —</option>
+            {allLines.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.name}
               </option>
@@ -6565,7 +6369,7 @@ function BlockSection({
             borderRadius: 4,
           }}
         >
-          <block.spec.Icon size={16} color="#fff" title={block.spec.label} />
+          <block.spec.Icon size={16} color={contrastInk(catTint.stroke)} title={block.spec.label} />
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
           <div
@@ -6620,7 +6424,7 @@ function BlockSection({
           },
           ...SELECTABLE_BLOCK_KINDS.map((k) => {
             const spec = PML_BLOCK_LIBRARY[k];
-            const tint = PML_CATEGORY_TINT[spec.category] ?? { stroke: SW_COLORS.ink, fill: '#fff' };
+            const tint = PML_CATEGORY_TINT[spec.category] ?? { stroke: SW_COLORS.ink, fill: SW_COLORS.paper };
             return {
               value: k,
               label: spec.label,
@@ -7234,25 +7038,135 @@ function ObservedRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Small uppercase-mono chip for the inspector masthead — op code, machine
+ *  code, line membership. Optional 8px square swatch for hue-keyed chips. */
+function InspectorChip({
+  children,
+  bg,
+  fg,
+  edge,
+  swatch,
+}: {
+  children: ReactNode;
+  bg?: string;
+  fg?: string;
+  edge?: string;
+  swatch?: string;
+}) {
+  return (
+    <span
+      style={{
+        ...SW_TYPE.micro,
+        fontSize: 10,
+        letterSpacing: '0.1em',
+        padding: '3px 7px',
+        borderRadius: 4,
+        background: bg ?? SW_COLORS.paperDeep,
+        color: fg ?? SW_COLORS.muted,
+        border: `1px solid ${edge ?? 'transparent'}`,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        maxWidth: 180,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {swatch && (
+        <span style={{ width: 8, height: 8, borderRadius: 2, background: swatch, flex: 'none' }} />
+      )}
+      {children}
+    </span>
+  );
+}
+
+/** Stat tile for the inspector masthead — micro label, display value, quiet
+ *  unit. Authoring facts only (bulletin SMV, staffing); sim results live in
+ *  the Sim view. */
+function InspectorStat({ label, value, unit, tone }: { label: string; value: string; unit?: string; tone?: string }) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: SW_RADIUS.sm + 2,
+        background: SW_COLORS.paperDeep,
+        padding: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        minWidth: 0,
+      }}
+    >
+      <span style={{ ...SW_TYPE.micro, fontSize: 10, letterSpacing: '0.14em', color: SW_COLORS.muted }}>
+        {label}
+      </span>
+      <span style={{ ...SW_TYPE.displaySm, color: tone ?? SW_COLORS.ink }}>{value}</span>
+      {unit && (
+        <span style={{ ...SW_TYPE.numeric, fontWeight: 400, color: SW_COLORS.muted }}>{unit}</span>
+      )}
+    </div>
+  );
+}
+
 // ============================================================================
 // SMALL UI BITS
 // ============================================================================
+
+/** Quiet square button for the zoom HUD — transparent at rest, steel on
+ *  hover, numeric glyph. The HUD slab supplies the border and ground. */
+function ZoomHudBtn({
+  children,
+  onClick,
+  title,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  title?: string;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        ...SW_TYPE.numeric,
+        width: 30,
+        height: 28,
+        borderRadius: SW_RADIUS.sm,
+        border: 'none',
+        background: hover ? SW_COLORS.steelLite : 'transparent',
+        color: hover ? SW_COLORS.ink : SW_COLORS.muted,
+        display: 'grid',
+        placeItems: 'center',
+        cursor: 'pointer',
+        transition: `background ${SW_MOTION.instant}ms ${SW_MOTION.standard}, color ${SW_MOTION.instant}ms ${SW_MOTION.standard}`,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 
 function CountChip({ label, value }: { label: string; value: number }) {
   return (
     <div
       style={{
-        background: SW_COLORS.paper,
+        background: alpha(SW_COLORS.steel, 0.95),
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
         border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: 6,
+        borderRadius: SW_RADIUS.sm + 2,
         padding: '6px 10px',
         display: 'flex',
         alignItems: 'baseline',
         gap: 8,
       }}
     >
-      <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.2px' }}>{label}</span>
-      <strong style={{ ...SW_TYPE.heading, color: SW_COLORS.ink }}>{value}</strong>
+      <span style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>{label}</span>
+      <strong style={{ ...SW_TYPE.numeric, color: SW_COLORS.ink }}>{value}</strong>
     </div>
   );
 }
@@ -7283,11 +7197,12 @@ function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode })
         bottom: 56,
         right: 14,
         zIndex: 5,
-        background: SW_COLORS.paper + 'ee',
+        background: alpha(SW_COLORS.steel, 0.95),
         backdropFilter: 'blur(8px)',
         WebkitBackdropFilter: 'blur(8px)',
         border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: 6,
+        borderRadius: SW_RADIUS.sm + 2,
+        boxShadow: SW_SHADOWS.hud,
         padding: '6px 8px',
         display: 'flex',
         flexDirection: 'column',

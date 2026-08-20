@@ -82,7 +82,6 @@ export function buildSimSpec(input: BuildSimSpecInput): SimSpec {
   // always-empty slot in every merged result.
   const candidates = (twin.lines ?? []).filter((l) => {
     if (scope.kind === 'line') return l.id === scope.id;
-    if (scope.kind === 'dept') return l.deptId === scope.id;
     return true;
   });
 
@@ -148,7 +147,6 @@ function wsSignature(twin: Twin, wsId: string): string {
     JSON.stringify(p.arrivalDist ?? null),
     // Pool membership + op binding: both change what the engine resolves.
     ws.lineId ?? '',
-    ws.deptId,
     ws.operation?.opId ?? '',
     ws.operation?.garmentId ?? '',
     ws.operation?.bundleSize ?? '',

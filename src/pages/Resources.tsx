@@ -355,8 +355,8 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   );
   // Excel import state — `importBatch` is a queue of parsed previews (one
   // per selected file). Each entry is tagged with its `kind`: garment OBs
-  // commit into the project library; floor layouts commit a new Department
-  // + SewingLine + Workstations into the canonical Twin. The preview modal
+  // commit into the project library; floor layouts commit a new SewingLine
+  // + Workstations into the canonical Twin. The preview modal
   // pages through the batch one entry at a time.
   type ImportEntry =
     | { kind: 'garment'; preview: ImportedGarment }
@@ -1052,7 +1052,7 @@ function ImportPreviewModal({
  * Layout files. The body summarises the line (station count, machine
  * mix, source meta) and shows a simple top-down schematic of the two
  * facing rows so the user can sanity-check placement before the new
- * Department + SewingLine + Workstations are dropped into the Twin.
+ * SewingLine + Workstations are dropped into the Twin.
  */
 function LayoutPreviewModal({
   preview,
@@ -1242,7 +1242,7 @@ function LayoutPreviewModal({
 
         <div style={{ padding: '12px 18px', borderTop: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ fontSize: 11, color: SW_COLORS.muted, maxWidth: 420 }}>
-            Confirming adds a new Department + SewingLine + {placement.stations.length} workstations to the canonical Twin, placed to the right of existing departments.
+            Confirming adds a new SewingLine + {placement.stations.length} workstations to the canonical Twin, placed to the right of whatever is already on the floor.
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>

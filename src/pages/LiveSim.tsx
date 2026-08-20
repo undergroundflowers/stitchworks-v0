@@ -59,7 +59,7 @@ import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, getBlockKind, getBlockParams, apparelRoleFor } from '../domain/pml';
 import {
-  type DepartmentColorKey,
+  type EntityColorKey,
   type ProductionSystemKey,
   type Twin,
   type Workstation,
@@ -219,11 +219,6 @@ export function LiveSimPage() {
     if (raw?.startsWith('line:')) {
       const id = raw.slice(5);
       if (linesInTwin.some((l) => l.id === id)) return { kind: 'line', id };
-    } else if (raw?.startsWith('dept:')) {
-      const id = raw.slice(5);
-      if ((activeTwin.departments ?? []).some((d) => d.id === id)) {
-        return { kind: 'dept', id };
-      }
     } else if (raw === 'factory') {
       return { kind: 'factory' };
     }
@@ -232,7 +227,7 @@ export function LiveSimPage() {
       return { kind: 'line', id: legacyLine };
     }
     return { kind: 'factory' };
-  }, [searchParams, linesInTwin, activeTwin.departments]);
+  }, [searchParams, linesInTwin]);
   const selectedLineId = scope.kind === 'line' ? scope.id : null;
 
   // Per-line builds — drives the "LINES" strip's KPI cards. Computed every
@@ -391,11 +386,10 @@ export function LiveSimPage() {
   // don't compose into one homogeneous simulation.
   //
   // Lines actually included in this scope's run: factory = all wired, dept
-  // = wired lines whose deptId matches, line = none (single-engine path
+  // = every wired line, line = none (single-engine path
   // handles it).
   const wiredLineBuilds = useMemo(() => {
     const ok = lineBuilds.filter((lb) => lb.ok);
-    if (scope.kind === 'dept') return ok.filter((lb) => lb.line.deptId === scope.id);
     if (scope.kind === 'line') return ok.filter((lb) => lb.line.id === scope.id);
     return ok; // factory
   }, [lineBuilds, scope]);
@@ -477,15 +471,15 @@ export function LiveSimPage() {
   const ambientWorkstations = useMemo<AmbientWorkstationInput[]>(() => {
     if (!useTwinSource || !activeTwin?.workstations) return [];
     const simulatedSet = new Set(effectiveTwinMeta?.simulatedWsIds ?? []);
-    const deptById = new Map(
-      (activeTwin.departments ?? []).map((d) => [d.id, d] as const),
+    const lineById = new Map(
+      (activeTwin.lines ?? []).map((l) => [l.id, l] as const),
     );
     return activeTwin.workstations
       .filter((ws) => !simulatedSet.has(ws.id))
       .map((ws): AmbientWorkstationInput => {
         const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
-        const dept = deptById.get(ws.deptId);
-        const deptColor = dept ? (DEPT_LINE_COLORS[dept.color] ?? '#888') : '#888';
+        const line = ws.lineId ? lineById.get(ws.lineId) : undefined;
+        const deptColor = line ? (DEPT_LINE_COLORS[line.color] ?? '#888') : '#888';
         return {
           wsId: ws.id,
           catalogId: ws.catalogId,
@@ -546,16 +540,16 @@ export function LiveSimPage() {
     fontSize: 9,
     fontWeight: 800,
     letterSpacing: '0.14em',
-    color: alpha(SW_COLORS.paper, 0.6),
+    color: alpha(SW_COLORS.ink, 0.6),
     marginBottom: 6,
   };
   const setupInput: CSSProperties = {
     width: '100%',
     padding: '7px 9px',
-    background: alpha(SW_COLORS.paper, 0.06),
-    border: `1px solid ${alpha(SW_COLORS.paper, 0.2)}`,
+    background: alpha(SW_COLORS.ink, 0.06),
+    border: `1px solid ${alpha(SW_COLORS.ink, 0.2)}`,
     borderRadius: SW_RADIUS.sm,
-    color: SW_COLORS.paper,
+    color: SW_COLORS.ink,
     fontFamily: SW_FONTS.mono,
     fontSize: 13,
     fontWeight: 700,
@@ -599,8 +593,13 @@ export function LiveSimPage() {
         // after the reference-picker row was lifted to Reference Models —
         // the floor div landed in an `auto` track and zeroed its height.
         gridTemplateRows: 'auto auto 1fr auto',
-        background: SW_COLORS.ink,
-        color: SW_COLORS.paper,
+        // Dark ground. This read `background: ink / color: paper` from before
+        // the Control Room flip made `ink` the near-white and `paper` the
+        // near-black — which painted the whole HUD white-on-white. The
+        // `surface="dark"` children and `colorScheme: 'dark'` inputs below
+        // are the evidence of the original intent.
+        background: SW_COLORS.paper,
+        color: SW_COLORS.ink,
       }}
     >
       {/* HUD */}
@@ -681,10 +680,10 @@ export function LiveSimPage() {
             alignItems: 'center',
             gap: 6,
             padding: '5px 10px',
-            background: setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.08),
-            border: `1px solid ${setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.2)}`,
+            background: setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.08),
+            border: `1px solid ${setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.2)}`,
             borderRadius: SW_RADIUS.sm,
-            color: setupOpen ? SW_COLORS.paper : alpha(SW_COLORS.paper, 0.8),
+            color: setupOpen ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.8),
             fontFamily: SW_FONTS.mono,
             fontSize: 10,
             fontWeight: 900,
@@ -736,7 +735,7 @@ export function LiveSimPage() {
                   productionSystem: (scopedLine?.productionSystem ?? 'PBS') as ProductionSystemKey,
                   garment: seedGarment,
                   operatorTarget: operators,
-                  color: (scopedLine?.color ?? 'brand') as DepartmentColorKey,
+                  color: (scopedLine?.color ?? 'brand') as EntityColorKey,
                   notes: scopedLine
                     ? `Draft branched from ${scopedLine.name}.`
                     : `Draft opened from Simulation (${seedGarment?.name ?? seedGarmentId}, ${operators} operators).`,
@@ -800,22 +799,22 @@ export function LiveSimPage() {
         <div
           style={{
             padding: '12px 24px 14px',
-            background: alpha(SW_COLORS.paper, 0.03),
-            borderBottom: `1px solid ${alpha(SW_COLORS.paper, 0.12)}`,
+            background: alpha(SW_COLORS.ink, 0.03),
+            borderBottom: `1px solid ${alpha(SW_COLORS.ink, 0.12)}`,
           }}
         >
           <div
             style={{
               fontFamily: SW_FONTS.mono,
               fontSize: 10,
-              color: alpha(SW_COLORS.paper, 0.5),
+              color: alpha(SW_COLORS.ink, 0.5),
               letterSpacing: '0.04em',
               marginBottom: 10,
               lineHeight: 1.5,
             }}
           >
             MODEL &amp; TIME — what one tick of{' '}
-            <b style={{ color: alpha(SW_COLORS.paper, 0.85) }}>t</b> means, and how it maps to
+            <b style={{ color: alpha(SW_COLORS.ink, 0.85) }}>t</b> means, and how it maps to
             the calendar. Execution mode &amp; playback speed are in the transport bar below.
           </div>
           <div
@@ -840,8 +839,8 @@ export function LiveSimPage() {
                         flex: 1,
                         padding: '7px 4px',
                         textTransform: 'capitalize',
-                        background: active ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.06),
-                        color: active ? SW_COLORS.paper : alpha(SW_COLORS.paper, 0.7),
+                        background: active ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.06),
+                        color: active ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.7),
                         border: 'none',
                         borderRadius: SW_RADIUS.sm,
                         fontFamily: SW_FONTS.mono,
@@ -875,7 +874,7 @@ export function LiveSimPage() {
                   }
                   style={{ ...setupInput, width: 84 }}
                 />
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: alpha(SW_COLORS.paper, 0.55) }}>
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: alpha(SW_COLORS.ink, 0.55) }}>
                   min · {(project.time.shiftDurationMin / 60).toFixed(1)} h
                 </span>
               </div>
@@ -1550,6 +1549,7 @@ export function LiveSimPage() {
       <style>{`
         @keyframes sim-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
         @keyframes sim-march { to { stroke-dashoffset: -16; } }
+        @keyframes sim-ping { 0% { opacity: 0.55; transform: scale(1); } 100% { opacity: 0; transform: scale(2.1); } }
       `}</style>
     </div>
   );
@@ -2989,11 +2989,23 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
               simTime={simTime}
             />
             {/* Blocked-after-service marker — this station finished a bundle it
-                can't hand off because the downstream buffer is full. */}
+                can't hand off because the downstream buffer is full. The
+                expanding ring is the sonar ping from the design language: a
+                constraint should catch the eye from across the floor while
+                the run is playing, without moving the marker itself. */}
             {c.s.blocked > 0 && (() => {
               const bp = isoProj(c.gx + c.w / 2, c.gy + c.d / 2, 1.6);
               return (
                 <g pointerEvents="none">
+                  <circle
+                    cx={bp.sx}
+                    cy={bp.sy}
+                    r={8}
+                    fill="none"
+                    stroke={SW_COLORS.alarm}
+                    strokeWidth={1.5}
+                    style={{ animation: 'sim-ping 1.6s ease-out infinite', transformBox: 'fill-box', transformOrigin: 'center' }}
+                  />
                   <circle cx={bp.sx} cy={bp.sy} r={8} fill="#0F1419CC" stroke={SW_COLORS.alarm} strokeWidth={2} />
                   <text x={bp.sx} y={bp.sy + 3.5} textAnchor="middle" fontSize={10} fontWeight={800} fill={SW_COLORS.alarm}>!</text>
                 </g>

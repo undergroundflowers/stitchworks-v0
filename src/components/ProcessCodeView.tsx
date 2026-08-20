@@ -161,16 +161,15 @@ export function generateTsCode(twin: Twin): string {
   const pools = resolved.filter((r) => r.spec.kind === 'ResourcePool');
   const flow = resolved.filter((r) => FLOW_KINDS.has(r.spec.kind));
 
-  // Order flow blocks by department-then-x so the emitted code reads in the
-  // same left-to-right order the swim-lane diagram reads. Mirrors the layout
+  // Order flow blocks by line-then-x so the emitted code reads in the same
+  // left-to-right order the swim-lane diagram reads. Mirrors the layout
   // logic inside BuilderProcessView so codegen + canvas tell the same story.
-  const deptOrder = new Map<string, number>();
-  [...twin.departments]
-    .sort((a, b) => (a.bounds.y - b.bounds.y) || (a.bounds.x - b.bounds.x))
-    .forEach((d, i) => deptOrder.set(d.id, i));
+  // Unlined blocks sort last, matching the "unassigned" lane.
+  const lineOrder = new Map<string, number>();
+  (twin.lines ?? []).forEach((l, i) => lineOrder.set(l.id, i));
   flow.sort((a, b) => {
-    const da = deptOrder.get(a.ws.deptId) ?? 999;
-    const db = deptOrder.get(b.ws.deptId) ?? 999;
+    const da = a.ws.lineId ? lineOrder.get(a.ws.lineId) ?? 999 : 999;
+    const db = b.ws.lineId ? lineOrder.get(b.ws.lineId) ?? 999 : 999;
     if (da !== db) return da - db;
     if (a.ws.position.x !== b.ws.position.x) return a.ws.position.x - b.ws.position.x;
     return a.ws.position.y - b.ws.position.y;
@@ -183,15 +182,17 @@ export function generateTsCode(twin: Twin): string {
   flow.forEach((f, i) => varOf.set(f.ws.id, variableName(f.spec.kind, i)));
 
   // For Service / Seize / Release / Assembler — pick a pool to bind to.
-  // Heuristic for Phase 1: if the same department has exactly one pool,
+  // Heuristic for Phase 1: if the same sewing line has exactly one pool,
   // bind to that. Otherwise leave the pool unset and emit a TODO comment.
+  // Mirrors the engine's scoping, where the line is the resource container
+  // and unlined stations share one factory-level pool.
   function poolForServiceLike(ws: Workstation): { varName: string | null; note: string | null } {
-    const sameDept = pools.filter((p) => p.ws.deptId === ws.deptId);
-    if (sameDept.length === 1) {
-      return { varName: varOf.get(sameDept[0].ws.id) ?? null, note: null };
+    const sameScope = pools.filter((p) => (p.ws.lineId ?? null) === (ws.lineId ?? null));
+    if (sameScope.length === 1) {
+      return { varName: varOf.get(sameScope[0].ws.id) ?? null, note: null };
     }
-    if (sameDept.length === 0) return { varName: null, note: '// TODO: bind to a ResourcePool' };
-    return { varName: null, note: '// TODO: pick one of: ' + sameDept.map((p) => varOf.get(p.ws.id)).join(', ') };
+    if (sameScope.length === 0) return { varName: null, note: '// TODO: bind to a ResourcePool' };
+    return { varName: null, note: '// TODO: pick one of: ' + sameScope.map((p) => varOf.get(p.ws.id)).join(', ') };
   }
 
   // ── Build the source ─────────────────────────────────────────────────────

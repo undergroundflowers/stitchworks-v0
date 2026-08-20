@@ -22,12 +22,21 @@ export const SW_COLORS = {
   paperEdge: '#1E2634',
   steel: '#161D29',
   steelLite: '#212B3A',
+  /** Deepest ground — the canvas stage and segmented-control wells sit a full
+   *  step below `paper` so floating panels read as glass above the floor. */
+  void: '#07090E',
 
   // Brand — the one colour that means "act on this", lifted for legibility on
   // a dark ground. brandLite inverts from a pale tint to a dark tinted well.
   brand: '#FF6B35',
   brandDeep: '#E04E18',
   brandLite: '#2A1710',
+  /** Hairline for brand-tinted chips/wells — brand at 1/3 alpha, so the edge
+   *  reads orange without competing with a solid brand fill. */
+  brandEdge: '#FF6B3555',
+  /** Brand-tinted *text* on dark wells. Solid `brand` at 12–13px on
+   *  `brandLite` sits below 4.5:1; this lifted tint is the readable form. */
+  brandText: '#FF9E77',
 
   // Data palette — named after garment-factory artefacts so they're memorable.
   // Generated, not picked: oklch(0.74 0.145 H) with H stepping 36° from 170 to
@@ -50,6 +59,9 @@ export const SW_COLORS = {
   // states retheme with vibes instead of hardcoding.
   okDeep: '#1FA862',
   alarmDeep: '#D63B44',
+  /** Dark red-tinted well — the ground for bottleneck callouts, error chips
+   *  and "what to fix" advice cards. A surface, never a text colour. */
+  alarmWell: '#1C1114',
 
   // UI grays — alpha on `ink`.
   line: '#E8EDF566',

@@ -28,7 +28,7 @@
 
 import * as XLSX from 'xlsx';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import type { DepartmentColorKey } from '../domain/twin';
+import type { EntityColorKey } from '../domain/twin';
 
 export interface ImportedStation {
   /** "Code No." from the sheet — Modelama's station-position number. */
@@ -352,7 +352,7 @@ export interface LayoutPlacement {
   depthCells: number;
   /** Suggested name for the new SewingLine. */
   lineName: string;
-  /** Suggested name for the new Department hosting the line. */
+  /** Suggested grouping name carried over from the sheet. */
   deptName: string;
 }
 
@@ -449,7 +449,6 @@ export function placeLayoutStations(parsed: ImportedFloor): LayoutPlacement {
  * Returns a summary so the caller can surface counts in a toast.
  */
 export interface CommittedFloor {
-  deptId: string;
   lineId: string;
   workstationCount: number;
   connectorCount: number;
@@ -461,39 +460,28 @@ export function commitFloorImport(
   store: TwinStore,
   _parsed: ImportedFloor,
   placement: LayoutPlacement,
-  options?: { color?: DepartmentColorKey; productionSystem?: 'PBS' | 'straight' | 'modular' | 'UPS' | 'synchro' },
+  options?: { color?: EntityColorKey; productionSystem?: 'PBS' | 'straight' | 'modular' | 'UPS' | 'synchro' },
 ): CommittedFloor {
-  const color: DepartmentColorKey = options?.color ?? 'blue';
+  const color: EntityColorKey = options?.color ?? 'blue';
   const productionSystem = options?.productionSystem ?? 'PBS';
 
   // Find an empty patch of the grid for the new department — sit it to
   // the right of everything that already exists, with a 4-cell gutter.
   const active = selectActiveTwin(store);
   if (!active) throw new Error('No active twin to import into.');
+  // Park the import clear of whatever is already on the floor. With zones
+  // gone there is no dept rect to measure, so the right edge of the existing
+  // stations is the reference.
   const gutter = 4;
   let originX = 0;
   const originY = 0;
-  if (active.departments.length > 0) {
-    for (const d of active.departments) {
-      const right = d.bounds.x + d.bounds.w;
-      if (right > originX) originX = right;
-    }
-    originX += gutter;
+  for (const w of active.workstations) {
+    const right = w.position.x + (w.size?.w ?? 1);
+    if (right > originX) originX = right;
   }
-  // Width: stretches across all station columns. Depth: aisle + 4-cell rows
-  // top & bottom.
-  const w = Math.max(placement.widthCells + 2, 8);
-  const h = placement.depthCells + 2;
-
-  const deptId = store.addDepartment({
-    name: placement.deptName,
-    kind: 'sewing',
-    color,
-    bounds: { x: originX, y: originY, w, h },
-  });
+  if (active.workstations.length > 0) originX += gutter;
 
   const lineId = store.addLine({
-    deptId,
     name: placement.lineName,
     productionSystem,
     color,
@@ -505,10 +493,10 @@ export function commitFloorImport(
   const wsIds: string[] = [];
   for (const s of placement.stations) {
     const id = store.addWorkstation({
-      deptId,
+      lineId,
       catalogId: s.catalogId,
-      // Inset by 1 cell so stations sit *inside* the dept bounds rather
-      // than flush against the border.
+      // Inset by 1 cell so the imported block sits clear of whatever it was
+      // parked beside.
       position: { x: originX + 1 + s.x, y: originY + 1 + s.y },
       name: s.name,
     });
@@ -529,5 +517,5 @@ export function commitFloorImport(
     if (cid) connectorCount++;
   }
 
-  return { deptId, lineId, workstationCount: wsIds.length, connectorCount };
+  return { lineId, workstationCount: wsIds.length, connectorCount };
 }

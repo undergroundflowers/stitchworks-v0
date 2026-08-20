@@ -37,7 +37,7 @@ describe('.swproj format', () => {
     const parsed = parseSwproj(JSON.parse(JSON.stringify(env)));
     expect(parsed.legacy).toBe(false);
     expect(parsed.twin?.canonical.workstations.length).toBe(twin.canonical.workstations.length);
-    expect(parsed.twin?.canonical.departments.length).toBe(twin.canonical.departments.length);
+    expect(parsed.twin?.canonical.lines.length).toBe(twin.canonical.lines.length);
     expect(parsed.project.meta.name).toBe(project.meta.name);
   });
 

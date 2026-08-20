@@ -141,33 +141,37 @@ export function HudSelect<T extends string>({
   };
 
   // Variant palettes — same accordion structure, two surfaces. The dark
-  // palette sits on the iso scene (translucent on near-black), the light
-  // palette sits on paper cards.
+  // palette floats translucently on a near-black ground (the sim HUD, the
+  // iso scene); the light palette sits on a solid panel card.
+  //
+  // The dark palette's overlays are alphas of `ink`, not `paper`: on this
+  // ground a paper-alpha is dark-on-dark and disappears. It read `paper`
+  // until the Control Room flip swapped which token was the near-white.
   const palette = variant === 'dark'
     ? {
-        trigBg: alpha(SW_COLORS.paper, 0.06),
-        trigBgOpen: alpha(SW_COLORS.paper, 0.09),
-        trigBgHover: alpha(SW_COLORS.paper, 0.08),
-        trigBorder: alpha(SW_COLORS.paper, 0.15),
+        trigBg: alpha(SW_COLORS.ink, 0.06),
+        trigBgOpen: alpha(SW_COLORS.ink, 0.09),
+        trigBgHover: alpha(SW_COLORS.ink, 0.08),
+        trigBorder: alpha(SW_COLORS.ink, 0.15),
         trigBorderOpen: `${SW_COLORS.brand}99`,
-        trigText: '#fff',
-        trigPlaceholder: alpha(SW_COLORS.paper, 0.44),
-        chevron: alpha(SW_COLORS.paper, 0.56),
-        panelBg: '#11161dF2',
+        trigText: SW_COLORS.ink,
+        trigPlaceholder: alpha(SW_COLORS.ink, 0.44),
+        chevron: alpha(SW_COLORS.ink, 0.56),
+        panelBg: alpha(SW_COLORS.steel, 0.95),
         panelBlur: true,
         panelBorder: `${SW_COLORS.brand}55`,
-        panelShadow: '0 10px 28px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)',
-        rowText: alpha(SW_COLORS.paper, 0.82),
-        rowTextSelected: '#fff',
-        rowBgActive: alpha(SW_COLORS.paper, 0.06),
+        panelShadow: SW_SHADOWS.hud,
+        rowText: alpha(SW_COLORS.ink, 0.82),
+        rowTextSelected: SW_COLORS.ink,
+        rowBgActive: alpha(SW_COLORS.ink, 0.06),
         rowBgSelected: `${SW_COLORS.brand}26`,
-        tagBg: alpha(SW_COLORS.paper, 0.08),
+        tagBg: alpha(SW_COLORS.ink, 0.08),
         tagBgSelected: `${SW_COLORS.brand}40`,
         tagBorder: `${SW_COLORS.brand}55`,
         tagText: SW_COLORS.brand,
-        tagTextSelected: '#fff',
-        metaText: alpha(SW_COLORS.paper, 0.44),
-        emptyText: alpha(SW_COLORS.paper, 0.38),
+        tagTextSelected: SW_COLORS.ink,
+        metaText: alpha(SW_COLORS.ink, 0.44),
+        emptyText: alpha(SW_COLORS.ink, 0.38),
       }
     : {
         trigBg: SW_COLORS.paper,

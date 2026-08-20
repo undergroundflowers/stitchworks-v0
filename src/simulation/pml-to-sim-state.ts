@@ -303,7 +303,6 @@ export const EMPTY_TWIN: Twin = {
   modifiedAt: new Date(0).toISOString(),
   gridW: 1,
   gridH: 1,
-  departments: [],
   lines: [],
   workstations: [],
   connectors: [],

@@ -18,14 +18,12 @@ import type { GarmentTemplate } from './garments';
 import {
   type Twin,
   type Workstation,
-  type Department,
   type Connector,
   type SewingLine,
   type TwinSchemaVersion,
   TWIN_SCHEMA_VERSION,
   defaultPolicyFor,
   newTwinId,
-  newDeptId,
   newLineId,
   newConnectorId,
   makeWorkstation,
@@ -92,27 +90,6 @@ export function buildGarmentTwin(
   const gridW = Math.max(36, ORIGIN_X + STATIONS_PER_ROW * STATION_DX + 4);
   const gridH = Math.max(28, ORIGIN_Y + rowCount * ROW_DY + 8);
 
-  const dSew = newDeptId();
-  const dPlumb = newDeptId();
-  const departments: Department[] = [
-    {
-      id: dPlumb,
-      name: 'Plumbing',
-      kind: 'Logistics',
-      color: 'cream',
-      bounds: { x: 1, y: 1, w: gridW - 2, h: 4 },
-      notes: 'Source · Sink · operator pool. Auto-generated from the selected garment.',
-    },
-    {
-      id: dSew,
-      name: `Sewing line — ${garment.name}`,
-      kind: 'Sewing',
-      color: 'blue',
-      bounds: { x: 1, y: 5, w: gridW - 2, h: rowCount * ROW_DY + 4 },
-      notes:
-        `${ops.length} ops · total SMV ${totalSmv.toFixed(2)} min · ${operators} operators.`,
-    },
-  ];
 
   const workstations: Workstation[] = [];
 
@@ -135,7 +112,6 @@ export function buildGarmentTwin(
   const bottleneckCapPerHr = slowestSmv > 0 ? 60 / slowestSmv : 60;
   const sourceRatePerHr = Math.max(1, Math.round(bottleneckCapPerHr * BOTTLENECK_TARGET_RHO));
   const wsSource = makeWorkstation({
-    deptId: dPlumb,
     catalogId: 'buf_in',
     position: { x: 2, y: 2 },
     name: 'Source — orders in',
@@ -158,7 +134,6 @@ export function buildGarmentTwin(
   workstations.push(wsSource);
 
   const wsPool = makeWorkstation({
-    deptId: dSew,
     catalogId: 'op_sewer',
     position: { x: 2, y: 2 + ROW_DY * rowCount + 2 < gridH - 2 ? ORIGIN_Y + rowCount * ROW_DY : gridH - 3 },
     name: `Operators · ${operators} units`,
@@ -170,7 +145,6 @@ export function buildGarmentTwin(
   workstations.push(wsPool);
 
   const wsSink = makeWorkstation({
-    deptId: dPlumb,
     catalogId: 'buf_out',
     position: { x: gridW - 4, y: 2 },
     name: 'Sink — finished pcs',
@@ -188,7 +162,6 @@ export function buildGarmentTwin(
 
     const catalogId = catalogForMachine(op.machineCode);
     const ws = makeWorkstation({
-      deptId: dSew,
       catalogId,
       position: { x, y },
       name: `${i + 1}. ${op.name}`,
@@ -262,7 +235,6 @@ export function buildGarmentTwin(
   // Source reads `ws.lineId` to find its order sequence and raise changeovers.
   const line: SewingLine = {
     id: newLineId(),
-    deptId: dSew,
     name: `Line 1 · ${garment.name}`,
     productionSystem: 'PBS',
     garmentId: garment.id,
@@ -282,7 +254,6 @@ export function buildGarmentTwin(
     modifiedAt: now,
     gridW,
     gridH,
-    departments,
     lines: [line],
     workstations,
     connectors,

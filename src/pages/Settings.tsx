@@ -65,7 +65,6 @@ export function SettingsPage() {
   // optional on Twin (older saves omit them), so coerce to [] before
   // counting to avoid a noisy `?? 0` everywhere in the JSX.
   const composition = {
-    departments: canonical.departments.length,
     lines: canonical.lines.length,
     workstations: canonical.workstations.length,
     connectors: canonical.connectors.length,
@@ -341,7 +340,7 @@ export function SettingsPage() {
                           Modified {formatDate(scn.modifiedAt, project.units.dateFormat)}
                         </div>
                       </div>
-                      <ScenarioCount label="DEPTS" value={scn.twin.departments.length} />
+                      <ScenarioCount label="LINES" value={(scn.twin.lines ?? []).length} />
                       <ScenarioCount label="STATIONS" value={scn.twin.workstations.length} />
                       <ScenarioCount label="OPR" value={(scn.twin.operators ?? []).length} />
                       <ScenarioCount label="RUNS" value={scn.runs.length} />

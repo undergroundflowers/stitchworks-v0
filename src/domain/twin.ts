@@ -40,7 +40,7 @@ import {
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 9 as const;
+export const TWIN_SCHEMA_VERSION = 10 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -64,12 +64,18 @@ export interface Rect {
 export type Rotation = 0 | 90 | 180 | 270;
 
 // ============================================================================
-// DRAWABLE LAYER 1 — DEPARTMENT
+// PALETTE KEYS
 // ============================================================================
 
-/** Department-typed colour key. Maps to design-token names via the UI; the
- *  twin payload only stores the key so token changes don't break files. */
-export type DepartmentColorKey =
+/**
+ * Entity colour key. Maps to design-token names via the UI; the twin payload
+ * only stores the key so token changes don't break saved files.
+ *
+ * Named `DepartmentColorKey` while departments were the only coloured entity.
+ * Departments are gone — the floor is free space — but sewing lines still
+ * carry a colour, so the palette itself survives under a neutral name.
+ */
+export type EntityColorKey =
   | 'fabric'
   | 'thread'
   | 'brand'
@@ -79,21 +85,8 @@ export type DepartmentColorKey =
   | 'green'
   | 'cream';
 
-export interface Department {
-  id: string;
-  name: string;
-  /** Department-purpose tag — drives default lens overlays and the catalogue
-   *  filter in the palette. Free-string so users can author novel ones. */
-  kind: string;
-  color: DepartmentColorKey;
-  /** Axis-aligned bounds in world cells. v1 is rect-only; polygon is a
-   *  future extension that bumps TWIN_SCHEMA_VERSION. */
-  bounds: Rect;
-  notes?: string;
-}
-
 // ============================================================================
-// SEWING LINE — logical grouping of workstations inside one department
+// SEWING LINE — logical grouping of workstations on the floor
 // ============================================================================
 
 /**
@@ -204,16 +197,15 @@ export function defaultPolicyFor(system: ProductionSystemKey): Required<LinePoli
 }
 
 /**
- * A SewingLine is a named group of workstations inside one department.
- * One department can hold several lines, each manufacturing a particular
- * product (garmentId) under a particular production system. Lines do NOT
- * own geometry — their footprint is the convex hull of their member
- * workstations, computed at render time.
+ * A SewingLine is a named group of workstations on the floor — the top-level
+ * organising unit of a factory, and the scope the engine bills operator
+ * capacity against. Each line manufactures a particular product (garmentId)
+ * under a particular production system. Lines do NOT own geometry — their
+ * footprint is the convex hull of their member workstations, computed at
+ * render time.
  */
 export interface SewingLine {
   id: string;
-  /** Parent department (must exist in the same twin). */
-  deptId: string;
   name: string;
   /** Production system that paces this line. */
   productionSystem: ProductionSystemKey;
@@ -221,9 +213,8 @@ export interface SewingLine {
    *  empty during initial set-up. Falls back to the first order's garment
    *  when an `orderSequence` is present. */
   garmentId?: string;
-  /** Accent colour for the canvas band + tree pip. Defaults to the parent
-   *  department's colour when unset at create time. */
-  color: DepartmentColorKey;
+  /** Accent colour for the canvas band + tree pip. */
+  color: EntityColorKey;
   /** Target operator headcount across the line. Informational — the engine
    *  reads `workersRequired` per workstation. */
   operatorTarget?: number;
@@ -379,12 +370,9 @@ export interface OperatorSkill {
  */
 export interface Operator {
   id: string;
-  /** Parent department — operators belong to a department even when they
-   *  float between lines inside it. */
-  deptId: string;
   /** Parent sewing line, when the operator is line-resident. Operators
-   *  without a `lineId` are department-level floaters that can be pulled
-   *  to any line whose policy is `helperMode: 'pool'`. */
+   *  without a `lineId` are factory-level floaters that can be pulled to
+   *  any line whose policy is `helperMode: 'pool'`. */
   lineId?: string;
   /** Display name (e.g. "OPR-01 · Lakshmi"). */
   name: string;
@@ -452,19 +440,17 @@ export interface Assignment {
 }
 
 // ============================================================================
-// DRAWABLE LAYER 2 — WORKSTATION
+// DRAWABLE LAYER — WORKSTATION
 // ============================================================================
 
 export interface Workstation {
   id: string;
-  /** Department this workstation belongs to (Department.id). Required —
-   *  every workstation lives inside a department. */
-  deptId: string;
-  /** Sewing line this workstation belongs to, when its parent department
-   *  has any. Optional — workstations that don't sit on a line (storage
-   *  racks, supervisor desks, generic tables) leave this unset. The
-   *  simulation engine groups by `lineId` when present so each line runs
-   *  as its own end-to-end tandem network. */
+  /** Sewing line this workstation belongs to. Optional — the floor is free
+   *  space, so a station can sit anywhere with no owner (storage racks,
+   *  supervisor desks, generic tables, or anything not yet organised into a
+   *  line). The simulation engine groups by `lineId` when present so each
+   *  line runs as its own end-to-end tandem network; unlined stations draw
+   *  from the factory-level operator pool. */
   lineId?: string;
   /** Catalogue id from ISO_FIXTURE_CATALOG. Drives the sprite + footprint. */
   catalogId: string;
@@ -518,8 +504,8 @@ export interface Twin {
   /** World grid extent — the canvas size. */
   gridW: number;
   gridH: number;
-  departments: Department[];
-  /** Named sewing lines that group workstations inside a department.
+  /** Named sewing lines that group workstations. Top-level: the floor is
+   *  free space, so a line is the organising unit, not a child of a zone.
    *  Optional in the payload for backwards compatibility — older twins
    *  read it as `[]` after normalisation. */
   lines: SewingLine[];
@@ -743,7 +729,6 @@ function newId(prefix: string): string {
   return `${prefix}-${t}-${r}`;
 }
 
-export const newDeptId = () => newId('dept');
 export const newLineId = () => newId('line');
 export const newWorkstationId = () => newId('ws');
 export const newTwinId = () => newId('twin');
@@ -761,7 +746,6 @@ export const newAssignmentId = () => newId('asgn');
  *  The canvas renders an empty grid until the user drops the first station. */
 export function emptyTwin(name: string = 'Untitled factory'): Twin {
   const now = new Date().toISOString();
-  const deptId = newDeptId();
   const lineId = newLineId();
   return {
     schemaVersion: TWIN_SCHEMA_VERSION,
@@ -773,27 +757,14 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     modifiedAt: now,
     gridW: 36,
     gridH: 28,
-    // Sewing-centric: the sewing floor is the only zoned region the builder
-    // authors, so every new factory is seeded with one. Without it a blank
-    // twin would have nowhere to drop a station.
-    departments: [
-      {
-        id: deptId,
-        name: 'Sewing Floor',
-        kind: 'Sewing',
-        color: 'blue',
-        bounds: { x: 2, y: 2, w: 24, h: 18 },
-      },
-    ],
-    // Seed one empty line for the same reason the department is seeded: a
-    // station needs a line to belong to, and every analysis surface scopes by
-    // line. A blank twin with no line reads to those surfaces as "this factory
-    // has nothing to analyse" rather than "this line has no stations yet",
-    // which is a much less useful thing to tell the user.
+    // Seed one empty line. A station does not *need* a line — the floor is
+    // free space — but every analysis surface scopes by line, and a blank
+    // twin with no line reads to those surfaces as "this factory has nothing
+    // to analyse" rather than "this line has no stations yet", which is a
+    // much less useful thing to tell the user.
     lines: [
       {
         id: lineId,
-        deptId,
         name: 'Line 1',
         productionSystem: 'PBS',
         color: 'blue',
@@ -809,11 +780,22 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
 
 /**
  * Bring a Twin payload up to the current schema. Used by the persist
- * middleware migration and by importers. Additive only — never strips
- * fields the current code can handle.
+ * middleware migration and by importers.
+ *
+ * v10 retires departments. Stored twins keep whatever `departments` array and
+ * `deptId` fields they were saved with; this strips them so nothing
+ * downstream can reintroduce the concept by reading a stale field. Station
+ * geometry is untouched — a station that used to sit inside a zone stays
+ * exactly where it was, it simply has no owner now.
  */
 export function normalizeTwin(input: unknown): Twin {
   const t = (input ?? {}) as Partial<Twin> & Record<string, unknown>;
+  const dropDept = <T extends object>(rec: T): T => {
+    if (!rec || typeof rec !== 'object' || !('deptId' in rec)) return rec;
+    const rest = { ...(rec as T & { deptId?: string }) };
+    delete rest.deptId;
+    return rest as T;
+  };
   return {
     schemaVersion: TWIN_SCHEMA_VERSION,
     id: t.id ?? newTwinId(),
@@ -824,11 +806,10 @@ export function normalizeTwin(input: unknown): Twin {
     modifiedAt: t.modifiedAt ?? new Date().toISOString(),
     gridW: t.gridW ?? 36,
     gridH: t.gridH ?? 28,
-    departments: t.departments ?? [],
-    lines: (t.lines as SewingLine[] | undefined) ?? [],
-    workstations: t.workstations ?? [],
+    lines: (((t.lines as SewingLine[] | undefined) ?? []).map(dropDept)),
+    workstations: (t.workstations ?? []).map(dropDept),
     connectors: t.connectors ?? [],
-    operators: (t.operators as Operator[] | undefined) ?? [],
+    operators: (((t.operators as Operator[] | undefined) ?? []).map(dropDept)),
     assignments: (t.assignments as Assignment[] | undefined) ?? [],
     orders: t.orders as Order[] | undefined,
     notes: t.notes,
@@ -844,7 +825,9 @@ export function normalizeTwin(input: unknown): Twin {
  *  defaults (e.g. Bundle source → `ratePerHr: 30`). Ignored when the
  *  catalogId doesn't resolve to a PML primitive. */
 export function makeWorkstation(input: {
-  deptId: string;
+  /** Optional line membership. The floor is free space — a station with no
+   *  line draws from the factory-level operator pool. */
+  lineId?: string;
   catalogId: string;
   position: Vec2;
   rotation?: Rotation;
@@ -873,7 +856,7 @@ export function makeWorkstation(input: {
 
   return {
     id: newWorkstationId(),
-    deptId: input.deptId,
+    ...(input.lineId ? { lineId: input.lineId } : {}),
     catalogId: input.catalogId,
     name: input.name ?? fallbackName,
     position: { x: input.position.x, y: input.position.y },
@@ -914,23 +897,14 @@ export function forkTwin(
   options: { name: string; notes?: string },
 ): Twin {
   const now = new Date().toISOString();
-  const deptIdMap = new Map<string, string>();
-  for (const d of source.departments) deptIdMap.set(d.id, newDeptId());
 
-  const departments: Department[] = source.departments.map((d) => ({
-    ...d,
-    id: deptIdMap.get(d.id)!,
-    bounds: { ...d.bounds },
-  }));
-
-  // Re-key lines and remap their parent dept ids so the fork stays internally
-  // consistent. Workstation.lineId is remapped a few lines down via lineIdMap.
+  // Re-key lines so the fork stays internally consistent. Workstation.lineId
+  // is remapped a few lines down via lineIdMap.
   const lineIdMap = new Map<string, string>();
   for (const ln of source.lines ?? []) lineIdMap.set(ln.id, newLineId());
   const lines: SewingLine[] = (source.lines ?? []).map((ln) => ({
     ...ln,
     id: lineIdMap.get(ln.id)!,
-    deptId: deptIdMap.get(ln.deptId) ?? ln.deptId,
   }));
 
   // Map old → new workstation ids so connectors can be remapped.
@@ -941,7 +915,6 @@ export function forkTwin(
     return {
       ...w,
       id: newWsId,
-      deptId: deptIdMap.get(w.deptId) ?? w.deptId,
       lineId: w.lineId ? lineIdMap.get(w.lineId) ?? undefined : undefined,
       position: { ...w.position },
       props: { ...w.props },
@@ -981,10 +954,9 @@ export function forkTwin(
       flow: c.flow ? { ...c.flow } : undefined,
     }));
 
-  // Remap operators (id, deptId, lineId) and assignments (id, operatorId,
-  // wsId) so the fork is internally consistent. Drop assignments whose
-  // operator or workstation didn't survive — same defensive policy as
-  // connectors above.
+  // Remap operators (id, lineId) and assignments (id, operatorId, wsId) so
+  // the fork is internally consistent. Drop assignments whose operator or
+  // workstation didn't survive — same defensive policy as connectors above.
   const operatorIdMap = new Map<string, string>();
   const operators: Operator[] = (source.operators ?? []).map((op) => {
     const newOpId = newOperatorId();
@@ -992,7 +964,6 @@ export function forkTwin(
     return {
       ...op,
       id: newOpId,
-      deptId: deptIdMap.get(op.deptId) ?? op.deptId,
       lineId: op.lineId ? lineIdMap.get(op.lineId) ?? undefined : undefined,
       skills: op.skills.map((s) => ({ ...s })),
     };
@@ -1017,7 +988,6 @@ export function forkTwin(
     modifiedAt: now,
     gridW: source.gridW,
     gridH: source.gridH,
-    departments,
     lines,
     workstations,
     connectors,
@@ -1063,27 +1033,14 @@ export function validateTwin(twin: Twin): string[] {
       `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, 7, 8, or ${TWIN_SCHEMA_VERSION}`,
     );
   }
-  const deptIds = new Set(twin.departments.map((d) => d.id));
   const lineIds = new Set((twin.lines ?? []).map((l) => l.id));
-  for (const l of twin.lines ?? []) {
-    if (!deptIds.has(l.deptId)) {
-      errs.push(`Line ${l.id} references missing department ${l.deptId}`);
-    }
-  }
   for (const w of twin.workstations) {
-    if (!deptIds.has(w.deptId)) {
-      errs.push(`Workstation ${w.id} references missing department ${w.deptId}`);
-    }
     if (w.lineId && !lineIds.has(w.lineId)) {
       errs.push(`Workstation ${w.id} references missing line ${w.lineId}`);
     }
   }
   // Duplicate ids
   const seen = new Set<string>();
-  for (const d of twin.departments) {
-    if (seen.has(d.id)) errs.push(`Duplicate department id ${d.id}`);
-    seen.add(d.id);
-  }
   for (const w of twin.workstations) {
     if (seen.has(w.id)) errs.push(`Duplicate id ${w.id} (workstation)`);
     seen.add(w.id);
@@ -1099,9 +1056,6 @@ export function validateTwin(twin: Twin): string[] {
   }
   const operatorIds = new Set((twin.operators ?? []).map((o) => o.id));
   for (const op of twin.operators ?? []) {
-    if (!deptIds.has(op.deptId)) {
-      errs.push(`Operator ${op.id} references missing department ${op.deptId}`);
-    }
     if (op.lineId && !lineIds.has(op.lineId)) {
       errs.push(`Operator ${op.id} references missing line ${op.lineId}`);
     }
@@ -1188,38 +1142,43 @@ export function migrateLegacyFactoryToTwin(
   projectName: string = 'Migrated factory',
 ): Twin {
   const now = new Date().toISOString();
-  const stripH = 7; // each floor strip is 7 cells deep
+  const stripH = 7; // each legacy floor is laid out as a 7-cell-deep strip
   const gap = 1;
   let cursorY = 1;
 
-  const departments: Department[] = legacy.floors.map((f) => {
-    const dept: Department = {
-      id: newDeptId(),
-      name: f.name,
-      kind: f.description ?? f.name,
-      color: (f.color as DepartmentColorKey) ?? 'cream',
-      bounds: { x: 1, y: cursorY, w: 30, h: stripH },
-      notes: f.description,
-    };
+  // Legacy "floors" were containers, and containers are gone — the floor is
+  // free space now. They survive only as geometry: each one reserves a
+  // horizontal strip so a migrated factory still reads as separate bands.
+  const stripByFloorId = new Map<string, { x: number; y: number }>();
+  for (const f of legacy.floors) {
+    stripByFloorId.set(f.id, { x: 1, y: cursorY });
     cursorY += stripH + gap;
-    return dept;
-  });
+  }
 
-  // Map legacy floorId → new dept id, preserving order so we can place lines.
-  const floorIdToDept = new Map<string, Department>();
-  legacy.floors.forEach((f, i) => floorIdToDept.set(f.id, departments[i]));
-
+  // Legacy lines map onto real SewingLines — the top-level organising unit.
+  const lines: SewingLine[] = [];
   const workstations: Workstation[] = [];
-  // Per-dept cursor for tiling lines left → right.
-  const cursorByDept = new Map<string, number>(
-    departments.map((d) => [d.id, d.bounds.x + 1]),
+  // Per-strip cursor for tiling lines left → right.
+  const cursorByFloor = new Map<string, number>(
+    legacy.floors.map((f) => [f.id, (stripByFloorId.get(f.id)?.x ?? 1) + 1]),
   );
 
   for (const line of legacy.lines) {
-    const dept = floorIdToDept.get(line.floorId);
-    if (!dept) continue;
-    const x = cursorByDept.get(dept.id) ?? dept.bounds.x + 1;
-    const y = dept.bounds.y + 1;
+    const strip = stripByFloorId.get(line.floorId);
+    if (!strip) continue;
+    const x = cursorByFloor.get(line.floorId) ?? strip.x + 1;
+    const y = strip.y + 1;
+
+    const system: ProductionSystemKey =
+      line.productionSystem === 'modular' ? 'modular' : 'PBS';
+    const sewingLine: SewingLine = {
+      id: newLineId(),
+      name: line.name,
+      productionSystem: system,
+      color: 'blue',
+      policy: defaultPolicyFor(system),
+    };
+    lines.push(sewingLine);
 
     // Pick a sensible fixture per production system.
     const sewFixture =
@@ -1227,7 +1186,7 @@ export function migrateLegacyFactoryToTwin(
 
     workstations.push(
       makeWorkstation({
-        deptId: dept.id,
+        lineId: sewingLine.id,
         catalogId: sewFixture,
         position: { x, y },
         name: `${line.name} · sewing`,
@@ -1235,7 +1194,7 @@ export function migrateLegacyFactoryToTwin(
     );
     workstations.push(
       makeWorkstation({
-        deptId: dept.id,
+        lineId: sewingLine.id,
         catalogId: 'op_sewer',
         position: { x, y: y + 2 },
         name: `${line.name} · operator`,
@@ -1243,14 +1202,14 @@ export function migrateLegacyFactoryToTwin(
     );
     workstations.push(
       makeWorkstation({
-        deptId: dept.id,
+        lineId: sewingLine.id,
         catalogId: 'buf_in',
         position: { x: x + 1, y: y + 3 },
         name: `${line.name} · buffer`,
       }),
     );
 
-    cursorByDept.set(dept.id, x + 3);
+    cursorByFloor.set(line.floorId, x + 3);
   }
 
   return {
@@ -1263,8 +1222,7 @@ export function migrateLegacyFactoryToTwin(
     modifiedAt: now,
     gridW: 36,
     gridH: Math.max(28, cursorY),
-    departments,
-    lines: [],
+    lines,
     workstations,
     connectors: [],
     operators: [],

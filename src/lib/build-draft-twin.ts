@@ -30,13 +30,11 @@ import {
   makeWorkstation,
   newAssignmentId,
   newConnectorId,
-  newDeptId,
   newLineId,
   newOperatorId,
   type Assignment,
   type Connector,
-  type Department,
-  type DepartmentColorKey,
+  type EntityColorKey,
   type MaterialFlow,
   type Operator,
   type ProductionSystemKey,
@@ -106,14 +104,13 @@ export interface DraftLineSeed {
   /** Operator target rolled up onto the SewingLine entity. */
   operatorTarget: number;
   /** Accent colour for the line — defaults to `'brand'`. */
-  color?: DepartmentColorKey;
+  color?: EntityColorKey;
   /** Free-form notes (PO number, deadline) recorded on the line. */
   notes?: string;
 }
 
 export interface DraftBuildResult {
   twin: Twin;
-  deptId: string;
   lineId: string;
 }
 
@@ -237,11 +234,10 @@ function seedOperatorsAndAssignments(args: {
   system: ProductionSystemKey;
   ops: Operation[];
   workstations: Workstation[];
-  deptId: string;
   lineId: string;
   operatorTarget: number;
 }): { operators: Operator[]; assignments: Assignment[] } {
-  const { system, ops, workstations, deptId, lineId, operatorTarget } = args;
+  const { system, ops, workstations, lineId, operatorTarget } = args;
   if (workstations.length === 0) {
     return { operators: [], assignments: [] };
   }
@@ -259,7 +255,6 @@ function seedOperatorsAndAssignments(args: {
     const cellSkills = Array.from(new Set(ops.map((o) => o.skill)));
     const operators: Operator[] = Array.from({ length: groupSize }, (_, i) => ({
       id: newOperatorId(),
-      deptId,
       lineId,
       name: `Rotator ${i + 1}`,
       archetypeId: 'sew_op',
@@ -288,7 +283,6 @@ function seedOperatorsAndAssignments(args: {
   // cross-train in the (forthcoming) Resources tab.
   const operators: Operator[] = workstations.map((_ws, i) => ({
     id: newOperatorId(),
-    deptId,
     lineId,
     name: `OPR-${String(i + 1).padStart(2, '0')}`,
     archetypeId: 'sew_op',
@@ -317,20 +311,10 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
   const { w: deptW, h: deptH } = deptSizeFor(seed.productionSystem, ops.length);
 
   const blank = emptyTwin(`Draft · ${seed.draftName}`);
-  const deptId = newDeptId();
   const lineId = newLineId();
 
-  const dept: Department = {
-    id: deptId,
-    name: 'Sewing Floor',
-    kind: 'Sewing',
-    color: 'blue',
-    bounds: { x: DEPT_ORIGIN_X, y: DEPT_ORIGIN_Y, w: deptW, h: deptH },
-    notes: `Seeded for ${seed.draftName}.`,
-  };
   const line: SewingLine = {
     id: lineId,
-    deptId,
     name: seed.draftName,
     productionSystem: seed.productionSystem,
     garmentId: seed.garment?.id,
@@ -353,7 +337,6 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
   const workstations = ops.map((op, i) => {
     const catalogId = catalogForMachine(op.machineCode);
     const ws = makeWorkstation({
-      deptId,
       catalogId,
       position: positions[i],
       name: `${i + 1}. ${op.name}`,
@@ -409,7 +392,6 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
     system: seed.productionSystem,
     ops,
     workstations,
-    deptId,
     lineId,
     operatorTarget: seed.operatorTarget,
   });
@@ -419,14 +401,12 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
       ...blank,
       gridW: Math.max(blank.gridW, DEPT_ORIGIN_X + deptW + 4),
       gridH: Math.max(blank.gridH, DEPT_ORIGIN_Y + deptH + 4),
-      departments: [dept],
       lines: [line],
       workstations,
       connectors,
       operators,
       assignments,
     },
-    deptId,
     lineId,
   };
 }
@@ -451,7 +431,6 @@ function addSimPlumbing(
   if (lineStations.length === 0) return twin;
   const first = lineStations[0];
   const last = lineStations[lineStations.length - 1];
-  const deptId = first.deptId;
 
   // Match the rate heuristic buildGarmentTwin used so the legacy engine
   // expectations don't change: 1.5× the bottleneck-pitch rate so the source
@@ -467,7 +446,6 @@ function addSimPlumbing(
   // overlap the station grid. Source upstream-left, sink downstream-right,
   // pool beneath the line's first station.
   const wsSource = makeWorkstation({
-    deptId,
     catalogId: 'buf_in',
     position: { x: Math.max(0, first.position.x - 3), y: first.position.y },
     name: 'Source — orders in',
@@ -487,7 +465,6 @@ function addSimPlumbing(
   wsSource.lineId = args.lineId;
 
   const wsPool = makeWorkstation({
-    deptId,
     catalogId: 'op_sewer',
     position: { x: first.position.x, y: first.position.y + 6 },
     name: `Operators · ${args.operators} units`,
@@ -499,7 +476,6 @@ function addSimPlumbing(
   wsPool.lineId = args.lineId;
 
   const wsSink = makeWorkstation({
-    deptId,
     catalogId: 'buf_out',
     position: { x: last.position.x + 3, y: last.position.y },
     name: 'Sink — finished pcs',

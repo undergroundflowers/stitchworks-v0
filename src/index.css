@@ -71,6 +71,35 @@ body,
   background-clip: content-box;
 }
 
+/* Canvas stage ground — a two-frequency blueprint grid (48px majors over 12px
+   minors) drawn in ink at 6% / 2%. Lives here because it's a background-image
+   pattern, which inline styles can't share without repeating the gradient
+   strings at every stage. */
+.sw-stage-grid {
+  background-image:
+    linear-gradient(to right, rgba(232, 237, 245, 0.06) 1px, transparent 1px),
+    linear-gradient(rgba(232, 237, 245, 0.06) 1px, transparent 1px),
+    linear-gradient(to right, rgba(232, 237, 245, 0.02) 1px, transparent 1px),
+    linear-gradient(rgba(232, 237, 245, 0.02) 1px, transparent 1px);
+  background-size:
+    48px 48px,
+    48px 48px,
+    12px 12px,
+    12px 12px;
+}
+
+/* Expanding-and-fading ring — the "sonar ping" on bottleneck callout dots. */
+@keyframes sw-ring {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.1);
+  }
+}
+
 @keyframes pulse {
   0%,
   100% {

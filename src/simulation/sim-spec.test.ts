@@ -88,7 +88,6 @@ describe('simSpecKey — ignores changes the engine never reads', () => {
     }],
     ['line name', (t) => { t.lines[0].name = 'Renamed line'; }],
     ['line colour', (t) => { t.lines[0].color = 'red'; }],
-    ['department bounds', (t) => { t.departments[0].bounds = { x: 0, y: 0, w: 99, h: 99 }; }],
     ['twin name', (t) => { t.name = 'Different factory name'; }],
     ['grid size', (t) => { t.gridW = 200; t.gridH = 200; }],
   ];
@@ -213,7 +212,6 @@ describe('buildSimSpec — scoping', () => {
     const t = clone(twin);
     t.lines.push({
       id: 'line-empty',
-      deptId: t.departments[0].id,
       name: 'Empty line',
       productionSystem: 'PBS',
       color: 'red',

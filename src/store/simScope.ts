@@ -14,10 +14,10 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { indexedDbStorage } from './storage/indexedDbStorage';
 
-/** What the engine is pointed at. */
+/** What the engine is pointed at. The floor is free space, so the only
+ *  meaningful groupings are the whole factory or one sewing line. */
 export type SimScope =
   | { kind: 'factory' }
-  | { kind: 'dept'; id: string }
   | { kind: 'line'; id: string };
 
 export interface SimScopeState {

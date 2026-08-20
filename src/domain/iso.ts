@@ -85,6 +85,37 @@ export const FLAT_PROJECTION: Projection = {
   unproject: flatUnproject,
 };
 
+/**
+ * Projection blended `t` of the way from FLAT (t = 0) to ISO (t = 1).
+ *
+ * Both projections are linear maps of (x, y, z), so their pointwise blend is
+ * itself a linear map with an exact inverse — the Builder animates `t` to
+ * morph the floor between plan and isometric without swapping geometry
+ * mid-flight. `kind` reports 'iso' for any 0 < t < 1 so sprites render their
+ * volumetric form throughout the tween: the altitude coefficient scales with
+ * `t`, so at t → 0 every cuboid collapses onto its own footprint (i.e. the
+ * flat plan) and the hand-off to the true 2D renderer is seamless.
+ */
+export function lerpProjection(t: number): Projection {
+  if (t <= 0) return FLAT_PROJECTION;
+  if (t >= 1) return ISO_PROJECTION;
+  // screen = M(t) · world. a,b feed sx; c,d feed sy; zc drops altitude into sy.
+  const a = FLAT_CELL + (ISO_TILE - FLAT_CELL) * t; // x → sx
+  const b = -ISO_TILE * t; // y → sx
+  const c = ISO_THIN * t; // x → sy
+  const d = FLAT_CELL + (ISO_THIN - FLAT_CELL) * t; // y → sy
+  const zc = ISO_Z * t; // z → −sy
+  const det = a * d - b * c; // stays positive over the whole blend range
+  return {
+    kind: 'iso',
+    project: (x, y, z = 0) => ({ sx: a * x + b * y, sy: c * x + d * y - zc * z }),
+    unproject: (sx, sy) => ({
+      x: (d * sx - b * sy) / det,
+      y: (a * sy - c * sx) / det,
+    }),
+  };
+}
+
 /** Rotate a local (x, y) point on the build plane by `r` (0/90/180/270) so
  *  that the rotated bounding box still anchors at (0, 0). Used by isoProjR
  *  to draw fixtures that should appear rotated on the iso floor rather than

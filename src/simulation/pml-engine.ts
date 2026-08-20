@@ -91,15 +91,20 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
     });
   }
 
-  // Service ↔ ResourcePool dept binding (implicit v1)
-  const deptHasPool = new Set<string>();
-  for (const ws of blockByKind.get('ResourcePool') ?? []) deptHasPool.add(ws.deptId);
+  // Service ↔ ResourcePool binding (implicit v1). Scoped to the sewing line,
+  // which is the resource container now that the floor is free space; a
+  // station with no line is served by any factory-level pool.
+  const poolScopes = new Set<string>();
+  for (const ws of blockByKind.get('ResourcePool') ?? []) {
+    poolScopes.add(ws.lineId ?? FACTORY_POOL_KEY);
+  }
   for (const ws of blockByKind.get('Service') ?? []) {
-    if (!deptHasPool.has(ws.deptId)) {
+    const scope = ws.lineId ?? FACTORY_POOL_KEY;
+    if (!poolScopes.has(scope)) {
       issues.push({
         level: 'warn',
         wsId: ws.id,
-        message: `Service "${ws.name}" has no ResourcePool in its department — it will run without a resource constraint (effectively infinite capacity).`,
+        message: `Service "${ws.name}" has no ResourcePool on its ${ws.lineId ? 'line' : 'factory floor'} — it will run without a resource constraint (effectively infinite capacity).`,
       });
     }
   }
@@ -588,7 +593,8 @@ interface Routing {
  * would have become factory-wide.
  */
 interface OperatorPool {
-  /** `ws.lineId` when the station belongs to a line, else `dept:<deptId>`. */
+  /** `line:<lineId>` when the station belongs to a line, else the shared
+   *  factory pool key. */
   key: string;
   capacity: number;
   /** Currently-busy units. */
@@ -599,12 +605,15 @@ interface OperatorPool {
 }
 
 /**
- * Which operator pool a workstation draws from. Line membership wins; a
- * station with no line falls back to its department so unlined twins (and
- * every twin saved before lines were first-class) keep behaving as before.
+ * Which operator pool a workstation draws from. The sewing line is the
+ * resource-scoping container: a line's operators are billed against that
+ * line and no other. The floor itself is free space, so a station with no
+ * line draws from a single factory-wide pool rather than from a zone.
  */
+export const FACTORY_POOL_KEY = 'factory';
+
 function poolKeyFor(ws: Workstation): string {
-  return ws.lineId ? `line:${ws.lineId}` : `dept:${ws.deptId}`;
+  return ws.lineId ? `line:${ws.lineId}` : FACTORY_POOL_KEY;
 }
 
 /** Engine event types — coarse-grained, just enough for Tier-1 coverage. */

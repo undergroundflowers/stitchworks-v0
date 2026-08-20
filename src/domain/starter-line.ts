@@ -79,7 +79,6 @@ export function buildStarterLine(name: string = 'Starter Factory'): Twin {
   serviceStations.forEach((ws, i) => {
     const opr: Operator = {
       id: newOperatorId(),
-      deptId: ws.deptId,
       lineId: line.id,
       name: `OPR-${String(i + 1).padStart(2, '0')}`,
       skills: [],

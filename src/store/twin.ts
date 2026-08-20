@@ -31,11 +31,9 @@ import {
   type Twin,
   type Scenario,
   type SimRun,
-  type Department,
   type Workstation,
-  type DepartmentColorKey,
+  type EntityColorKey,
   type Vec2,
-  type Rect,
   type Rotation,
   type KpiObservedAttrs,
   type Connector,
@@ -49,7 +47,6 @@ import {
   newOperatorId,
   emptyTwin,
   forkTwin,
-  newDeptId,
   newLineId,
   newWorkstationId,
   newScenarioId,
@@ -72,7 +69,7 @@ import { getBlockSpec } from '../domain/pml';
  * rather than letting a stale 4 % sit next to a fresh 83 % in the Inspector.
  * They are re-derived by the next run.
  */
-export const TWIN_STORE_SCHEMA_VERSION = 6 as const;
+export const TWIN_STORE_SCHEMA_VERSION = 7 as const;
 
 /** Maximum number of pre-mutation snapshots kept in the undo stack.
  *  Each snapshot is a structural clone of the full twin tree, so the cap
@@ -122,14 +119,8 @@ export interface TwinState {
    *  new ISO timestamp. */
   touchActive: () => string;
 
-  // ── Department CRUD ──────────────────────────────────────────────────────
-  addDepartment: (input: Omit<Department, 'id'>) => string;
-  updateDepartment: (id: string, patch: Partial<Omit<Department, 'id'>>) => void;
-  removeDepartment: (id: string) => void;
-  moveDepartment: (id: string, bounds: Rect) => void;
-
   // ── Sewing-Line CRUD ─────────────────────────────────────────────────────
-  /** Create a sewing line inside a department. Returns the new line's id. */
+  /** Create a sewing line. Returns the new line's id. */
   addLine: (input: Omit<SewingLine, 'id'>) => string;
   /** Patch fields on a line. */
   updateLine: (id: string, patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>) => void;
@@ -160,7 +151,9 @@ export interface TwinState {
 
   // ── Workstation CRUD ─────────────────────────────────────────────────────
   addWorkstation: (input: {
-    deptId: string;
+    /** Optional line membership. The floor is free space, so a station
+     *  dropped outside any line simply has no owner. */
+    lineId?: string;
     catalogId: string;
     position: Vec2;
     rotation?: Rotation;
@@ -412,60 +405,6 @@ export const useTwin = create<TwinState>()(
         return now;
       },
 
-      // ── Departments ────────────────────────────────────────────────────────
-      addDepartment: (input) => {
-        const id = newDeptId();
-        const dept: Department = { id, ...input };
-        set((s) =>
-          updateActive(s, (twin) => ({
-            ...twin,
-            departments: [...twin.departments, dept],
-          })),
-        );
-        return id;
-      },
-
-      updateDepartment: (id, patch) =>
-        set((s) =>
-          updateActive(s, (twin) => ({
-            ...twin,
-            departments: twin.departments.map((d) =>
-              d.id === id ? { ...d, ...patch } : d,
-            ),
-          })),
-        ),
-
-      removeDepartment: (id) =>
-        set((s) =>
-          updateActive(s, (twin) => {
-            // Cascade: workstations whose dept disappeared also disappear,
-            // and any connector touching one of those workstations follows.
-            const orphanedWsIds = new Set(
-              twin.workstations.filter((w) => w.deptId === id).map((w) => w.id),
-            );
-            return {
-              ...twin,
-              departments: twin.departments.filter((d) => d.id !== id),
-              // Lines belong to a department — cascade their removal too.
-              lines: (twin.lines ?? []).filter((l) => l.deptId !== id),
-              workstations: twin.workstations.filter((w) => w.deptId !== id),
-              connectors: (twin.connectors ?? []).filter(
-                (c) => !orphanedWsIds.has(c.fromWsId) && !orphanedWsIds.has(c.toWsId),
-              ),
-            };
-          }),
-        ),
-
-      moveDepartment: (id, bounds) =>
-        set((s) =>
-          updateActive(s, (twin) => ({
-            ...twin,
-            departments: twin.departments.map((d) =>
-              d.id === id ? { ...d, bounds: { ...bounds } } : d,
-            ),
-          })),
-        ),
-
       // ── Sewing-Line CRUD ───────────────────────────────────────────────────
       addLine: (input) => {
         const id = newLineId();
@@ -585,14 +524,13 @@ export const useTwin = create<TwinState>()(
             const remainingCount = otherAsgns.length;
 
             // Mint a fresh primary operator for the peeled station. It
-            // inherits the shared operator's department + line + archetype
-            // so the canvas continues to render the same person tile
-            // category, but with a new id (and a clean shareFrac = 1).
+            // inherits the shared operator's line + archetype so the canvas
+            // continues to render the same person tile category, but with a
+            // new id (and a clean shareFrac = 1).
             const sharedOp = operators.find((o) => o.id === sharedOpId);
             const freshOp: Operator = {
               id: newOperatorId(),
-              deptId: sharedOp?.deptId ?? twin.workstations.find((w) => w.id === wsId)?.deptId ?? '',
-              lineId: sharedOp?.lineId,
+              lineId: sharedOp?.lineId ?? twin.workstations.find((w) => w.id === wsId)?.lineId,
               name: `OPR-${operators.length + 1}`,
               archetypeId: sharedOp?.archetypeId ?? 'sew_op',
               // Skills are inherited so the new primary can actually run
@@ -650,7 +588,7 @@ export const useTwin = create<TwinState>()(
           resolvedName = `${input.presetLabel} ${max + 1}`;
         }
         const ws = makeWorkstation({
-          deptId: input.deptId,
+          lineId: input.lineId,
           catalogId: input.catalogId,
           position: input.position,
           rotation: input.rotation,
@@ -748,11 +686,14 @@ export const useTwin = create<TwinState>()(
 
       pasteWorkstations: (input) => {
         const active = selectActiveTwin(get());
-        const deptIds = new Set(active.departments.map((d) => d.id));
+        // A pasted station only needs its line to still exist; the floor
+        // itself is free space, so there is no containing zone to validate
+        // against. An orphaned lineId is dropped rather than rejecting the
+        // paste — the station lands unlined.
+        const lineIds = new Set((active.lines ?? []).map((l) => l.id));
         const idMap: Record<string, string> = {};
         const cloned: Workstation[] = [];
         for (const snap of input.snapshots) {
-          if (!deptIds.has(snap.deptId)) continue;
           const newId = newWorkstationId();
           idMap[snap._srcId] = newId;
           // Strip the transient `_srcId` from the clone before it joins
@@ -763,6 +704,7 @@ export const useTwin = create<TwinState>()(
           cloned.push({
             ...rest,
             id: newId,
+            lineId: snap.lineId && lineIds.has(snap.lineId) ? snap.lineId : undefined,
             position: { ...snap.position },
             props: { ...snap.props },
             operation: { ...snap.operation },
@@ -1139,10 +1081,6 @@ export const useTwin = create<TwinState>()(
           renameActive: get().renameActive,
           setActiveNotes: get().setActiveNotes,
           touchActive: get().touchActive,
-          addDepartment: get().addDepartment,
-          updateDepartment: get().updateDepartment,
-          removeDepartment: get().removeDepartment,
-          moveDepartment: get().moveDepartment,
           addLine: get().addLine,
           updateLine: get().updateLine,
           removeLine: get().removeLine,
@@ -1221,6 +1159,12 @@ export const useTwin = create<TwinState>()(
       // v2 → v4: drop the now-removed CAD underlay field (handled by
       // normalizeTwin, which simply ignores it on load).
       // v5 → v6: clear `kpiObserved` — its utilizationPct changed meaning.
+      // v6 → v7: retire departments. The bump exists purely to force every
+      // already-persisted twin back through `normalizeTwin`, which strips the
+      // dead `departments` array and every `deptId`. Without it a saved
+      // factory keeps carrying zone data the app can no longer read — the
+      // fields are invisible to the types but still on disk, and still
+      // reloaded on every boot. Station geometry is untouched.
       migrate: (persisted, fromVersion) => {
         const s = (persisted ?? {}) as {
           canonical?: unknown;
@@ -1264,33 +1208,12 @@ export function selectActiveTwin(s: TwinState): Twin {
   return s.scenarios.find((scn) => scn.id === s.activeScenarioId)?.twin ?? s.canonical;
 }
 
-/** All workstations inside one department in the active twin. */
-export function selectWorkstationsInDept(
-  s: TwinState,
-  deptId: string,
-): Workstation[] {
-  return selectActiveTwin(s).workstations.filter((w) => w.deptId === deptId);
-}
-
-/** Resolve a department id in the active twin. */
-export function selectDepartment(
-  s: TwinState,
-  deptId: string,
-): Department | undefined {
-  return selectActiveTwin(s).departments.find((d) => d.id === deptId);
-}
-
 /** Resolve a workstation id in the active twin. */
 export function selectWorkstation(
   s: TwinState,
   wsId: string,
 ): Workstation | undefined {
   return selectActiveTwin(s).workstations.find((w) => w.id === wsId);
-}
-
-/** All sewing lines inside one department in the active twin. */
-export function selectLinesInDept(s: TwinState, deptId: string): SewingLine[] {
-  return (selectActiveTwin(s).lines ?? []).filter((l) => l.deptId === deptId);
 }
 
 /** All workstations attributed to a specific sewing line. */
@@ -1307,4 +1230,4 @@ export function selectLine(s: TwinState, lineId: string): SewingLine | undefined
 }
 
 // Re-export the colour-key + line types so callers don't have to dig into domain/twin.
-export type { DepartmentColorKey, SewingLine, ProductionSystemKey };
+export type { EntityColorKey, SewingLine, ProductionSystemKey };

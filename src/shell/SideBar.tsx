@@ -14,6 +14,10 @@ export const SIDEBAR_WIDTH = 76;
  * marked by a brand-coloured left bar. Factory + scenario context sits at the
  * top as a compact pill; Settings is pinned to the bottom.
  *
+ * Dark like everything else now. The rail used to be the one inverted (light)
+ * surface in the app, which made it the loudest element on screen — the
+ * chrome should recede so the canvas is the brightest thing.
+ *
  * Each tab used to carry hide and lock toggles, plus an overflow popover for
  * whatever had been hidden — roughly 320 lines of affordance. That made sense
  * against twelve nav entries. Against four surfaces, hiding one is not a
@@ -58,11 +62,11 @@ export function SideBar() {
     <div
       style={{
         width: SIDEBAR_WIDTH,
-        background: SW_COLORS.ink,
-        color: SW_COLORS.paper,
+        background: SW_COLORS.paper,
+        color: SW_COLORS.ink,
         display: 'flex',
         flexDirection: 'column',
-        borderRight: `1px solid ${alpha(SW_COLORS.paper, 0.08)}`,
+        borderRight: `1px solid ${SW_COLORS.lineSoft}`,
         flexShrink: 0,
         height: '100%',
       }}
@@ -83,14 +87,14 @@ export function SideBar() {
           <rect x="2" y="2" width="28" height="28" rx="5" fill={SW_COLORS.brand} />
           <path
             d="M9 9 L23 9 M9 16 L23 16 M9 23 L23 23"
-            stroke={SW_COLORS.paper}
+            stroke={SW_COLORS.void}
             strokeWidth="2.4"
             strokeLinecap="square"
             strokeDasharray="2 2"
           />
           <path
             d="M9 9 Q9 16 23 16 Q23 23 9 23"
-            stroke={SW_COLORS.paper}
+            stroke={SW_COLORS.void}
             strokeWidth="2.4"
             fill="none"
             strokeLinecap="square"
@@ -113,17 +117,18 @@ export function SideBar() {
           alignItems: 'center',
           gap: 2,
           borderRadius: SW_RADIUS.sm,
-          background: alpha(SW_COLORS.paper, 0.03),
+          border: `1px solid ${SW_COLORS.lineSoft}`,
+          background: SW_COLORS.paperDeep,
         }}
       >
         <div
           style={{
             fontFamily: SW_FONTS.display,
             fontSize: 9.5,
-            fontWeight: 900,
+            fontWeight: 700,
             lineHeight: 1.1,
             letterSpacing: '0.02em',
-            color: SW_COLORS.paper,
+            color: SW_COLORS.ink,
             textAlign: 'center',
             wordBreak: 'break-word',
             padding: '0 4px',
@@ -136,12 +141,12 @@ export function SideBar() {
             width: 6,
             height: 6,
             borderRadius: 999,
-            background: activeScenarioId === null ? alpha(SW_COLORS.paper, 0.2) : SW_COLORS.brand,
+            background: activeScenarioId === null ? SW_COLORS.faint : SW_COLORS.brand,
           }}
         />
       </div>
 
-      <div style={{ height: 1, background: alpha(SW_COLORS.paper, 0.08), margin: '4px 10px 6px' }} />
+      <div style={{ height: 1, background: SW_COLORS.lineSoft, margin: '4px 10px 6px' }} />
 
       <div
         style={{
@@ -165,7 +170,7 @@ export function SideBar() {
       </div>
 
       {/* Settings — pinned to the bottom. */}
-      <div style={{ borderTop: `1px solid ${alpha(SW_COLORS.paper, 0.08)}`, padding: '8px 6px 10px' }}>
+      <div style={{ borderTop: `1px solid ${SW_COLORS.lineSoft}`, padding: '8px 6px 10px' }}>
         <NavTile
           route={ROUTES.find((r) => r.id === 'settings')!}
           active={currentRoute === 'settings'}
@@ -193,25 +198,33 @@ function NavTile({ route, active, onNavigate }: NavTileProps) {
       aria-label={route.label}
       title={route.label}
       onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.background = alpha(SW_COLORS.paper, 0.03);
+        if (!active) {
+          e.currentTarget.style.background = SW_COLORS.steel;
+          e.currentTarget.style.color = SW_COLORS.ink;
+        }
       }}
       onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.background = 'transparent';
+        if (!active) {
+          e.currentTarget.style.background = 'transparent';
+          e.currentTarget.style.color = alpha(SW_COLORS.ink, 0.75);
+        }
       }}
       style={{
         width: '100%',
-        background: active ? alpha(SW_COLORS.paper, 0.08) : 'transparent',
+        background: active ? SW_COLORS.brandLite : 'transparent',
         border: 'none',
         cursor: 'pointer',
         padding: '8px 0 6px',
-        color: active ? SW_COLORS.brand : alpha(SW_COLORS.paper, 0.8),
-        fontFamily: SW_FONTS.body,
-        fontSize: 10,
+        color: active ? SW_COLORS.brandText : alpha(SW_COLORS.ink, 0.75),
+        fontFamily: SW_FONTS.mono,
+        fontSize: 9,
         fontWeight: 600,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: 2,
+        gap: 3,
         borderRadius: SW_RADIUS.sm,
         transition: 'background 100ms, color 100ms',
         position: 'relative',

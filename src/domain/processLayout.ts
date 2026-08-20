@@ -48,8 +48,10 @@ const COL_W = PROCESS_BLOCK_W + PROCESS_GAP_X;
 const ROW_H = PROCESS_BLOCK_H + PROCESS_ROW_GAP;
 
 export interface ProcessLane {
-  /** Real department id, or the synthetic keys `'__orphan__'` / `'__pool__'`. */
-  deptId: string | null;
+  /** Real sewing-line id, or the synthetic keys `'__unassigned__'` /
+   *  `'__pool__'`. Lanes are per-line: the floor is free space, so a line is
+   *  the only real grouping a block can belong to. */
+  lineId: string | null;
   synthetic: boolean;
   /** Top Y of the lane band, in SVG px. */
   y: number;
@@ -163,30 +165,46 @@ export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
     indeg.set(c.toWsId, (indeg.get(c.toWsId) ?? 0) + 1);
   }
 
-  const ordered = [...twin.departments].sort((a, b) => {
-    if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
-    return a.bounds.x - b.bounds.x;
+  // One lane per sewing line, ordered by where the line actually sits on the
+  // floor (top-left-most member station) so the diagram reads in the same
+  // order as the plan.
+  const lineAnchor = new Map<string, { x: number; y: number }>();
+  for (const w of twin.workstations) {
+    if (!w.lineId || isPool.get(w.id)) continue;
+    const cur = lineAnchor.get(w.lineId);
+    if (!cur || w.position.y < cur.y || (w.position.y === cur.y && w.position.x < cur.x)) {
+      lineAnchor.set(w.lineId, { x: w.position.x, y: w.position.y });
+    }
+  }
+  const ordered = [...(twin.lines ?? [])].sort((a, b) => {
+    const pa = lineAnchor.get(a.id) ?? { x: Infinity, y: Infinity };
+    const pb = lineAnchor.get(b.id) ?? { x: Infinity, y: Infinity };
+    if (pa.y !== pb.y) return pa.y - pb.y;
+    return pa.x - pb.x;
   });
 
   let cursorY = PROCESS_PAD_TOP;
 
-  ordered.forEach((d) => {
+  ordered.forEach((l) => {
     const ids = twin.workstations
-      .filter((w) => w.deptId === d.id && !isPool.get(w.id))
+      .filter((w) => w.lineId === l.id && !isPool.get(w.id))
       .map((w) => w.id);
+    if (ids.length === 0) return;
     const rows = placeSerpentine(
       flowOrder(ids, posX, succ, indeg),
       cursorY + PROCESS_LANE_PAD_TOP,
       positions,
     );
     const height = laneHeight(rows);
-    lanes.push({ deptId: d.id, synthetic: false, y: cursorY, height, wsIds: ids });
+    lanes.push({ lineId: l.id, synthetic: false, y: cursorY, height, wsIds: ids });
     cursorY += height + PROCESS_LANE_GAP;
   });
 
-  // Orphan flow blocks (dangling deptId — defensive).
+  // Blocks that belong to no line — expected now, not defensive: the floor is
+  // free space, so an unlined station is a normal thing to author.
+  const lineIds = new Set((twin.lines ?? []).map((l) => l.id));
   const orphan = twin.workstations
-    .filter((w) => !isPool.get(w.id) && !ordered.find((d) => d.id === w.deptId))
+    .filter((w) => !isPool.get(w.id) && !(w.lineId && lineIds.has(w.lineId)))
     .map((w) => w.id);
   if (orphan.length > 0) {
     const rows = placeSerpentine(
@@ -195,7 +213,7 @@ export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
       positions,
     );
     const height = laneHeight(rows);
-    lanes.push({ deptId: '__orphan__', synthetic: true, y: cursorY, height, wsIds: orphan });
+    lanes.push({ lineId: '__unassigned__', synthetic: true, y: cursorY, height, wsIds: orphan });
     cursorY += height + PROCESS_LANE_GAP;
   }
 
@@ -204,7 +222,7 @@ export function computeProcessSeedLayout(twin: Twin): ProcessSeedLayout {
   if (pools.length > 0) {
     const rows = placeSerpentine(pools, cursorY + PROCESS_LANE_PAD_TOP, positions);
     const height = laneHeight(rows);
-    lanes.push({ deptId: '__pool__', synthetic: true, y: cursorY, height, wsIds: pools });
+    lanes.push({ lineId: '__pool__', synthetic: true, y: cursorY, height, wsIds: pools });
     cursorY += height + PROCESS_LANE_GAP;
   }
 
