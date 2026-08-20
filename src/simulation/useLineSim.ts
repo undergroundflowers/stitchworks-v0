@@ -72,17 +72,19 @@ export function useLineSim(): UseLineSimResult {
   const seed = useSimScope((s) => s.seed);
   const warmupMin = useSimScope((s) => s.warmupMin);
   const garments = useGarments();
-  const selectedGarmentId = useProject((s) => s.selectedGarmentId);
+  // Every line carries its own `garmentId`, which `buildSimSpec` prefers.
+  // This is only the floor under a line that somehow has none.
+  const fallbackGarmentId = garments.all[0]?.id ?? '';
   const skillMatrix = useProject((s) => s.skillMatrix);
 
   // Skill-matrix efficiencies are engine input, so they belong in the spec —
   // and therefore in the key, so editing the matrix re-runs the sim.
   const opEfficiency = useMemo(() => {
-    const garment = garments.byId[selectedGarmentId] ?? garments.all[0];
+    const garment = garments.byId[fallbackGarmentId] ?? garments.all[0];
     if (!garment) return undefined;
     const eff = efficiencyFromSkillMatrix(skillMatrix, garment.operations);
     return Object.keys(eff).length > 0 ? eff : undefined;
-  }, [skillMatrix, garments, selectedGarmentId]);
+  }, [skillMatrix, garments, fallbackGarmentId]);
 
   const spec = useMemo(
     () =>
@@ -90,13 +92,13 @@ export function useLineSim(): UseLineSimResult {
         twin,
         scope,
         garmentsById: garments.byId,
-        defaultGarmentId: selectedGarmentId,
+        defaultGarmentId: fallbackGarmentId,
         durationMin,
         seed,
         warmupMin,
         opEfficiency,
       }),
-    [twin, scope, garments.byId, selectedGarmentId, durationMin, seed, warmupMin, opEfficiency],
+    [twin, scope, garments.byId, fallbackGarmentId, durationMin, seed, warmupMin, opEfficiency],
   );
 
   const key = useMemo(() => (spec.lines.length > 0 ? simSpecKey(spec) : ''), [spec]);

@@ -168,8 +168,12 @@ export function LiveSimPage() {
   const project = useProject();
   const garments = useGarments();
   const activeTwin = useTwin(selectActiveTwin);
-  const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
-  const [operators, setOperators] = useState<number>(project.defaultOperators);
+  // Both are re-seeded from the built twin / active order as soon as one
+  // resolves; these are only the value before that happens.
+  const [garmentId, setGarmentId] = useState<string>(() => garments.all[0]?.id ?? '');
+  const [operators, setOperators] = useState<number>(
+    () => activeTwin.lines.find((l) => l.operatorTarget)?.operatorTarget ?? 4,
+  );
   // User-edited bundle override; null means "follow the seed (twin or system)".
   const [bundleOverride, setBundleOverride] = useState<number | null>(null);
   const [view, setView] = useState<SimView>('iso');

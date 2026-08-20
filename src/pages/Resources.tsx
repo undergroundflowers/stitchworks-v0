@@ -56,7 +56,7 @@ export function ResourcesPage() {
   const skillMatrix = project.skillMatrix;
   const setSkill = project.setSkill;
   const resetSkillMatrix = project.resetSkillMatrix;
-  const [skillsGarment, setSkillsGarment] = useState<string>(project.selectedGarmentId);
+  const [skillsGarment, setSkillsGarment] = useState<string>(garments.all[0]?.id ?? '');
 
   // Target headcount = total operators configured across every factory line.
   // Without this, the page showed a hardcoded 33 even when the factory had
@@ -351,7 +351,7 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const [garmentId, setGarmentId] = useState<string>(
     initialGarmentId && garments.byId[initialGarmentId]
       ? initialGarmentId
-      : project.selectedGarmentId,
+      : garments.all[0]?.id ?? '',
   );
   // Excel import state — `importBatch` is a queue of parsed previews (one
   // per selected file). Each entry is tagged with its `kind`: garment OBs

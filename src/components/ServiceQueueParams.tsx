@@ -43,11 +43,13 @@ import type { Operation } from '../domain/operations';
 
 export function ServiceQueueParams({ ws }: { ws: Workstation }) {
   const garments = useGarments();
-  const projectSelectedGarmentId = useProject((s) => s.selectedGarmentId);
   const updateOperation = useProject((s) => s.updateOperation);
 
-  const garmentId = ws.operation.garmentId ?? projectSelectedGarmentId;
-  const garment = garments.byId[garmentId] ?? garments.all[0];
+  // The station's own binding is the only garment that means anything here.
+  // First-in-catalog is the fallback for an unbound station, not a
+  // remembered project-wide choice.
+  const garmentId = ws.operation.garmentId;
+  const garment = (garmentId ? garments.byId[garmentId] : undefined) ?? garments.all[0];
   const opId = ws.operation.opId;
   const op = garment && opId ? garment.operations.find((o) => o.id === opId) : undefined;
 

@@ -1,11 +1,10 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, SectionHeader, ToggleGroup, HudSelect, useConfirm } from '../components';
+import { Card, Button, SectionHeader, ToggleGroup, useConfirm } from '../components';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, pickProjectFile, isFactoryNameTaken, downloadSwproj, applySwproj, parseSwproj } from '../store';
 import { useTwin } from '../store/twin';
 import { estimateIdbBytes, isUsingIndexedDb } from '../store/storage/indexedDbStorage';
-import { ALL_GARMENT_TEMPLATES } from '../domain';
 import { formatDate } from '../lib/format';
 import type { UnitsPrefs } from '../store/project';
 
@@ -31,11 +30,10 @@ export function SettingsPage() {
       alive = false;
     };
   }, []);
-  // Read the twin universe so we can surface factory composition + the
-  // saved scenario forks on the PROJECT card. The PROJECT card is the
-  // single landing place where the user inspects + exports the active
-  // factory; the Builder used to host an EXPORT JSON button for the same
-  // payload — that's been folded in here.
+  // Read the twin universe so we can surface the saved scenario forks on
+  // the PROJECT card. The PROJECT card is the single landing place where the
+  // user inspects + exports the active factory; the Builder used to host an
+  // EXPORT JSON button for the same payload — that's been folded in here.
   const canonical = useTwin((s) => s.canonical);
   const scenarios = useTwin((s) => s.scenarios);
   const activeScenarioId = useTwin((s) => s.activeScenarioId);
@@ -60,18 +58,6 @@ export function SettingsPage() {
     a.remove();
     URL.revokeObjectURL(url);
   }
-
-  // Lightweight counter helper — `operators` and `assignments` are
-  // optional on Twin (older saves omit them), so coerce to [] before
-  // counting to avoid a noisy `?? 0` everywhere in the JSX.
-  const composition = {
-    lines: canonical.lines.length,
-    workstations: canonical.workstations.length,
-    connectors: canonical.connectors.length,
-    operators: (canonical.operators ?? []).length,
-    assignments: (canonical.assignments ?? []).length,
-    orders: (canonical.orders ?? []).length,
-  };
 
   // Local pending value for the project-name input. Commits to the store
   // on blur or Enter when valid; lets the user keep typing through an
@@ -138,120 +124,6 @@ export function SettingsPage() {
               )}
             </div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Default garment</div>
-              <HudSelect
-                value={project.selectedGarmentId}
-                onChange={(v) => project.setSelectedGarment(v)}
-                variant="light"
-                width="100%"
-                options={ALL_GARMENT_TEMPLATES.map((g) => ({ value: g.id, label: g.name }))}
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Default operators</div>
-              <input
-                type="number" min={4} max={120} value={project.defaultOperators}
-                onChange={(e) => project.setDefaultOperators(parseInt(e.target.value) || 25)}
-                style={{
-                  width: '100%', padding: '8px 10px',
-                  borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
-                  fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700,
-                }}
-              />
-            </div>
-          </div>
-          {/* ── FACTORY DETAILS ────────────────────────────────────────
-              Composition snapshot of the canonical twin (the master
-              factory authored in Builder). Read-only counts so the user
-              has a single place to confirm "what's in this factory"
-              without bouncing back to Builder. */}
-          <div
-            style={{
-              marginTop: 18,
-              padding: 12,
-              background: SW_COLORS.paperDeep,
-              border: `1px solid ${SW_COLORS.line}`,
-              borderRadius: SW_RADIUS.sm,
-            }}
-          >
-            <div
-              style={{
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                fontWeight: 800,
-                letterSpacing: '0.14em',
-                color: SW_COLORS.muted,
-                marginBottom: 8,
-              }}
-            >
-              FACTORY DETAILS
-            </div>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(4, 1fr)',
-                gap: 10,
-              }}
-            >
-              {[
-                { label: 'Sewing lines', value: composition.lines },
-                { label: 'Workstations', value: composition.workstations },
-                { label: 'Connectors', value: composition.connectors },
-                { label: 'Operators', value: composition.operators },
-                { label: 'Assignments', value: composition.assignments },
-                { label: 'Orders', value: composition.orders },
-                { label: 'Scenarios', value: scenarios.length },
-              ].map((stat) => (
-                <div
-                  key={stat.label}
-                  style={{
-                    background: SW_COLORS.paper,
-                    border: `1px solid ${SW_COLORS.line}`,
-                    borderRadius: SW_RADIUS.sm,
-                    padding: '6px 10px',
-                  }}
-                >
-                  <div
-                    style={{
-                      fontFamily: SW_FONTS.mono,
-                      fontSize: 9,
-                      fontWeight: 700,
-                      color: SW_COLORS.muted,
-                      letterSpacing: '1px',
-                    }}
-                  >
-                    {stat.label.toUpperCase()}
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: SW_FONTS.display,
-                      fontSize: 18,
-                      fontWeight: 900,
-                      color: stat.value > 0 ? SW_COLORS.ink : SW_COLORS.faint,
-                      marginTop: 2,
-                    }}
-                  >
-                    {stat.value}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div
-              style={{
-                marginTop: 8,
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                color: SW_COLORS.muted,
-                letterSpacing: '0.04em',
-              }}
-            >
-              Canonical · created {formatDate(canonical.createdAt, project.units.dateFormat)} ·
-              modified {formatDate(canonical.modifiedAt, project.units.dateFormat)}
-            </div>
-          </div>
-
           {/* ── SAVED SCENARIOS ────────────────────────────────────────
               Every scenario fork off the canonical twin. Per-row counts
               come from the scenario's own twin payload (a deep clone at

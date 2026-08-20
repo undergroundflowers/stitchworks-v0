@@ -5884,11 +5884,10 @@ function Inspector(props: InspectorProps) {
 
 function InspectorBody(props: InspectorProps) {
   const confirm = useConfirm();
-  // Operation binding is picked from the garment's bulletin, not typed. The
-  // project's selected garment is the default so a freshly dropped station
-  // offers the right ops without the user setting a garment first.
+  // Operation binding is picked from the garment's bulletin, not typed. An
+  // unbound station falls back to its own line's garment, so a freshly
+  // dropped station offers the right ops without the user picking one.
   const garments = useGarments();
-  const projectGarmentId = useProject((s) => s.selectedGarmentId);
   // Scroll boundary inside the shell — the shell owns the column, border and
   // header, so the body only styles its own padding + overflow.
   const wrapper: CSSProperties = {
@@ -6165,8 +6164,11 @@ function InspectorBody(props: InspectorProps) {
         active={props.lens === 'operations'}
       >
         {(() => {
-          const garmentId = ws.operation.garmentId ?? projectGarmentId;
-          const garment = garments.byId[garmentId];
+          const garmentId =
+            ws.operation.garmentId ??
+            props.twin.lines.find((l) => l.id === ws.lineId)?.garmentId ??
+            garments.all[0]?.id;
+          const garment = garmentId ? garments.byId[garmentId] : undefined;
           const ops = garment?.operations ?? [];
           // A station bound to an id the bulletin no longer lists (legacy
           // data, a hand-typed id, a since-edited garment) keeps its binding

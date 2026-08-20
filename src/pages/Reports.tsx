@@ -153,19 +153,19 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [saveNotes, setSaveNotes] = useState('');
 
   // Yamazumi state — picks from store override if present, else LPT auto.
-  const [yamGarment, setYamGarment] = useState<string>(project.selectedGarmentId);
-  // Seed the line-balance operator count from the line that actually produces
-  // the selected garment (its authored operatorTarget), NOT the factory-wide
-  // `defaultOperators` (≈25). Balancing a 3-op line onto 25 operators reads as
-  // ~90% balance loss and misleads — the count must reflect the line being
-  // balanced. Falls back to any wired line's target, then the project default
-  // for legacy / canonical-only twins. Clamp matches the input's [4, 60] range.
+  const [yamGarment, setYamGarment] = useState<string>(() => {
+    // Prefer a garment some line on this floor actually produces — that is
+    // what the user came here to balance.
+    const lines = selectActiveTwin(useTwin.getState()).lines ?? [];
+    return lines.find((l) => l.garmentId)?.garmentId ?? garments.all[0]?.id ?? '';
+  });
+  // Seed the line-balance operator count from a line's authored
+  // operatorTarget. It must reflect the line being balanced: balancing a 3-op
+  // line onto a factory-wide 25 reads as ~90% balance loss and misleads.
+  // Clamp matches the input's [4, 60] range.
   const [yamOperators, setYamOperators] = useState<number>(() => {
     const lines = selectActiveTwin(useTwin.getState()).lines ?? [];
-    const target =
-      lines.find((l) => l.garmentId === project.selectedGarmentId && l.operatorTarget)?.operatorTarget ??
-      lines.find((l) => l.operatorTarget)?.operatorTarget ??
-      project.defaultOperators;
+    const target = lines.find((l) => l.operatorTarget)?.operatorTarget ?? 4;
     return Math.max(4, Math.min(60, target));
   });
 
@@ -335,14 +335,14 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     return buildLinesFromTwin({
       twin: reportsTwin,
       garmentsById: garments.byId,
-      defaultGarmentId: project.selectedGarmentId,
+      defaultGarmentId: yamGarment,
       opEfficiency: efficiencyFromSkillMatrix(
         project.skillMatrix,
-        (garments.byId[project.selectedGarmentId] ?? garments.all[0]).operations,
+        (garments.byId[yamGarment] ?? garments.all[0]).operations,
       ),
       modelTimeUnit: project.time.modelTimeUnit,
     });
-  }, [reportsTwin, garments.byId, garments.all, project.selectedGarmentId, project.skillMatrix, project.time.modelTimeUnit]);
+  }, [reportsTwin, garments.byId, garments.all, yamGarment, project.skillMatrix, project.time.modelTimeUnit]);
   const perLineAggs = useMemo(() => {
     return lineBuildsForReports
       .filter((lb) => lb.ok)
@@ -1529,6 +1529,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               name: trimmed,
               notes: saveNotes.trim() || undefined,
               twin: reportsTwin,
+              garmentTemplateId: yamGarment,
+              operators:
+                perLineAggs.length > 0
+                  ? perLineAggs.reduce((sum, l) => sum + l.operators, 0)
+                  : yamOperators,
               kpis: {
                 producedPieces: kpiSource.producedPieces.mean,
                 throughputPerHr: kpiSource.throughputPerHr.mean,

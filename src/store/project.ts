@@ -259,12 +259,6 @@ export interface ProjectState {
   schemaVersion: typeof PROJECT_SCHEMA_VERSION;
   meta: ProjectMeta;
 
-  /** Active garment template id used by LiveSim and Yamazumi by default. */
-  selectedGarmentId: string;
-
-  /** Default operator count for new sims and balancing views. */
-  defaultOperators: number;
-
   /**
    * Orders committed from the Orders wizard, most recent first. Surfaced
    * in LiveSim's SOURCE dropdown so the user can switch the simulation
@@ -318,8 +312,6 @@ export interface ProjectState {
 
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
-  setSelectedGarment: (id: string) => void;
-  setDefaultOperators: (n: number) => void;
   setSelectedProductionSystem: (id: ProductionSystem) => void;
   /** Push a new order to the front of `orders[]`, capping at MAX_RECENT_ORDERS.
    *  Returns the persisted draft (with id + createdAt assigned). */
@@ -346,12 +338,13 @@ export interface ProjectState {
     notes?: string;
     kpis: ScenarioKpis;
     twin?: Twin;
-    /** Override the captured garmentTemplateId — e.g. when seeding
-     *  bundle scenarios where the live `selectedGarmentId` isn't what
-     *  the scenario card should display. */
-    garmentTemplateId?: string;
-    /** Override the captured operator count for the same reason. */
-    operators?: number;
+    /** The garment this scenario was measured against. Required: there is
+     *  no project-level default to fall back on — the caller knows which
+     *  garment its KPIs describe, and guessing would mislabel the card. */
+    garmentTemplateId: string;
+    /** The operator count this scenario was measured with. Required, same
+     *  reasoning. */
+    operators: number;
   }) => Scenario;
   /** Remove a scenario by id. */
   deleteScenario: (id: string) => void;
@@ -431,8 +424,7 @@ export interface ProjectState {
    * Sweep custom (non-built-in) garments whose names match the test-name
    * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
    * boot. Returns the count removed. Also drops any Yamazumi overrides keyed
-   * by a purged garment and snaps `selectedGarmentId` back to the default
-   * built-in if it was pointing at one of the purged rows.
+   * by a purged garment.
    */
   purgeTestGarments: () => number;
 
@@ -483,8 +475,6 @@ function defaultFactory(): FactoryStructure {
 const defaults: Omit<
   ProjectState,
   | 'rename'
-  | 'setSelectedGarment'
-  | 'setDefaultOperators'
   | 'setSelectedProductionSystem'
   | 'addOrder'
   | 'removeOrder'
@@ -524,8 +514,6 @@ const defaults: Omit<
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     meta,
-    selectedGarmentId: 'tshirt',
-    defaultOperators: 25,
     selectedProductionSystem: 'PBS',
     orders: [],
     operatorNames: {},
@@ -568,12 +556,6 @@ export const useProject = create<ProjectState>()(
 
       rename: (name) =>
         set((s) => touch({ ...s, meta: { ...s.meta, name } })),
-
-      setSelectedGarment: (id) =>
-        set((s) => touch({ ...s, selectedGarmentId: id })),
-
-      setDefaultOperators: (n) =>
-        set((s) => touch({ ...s, defaultOperators: Math.max(1, Math.min(120, Math.round(n))) })),
 
       setSelectedProductionSystem: (id) =>
         set((s) => touch({ ...s, selectedProductionSystem: id })),
@@ -633,11 +615,9 @@ export const useProject = create<ProjectState>()(
       saveScenario: (input) => {
         const cur = get();
         const id = `scn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        const garmentTemplateId = input.garmentTemplateId ?? cur.selectedGarmentId;
-        const operators = input.operators ?? cur.defaultOperators;
-        // When the caller overrides garmentTemplateId, look up yamazumi
-        // against that key — falling back to none when there's no override
-        // saved for the new garment.
+        const { garmentTemplateId, operators } = input;
+        // Look up yamazumi against the scenario's own garment key — falling
+        // back to none when there's no override saved for that garment.
         const yamSource = cur.yamazumiOverrides[garmentTemplateId];
         const scenario: Scenario = {
           id,
@@ -682,8 +662,6 @@ export const useProject = create<ProjectState>()(
           }
           return touch({
             ...s,
-            selectedGarmentId: scenario.config.garmentTemplateId,
-            defaultOperators: scenario.config.operators,
             skillMatrix: JSON.parse(JSON.stringify(scenario.config.skillMatrix)) as SkillMatrix,
             yamazumiOverrides: yamOverrides,
           });
@@ -837,14 +815,11 @@ export const useProject = create<ProjectState>()(
           delete nextEdits[id];
           const nextYama = { ...s.yamazumiOverrides };
           delete nextYama[id];
-          const nextSelected =
-            s.selectedGarmentId === id ? defaults.selectedGarmentId : s.selectedGarmentId;
           return touch({
             ...s,
             garmentEdits: nextEdits,
             yamazumiOverrides: nextYama,
             hiddenGarmentIds: { ...s.hiddenGarmentIds, [id]: true },
-            selectedGarmentId: nextSelected,
           });
         }),
 
@@ -875,14 +850,10 @@ export const useProject = create<ProjectState>()(
           removed = purgedIds.length;
           const nextOverrides = { ...s.yamazumiOverrides };
           for (const id of purgedIds) delete nextOverrides[id];
-          const selected = purgedIds.includes(s.selectedGarmentId)
-            ? defaults.selectedGarmentId
-            : s.selectedGarmentId;
           return touch({
             ...s,
             garmentEdits: next,
             yamazumiOverrides: nextOverrides,
-            selectedGarmentId: selected,
           });
         });
         return removed;
@@ -893,8 +864,6 @@ export const useProject = create<ProjectState>()(
           ...defaults,
           meta: defaultMeta(),
           rename: get().rename,
-          setSelectedGarment: get().setSelectedGarment,
-          setDefaultOperators: get().setDefaultOperators,
           setSelectedProductionSystem: get().setSelectedProductionSystem,
           addOrder: get().addOrder,
           removeOrder: get().removeOrder,
@@ -949,8 +918,6 @@ export const useProject = create<ProjectState>()(
           ...cur,
           schemaVersion: PROJECT_SCHEMA_VERSION,
           meta: { ...defaults.meta, ...s.meta, modifiedAt: new Date().toISOString() },
-          selectedGarmentId: s.selectedGarmentId ?? defaults.selectedGarmentId,
-          defaultOperators: s.defaultOperators ?? defaults.defaultOperators,
           selectedProductionSystem: s.selectedProductionSystem ?? defaults.selectedProductionSystem,
           orders: s.orders ?? [],
           operatorNames: s.operatorNames ?? {},
@@ -976,8 +943,6 @@ export const useProject = create<ProjectState>()(
         return {
           schemaVersion: s.schemaVersion,
           meta: s.meta,
-          selectedGarmentId: s.selectedGarmentId,
-          defaultOperators: s.defaultOperators,
           selectedProductionSystem: s.selectedProductionSystem,
           orders: s.orders,
           operatorNames: s.operatorNames,
@@ -1003,8 +968,6 @@ export const useProject = create<ProjectState>()(
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         meta: state.meta,
-        selectedGarmentId: state.selectedGarmentId,
-        defaultOperators: state.defaultOperators,
         selectedProductionSystem: state.selectedProductionSystem,
         orders: state.orders,
         operatorNames: state.operatorNames,

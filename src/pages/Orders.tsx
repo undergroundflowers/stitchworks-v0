@@ -11,6 +11,13 @@ import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { buildSeededDraftTwin, mapToLineSystem } from '../lib/build-draft-twin';
 
+/**
+ * Crew size when the order's garment template can't be resolved at all — a
+ * deleted or hand-edited template id. Only reachable in that broken state:
+ * with a template present the crew is derived from its SAM.
+ */
+const FALLBACK_CREW = 20;
+
 interface OrderState {
   po: string;
   client: string;
@@ -38,7 +45,7 @@ export function OrdersPage() {
     style: '',
     qty: 1200,
     deadlineDays: 5,
-    garmentTemplateId: project.selectedGarmentId,
+    garmentTemplateId: garments.all[0]?.id ?? '',
     target: 'AQL 2.5',
   });
   // "+ New template" tile opens a modal that builds a custom GarmentTemplate
@@ -110,13 +117,15 @@ export function OrdersPage() {
     }
   }
 
-  /** Shared side-effect for both flows: pin the order's garment, crew and
-   *  production system as the project's working defaults and push the order
-   *  onto the recent-orders list. Returns the persisted draft so callers
-   *  can address it by id. */
+  /** Shared side-effect for both flows: pin the order's production system as
+   *  the project's working default and push the order onto the recent-orders
+   *  list. Returns the persisted draft so callers can address it by id.
+   *
+   *  The order's garment and crew are NOT written back to the project — the
+   *  draft carries both itself, and a project-wide "default garment" was
+   *  exactly the kind of hidden second source of truth this page used to
+   *  fight with. */
   function persistOrder() {
-    project.setSelectedGarment(order.garmentTemplateId);
-    project.setDefaultOperators(crewSize);
     project.setSelectedProductionSystem(system);
     const draft = project.addOrder({
       po: order.po,
@@ -176,7 +185,7 @@ export function OrdersPage() {
         opCount: template.operations.length,
         demandPerHour,
       })
-    : project.defaultOperators;
+    : FALLBACK_CREW;
 
   const qtyInvalid = !(order.qty > 0);
   const deadlineInvalid = !(order.deadlineDays > 0);

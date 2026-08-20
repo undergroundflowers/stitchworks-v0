@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Tag, Logo, TimeChip, useConfirm } from '../components';
+import { Card, Button, Tag, Logo, useConfirm } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import {
@@ -10,23 +10,22 @@ import {
   isFactoryNameTaken,
   FACTORY_LIBRARY_MAX,
 } from '../store';
-import { fmtCalendar } from '../simulation/timeUnit';
 import { getFlag, setFlag } from '../lib/safeStorage';
 
 /**
- * Splash / main menu — entry point of the app. Two-column layout:
- *   LEFT:  brand mark, hero copy, the "new" CTA, and the FACTORY LIBRARY list
- *   RIGHT: today's calendar/status panel
+ * Splash / main menu — entry point of the app. A single column: brand mark,
+ * hero copy, the "new factory" CTA, and the FACTORY LIBRARY list.
  *
- * Ported from SWMainMenu in STITCHWORKS.html (lines 1032–1199). The original
- * mock isometric "live factory" illustration was removed — the splash has no
- * live floor, so invented telemetry was replaced with an honest panel.
+ * Ported from SWMainMenu in STITCHWORKS.html (lines 1032–1199). Two panels
+ * that once shared this screen are gone: the mock isometric "live factory"
+ * illustration (invented telemetry for a floor the splash cannot see) and the
+ * TODAY calendar card, which only ever rendered an empty state waiting on a
+ * planner module. Opening the app should show you your factories and nothing
+ * else.
  */
 export function MenuPage() {
   const navigate = useNavigate();
   const confirm = useConfirm();
-  const projectTime = useProject((s) => s.time);
-  const dateFormat = useProject((s) => s.units.dateFormat);
   const factoryName = useProject((s) => s.meta.name);
   const activeScenarioCount = useProject((s) => s.scenarios.length);
   const activeStationCount = useTwin((s) => selectActiveTwin(s).workstations.length);
@@ -54,10 +53,6 @@ export function MenuPage() {
       return next;
     });
   };
-  // No sim run has happened yet on the menu, so "today" anchors to t=0
-  // (i.e. the project's start date). MODEL-time vs CAL is irrelevant here.
-  const todayCal = fmtCalendar(0, projectTime.modelTimeUnit, projectTime.startDate, dateFormat);
-
   // New-factory dialog state. Native `window.prompt` is suppressed in
   // embedded preview / iframe contexts (and looks unstyled even when it
   // does fire), so we drive the flow through an in-app modal.
@@ -117,11 +112,14 @@ export function MenuPage() {
         radial-gradient(circle at 80% 80%, #4F7CFF18 0%, transparent 50%),
         ${SW_COLORS.paper}
       `,
-      display: 'grid', gridTemplateColumns: '1.2fr 1fr',
+      display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)',
       overflow: 'auto',
     }}>
-      {/* LEFT: hero + quick actions */}
-      <div style={{ padding: '64px 56px', display: 'flex', flexDirection: 'column', gap: 28 }}>
+      {/* Hero + quick actions + the factory library */}
+      {/* Capped so the library rows keep a readable measure — a factory row
+          stretched across a 1440px display puts its name and its station count
+          at opposite ends of the screen. */}
+      <div style={{ padding: '64px 56px', maxWidth: 940, display: 'flex', flexDirection: 'column', gap: 28 }}>
         <Logo size={32}/>
 
         <div>
@@ -184,7 +182,7 @@ export function MenuPage() {
             </span>
           </button>
           {libraryOpen && (
-          <div id="factory-library-list" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div id="factory-library-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {/* ACTIVE — your current factory */}
             <LibraryCard
               icon="◆"
@@ -221,36 +219,6 @@ export function MenuPage() {
 
       </div>
 
-      {/* RIGHT: today's status. The mock "live factory" illustration card
-          (fake isometric floor + fabricated "14 operators · 2 machines down ·
-          184 pcs/hr · 2 ALERTS" telemetry) was removed — the splash menu has no
-          live floor to report, so an honest, data-free panel beats invented
-          numbers. */}
-      <div style={{ padding: '64px 56px 64px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {/*
-          Today's tasks / events — model time is anchored to t = 0 here
-          (the project's start date), so the "TODAY" label honestly shows
-          the calendar date the simulation will start on. Mock events were
-          removed: an empty state is more honest than fictitious schedule
-          rows that never updated. A real planner module will fill this.
-        */}
-        <Card padding={16}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 900, color: SW_COLORS.ink }}>TODAY</div>
-              <TimeChip kind="CAL" />
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 600, color: SW_COLORS.muted }}>{todayCal}</span>
-            </div>
-            <Tag soft color={SW_COLORS.muted}>0 EVENTS</Tag>
-          </div>
-          <div style={{ padding: '20px 0', textAlign: 'center', color: SW_COLORS.muted, fontSize: 12, lineHeight: 1.5 }}>
-            No scheduled events. Operator absences and machine service jobs<br/>
-            will appear here once the planner module ships.
-          </div>
-        </Card>
-
-      </div>
-
       <span style={{
         position: 'fixed',
         bottom: 16,
@@ -277,13 +245,17 @@ export function MenuPage() {
 }
 
 /**
- * One entry in the FACTORY LIBRARY list. Renders your own factories as a flat
- * list:
+ * One row in the FACTORY LIBRARY list:
  *
  *   • ACTIVE — the factory you currently have open. Clicking opens the Builder;
  *     it carries a scenarios sub-button but no delete/pin controls.
  *   • SAVED  — a factory in the library. Clicking loads it; it gets a delete ×,
  *     a pin toggle, and the same scenarios sub-button.
+ *
+ * Rows, not tiles. A library is a list you scan down — wrapping cards made
+ * every factory look like a separate destination and put the name, the station
+ * count and the scenario button on three different lines each. In a row they
+ * line up into columns you can read across.
  */
 interface LibraryCardProps {
   icon: string;
@@ -319,20 +291,55 @@ function LibraryCard({
   return (
     <Card
       hover
-      padding={14}
+      padding={12}
       onClick={onClick}
       accent={pinned ? SW_COLORS.thread : undefined}
       style={{
-        flex: '1 1 180px',
-        minWidth: 160,
         position: 'relative',
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 6, minHeight: 16 }}>
+      <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1, color: SW_COLORS.muted, flexShrink: 0 }}>{icon}</span>
+
+      <span style={{ flexShrink: 0, width: 62 }}>
         <Tag soft color={tagColor}>{tag}</Tag>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+      </span>
+
+      <div style={{ ...SW_TYPE.heading, fontWeight: 800, color: SW_COLORS.ink, flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {title}
+      </div>
+
+      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>
+        {caption}
+      </div>
+
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
+        title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
+        style={{
+          flexShrink: 0,
+          padding: '5px 9px',
+          background: count > 0 ? SW_COLORS.brandLite : 'transparent',
+          border: `1px solid ${count > 0 ? SW_COLORS.brandEdge : SW_COLORS.line}`,
+          borderRadius: 4,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          ...SW_TYPE.kicker,
+          letterSpacing: '0.5px',
+          color: count > 0 ? SW_COLORS.brandText : SW_COLORS.muted,
+        }}
+      >
+        <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
+        <span>→</span>
+      </button>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0, width: 42, justifyContent: 'flex-end' }}>
           {onTogglePin && (
             <button
               type="button"
@@ -374,41 +381,8 @@ function LibraryCard({
             >
               ×
             </button>
-          ) : (
-            !onTogglePin && <span aria-hidden="true" style={{ fontSize: 16, lineHeight: 1 }}>{icon}</span>
-          )}
-        </div>
+          ) : null}
       </div>
-      <div style={{ ...SW_TYPE.heading, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {title}
-      </div>
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {caption}
-      </div>
-
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
-        title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
-        style={{
-          marginTop: 10,
-          padding: '6px 8px',
-          background: count > 0 ? SW_COLORS.brandLite : 'transparent',
-          border: `1px solid ${count > 0 ? `${SW_COLORS.brand}40` : SW_COLORS.line}`,
-          borderRadius: 4,
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 6,
-          ...SW_TYPE.kicker,
-          letterSpacing: '0.5px',
-          color: count > 0 ? SW_COLORS.brand : SW_COLORS.muted,
-        }}
-      >
-        <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
-        <span>→</span>
-      </button>
     </Card>
   );
 }
