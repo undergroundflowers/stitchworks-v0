@@ -20,7 +20,6 @@ import {
   LineScopePicker,
   LineSimEmpty,
   SectionHeader,
-  SimTransportBar,
   Tag,
   ToggleGroup,
   useToast,
@@ -121,12 +120,7 @@ export function InsightsPage() {
           `Read from the run, ranked by what an hour of your attention buys. `
           + `${state.stations.length} stations · ${state.producedPieces.toLocaleString()} pcs produced.`
         }
-        right={
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <LineScopePicker lines={allLines} />
-            <SimTransportBar />
-          </div>
-        }
+        right={<LineScopePicker lines={allLines} />}
       />
 
       <div style={{ marginTop: 12, marginBottom: 16 }}>

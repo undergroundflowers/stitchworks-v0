@@ -22,7 +22,8 @@ import {
   WipChart,
 } from '../components/charts';
 import {
-  Button,
+  Chevron,
+  SimTransportDock,
   ToggleGroup,
   HudSelect,
   TimeDisplay,
@@ -66,22 +67,19 @@ import {
   parseHHMM,
 } from '../simulation/timeUnit';
 import { useProject, useGarments, type OrderDraft } from '../store';
-import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, CAM_IDENTITY, type Cam, type MachineCode, type ProductionSystem } from '../domain';
+import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, lookupFixture, CAM_IDENTITY, type Cam, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
-import { getBlockSpec, getBlockKind, getBlockParams, apparelRoleFor } from '../domain/pml';
+import { getBlockKind, getBlockParams } from '../domain/pml';
 import {
   type EntityColorKey,
   type ProductionSystemKey,
   type Twin,
-  type Workstation,
 } from '../domain/twin';
 import {
   buildSeededDraftTwin,
   buildSimReadyOrderTwin,
   mapToLineSystem,
 } from '../lib/build-draft-twin';
-import { buildGarmentTwin } from '../domain/reference-twin';
 import type { GarmentTemplate } from '../domain/garments';
 
 /**
@@ -114,7 +112,7 @@ function stationAsset(machineCode: string | undefined): {
 /** Total operator pool count for a (paper, variant/scenario) selection.
  *  Falls back to the baseline op count if the chosen variant key is unknown. */
 
-type SimView = 'iso' | 'top' | 'heat' | 'logic' | 'pml';
+type SimView = 'iso' | 'top' | 'heat' | 'logic';
 
 /** Engine scope — what subset of the twin the run covers. Line is the
  *  legacy single-engine path; dept and factory both fan the engine out to
@@ -190,7 +188,7 @@ export function LiveSimPage() {
   /**
    * One camera per view, preserved across switches.
    *
-   * ISO, TOP, HEAT, LOGIC and PML are genuinely different coordinate spaces,
+   * ISO, TOP, HEAT and LOGIC are genuinely different coordinate spaces,
    * so they cannot share a camera — but each keeps its own, and each is
    * waiting where you left it. This used to snap every view back to 1x on
    * every switch, which made comparing two views of the same line a chore.
@@ -200,7 +198,6 @@ export function LiveSimPage() {
     top: CAM_IDENTITY,
     heat: CAM_IDENTITY,
     logic: CAM_IDENTITY,
-    pml: CAM_IDENTITY,
   });
   const camFor = (v: SimView) => ({
     cam: simCams[v],
@@ -511,7 +508,7 @@ export function LiveSimPage() {
     return activeTwin.workstations
       .filter((ws) => !simulatedSet.has(ws.id))
       .map((ws): AmbientWorkstationInput => {
-        const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+        const fix = lookupFixture(ws.catalogId);
         const line = ws.lineId ? lineById.get(ws.lineId) : undefined;
         const deptColor = line ? (DEPT_LINE_COLORS[line.color] ?? '#888') : '#888';
         return {
@@ -647,23 +644,7 @@ export function LiveSimPage() {
           flexWrap: 'wrap',
         }}
       >
-        <ViewTitle kicker="Simulation" title="Live Sim" surface="dark" />
-        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              background: playing ? SW_COLORS.ok : SW_COLORS.warn,
-              boxShadow: playing ? `0 0 12px ${SW_COLORS.ok}` : 'none',
-              animation: playing ? 'sim-pulse 1s infinite' : undefined,
-            }}
-          />
-          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 12, fontWeight: 700, letterSpacing: '2px' }}>
-            {playing ? 'RUNNING' : 'PAUSED'}
-          </span>
-        </div>
+        <ViewTitle title="Live Sim" surface="dark" />
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
 
         {/* SOURCE picker — clicking opens a dropdown of every source the
@@ -727,7 +708,7 @@ export function LiveSimPage() {
         >
           <span aria-hidden>⚙</span>
           <span>TIME SETUP</span>
-          <span aria-hidden style={{ opacity: 0.7 }}>{setupOpen ? '▾' : '▸'}</span>
+          <Chevron open={setupOpen} color="currentColor" style={{ opacity: 0.7 }} />
         </button>
 
         <div style={{ flex: 1 }} />
@@ -1036,15 +1017,6 @@ export function LiveSimPage() {
             />
           </PanZoomViewport>
         )}
-        {view === 'pml' && (
-          <PanZoomViewport {...camFor('pml')}>
-            <SimPmlView
-              garment={garment}
-              operators={effectiveOperators}
-              useActiveTwin={inMultiLineScope}
-            />
-          </PanZoomViewport>
-        )}
 
         {/* VIEW TOGGLE — floats over the top-center of the canvas so the
             mode picker sits with the thing it controls (the floor) instead
@@ -1059,18 +1031,14 @@ export function LiveSimPage() {
             { value: 'top', label: 'TOP 2D' },
             { value: 'heat', label: 'HEAT' },
             { value: 'logic', label: 'LOGIC' },
-            { value: 'pml', label: '\u2699 PML', title: 'PML — block-graph snapshot of the active twin' },
           ]}
         />
 
         {/* Legend overlay — view-aware key for every glyph on the floor. */}
         <SimLegend view={view} />
 
-        {/* HUD stat tiles — PML view owns its own KPI strip, so hide these
-            there. Other views keep the strip but make it collapsible so the
-            user can reclaim the top-left corner (e.g. LOGIC's first card
-            sits beneath it). */}
-        {view !== 'pml' && (
+        {/* HUD stat tiles — collapsible so the user can reclaim the
+            top-left corner (e.g. LOGIC's first card sits beneath it). */}
           <div
             style={{
               position: 'absolute',
@@ -1113,7 +1081,7 @@ export function LiveSimPage() {
             >
               <span style={{ color: SW_COLORS.brand }}>▣</span>
               <span>STATS</span>
-              <span style={{ color: '#ffffff80', fontSize: 11 }}>{hudOpen ? '▾' : '▸'}</span>
+              <Chevron open={hudOpen} color="#ffffff80" />
             </button>
             {hudOpen && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1273,12 +1241,10 @@ export function LiveSimPage() {
               </div>
             )}
           </div>
-        )}
 
         {/* Right inspector — Bottleneck + Event feed. Collapsible so it
             doesn't permanently clobber the rightmost column of operation
             cards in LOGIC view (or the floor edge in ISO/TOP/HEAT). */}
-        {view !== 'pml' && (
         <div
           style={{
             position: 'absolute',
@@ -1316,7 +1282,7 @@ export function LiveSimPage() {
           >
             <span style={{ color: SW_COLORS.brand }}>▣</span>
             <span>INSPECTOR</span>
-            <span style={{ color: '#ffffff80', fontSize: 11 }}>{inspectorOpen ? '▾' : '▸'}</span>
+            <Chevron open={inspectorOpen} color="#ffffff80" />
           </button>
           {inspectorOpen && (
           <>
@@ -1427,10 +1393,9 @@ export function LiveSimPage() {
           </>
           )}
         </div>
-        )}
 
         {/* Per-station sim-vs-theory drawer — fed by the REAL run on this page. */}
-        {view !== 'pml' && (() => {
+        {(() => {
           const idx = selectedOpId ? state.stations.findIndex((s) => s.opId === selectedOpId) : -1;
           if (idx < 0) return null;
           return (
@@ -1443,115 +1408,66 @@ export function LiveSimPage() {
         })()}
       </div>
 
-      {/* TRANSPORT BAR */}
-      <div
-        style={{
-          padding: '14px 24px',
-          background: '#0a0d12',
-          borderTop: '1px solid #ffffff15',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 14,
-        }}
-      >
-        <Button variant="secondary" size="sm" onClick={reset}>
-          ⏮
-        </Button>
-        <Button variant={playing ? 'danger' : 'success'} size="lg" onClick={() => setPlaying(!playing)}>
-          {playing ? '⏸ PAUSE' : '▶ PLAY'}
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => step(3600 / unitToSeconds(unit))}>
-          ⏭ +1h
-        </Button>
-        <div style={{ width: 1, height: 28, background: '#ffffff20' }} />
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#ffffff80', fontWeight: 700 }}>SPEED</span>
-        {/*
-          Named speed tiers. Tooltip explains the unit translation so the
-          user never confuses "1×" for an opaque multiplier. The active tier
-          becomes effective when multiplied by the project-level
-          realTimeScale (see useSim).
-        */}
-        {[
-          { mult: 1,   label: 'Real-time',     hint: `1 model-${project.time.modelTimeUnit} per real-sec` },
-          { mult: 10,  label: '10×',           hint: `10 model-${project.time.modelTimeUnit} per real-sec` },
-          { mult: 60,  label: '60× (1 hr/s)',  hint: '1 model-hour per real-sec' },
-          { mult: 480, label: 'Shift/sec',     hint: 'Full 8-hr shift in 1 real-sec' },
-        ].map((p) => (
-          <button
-            key={p.mult}
-            onClick={() => setSpeed(p.mult)}
-            title={p.hint}
-            style={{
-              background: speed === p.mult ? SW_COLORS.brand : '#ffffff10',
-              color: speed === p.mult ? '#fff' : '#ffffffaa',
-              border: 'none',
-              borderRadius: SW_RADIUS.sm,
-              padding: '6px 12px',
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: 'pointer',
+      {/* TRANSPORT DOCK */}
+      {(() => {
+        // Speed and execution mode were two controls on one axis: picking a
+        // tier while Virtual was on changed a number the pacer then ignored.
+        // They are one selector now — a numeric tier means real-time pacing,
+        // VIRT means "run as fast as compute allows".
+        const virtual = project.time.executionMode === 'virtual';
+        const speedValue = virtual ? 'virtual' : String(speed);
+        // Line pace — the bottleneck station's cycle time, which is the
+        // interval the floor actually delivers a piece at. Not demand takt:
+        // this comes from the run, not from an order.
+        const bn =
+          state.stations[state.bottleneckOpIndex] ??
+          state.stations.reduce<(typeof state.stations)[number] | undefined>(
+            (slowest, st) =>
+              !slowest || st.smv / Math.max(1, st.serversTotal) > slowest.smv / Math.max(1, slowest.serversTotal)
+                ? st
+                : slowest,
+            undefined,
+          );
+        const paceMin = bn && bn.serversTotal > 0 ? bn.smv / bn.serversTotal : null;
+        return (
+          <SimTransportDock
+            playing={playing}
+            onToggle={() => setPlaying(!playing)}
+            onReset={reset}
+            onStep={() => step(3600 / unitToSeconds(unit))}
+            stepLabel="1h"
+            speed={speedValue}
+            speedOptions={[
+              { value: '1', label: '1×', title: `Real-time · 1 model-${unit} per real-sec` },
+              { value: '10', label: '10×', title: `10 model-${unit} per real-sec` },
+              { value: '60', label: '60×', title: '1 model-hour per real-sec' },
+              { value: '480', label: '480×', title: 'Full 8-hr shift in 1 real-sec' },
+              { value: 'virtual', label: 'VIRT', title: 'Virtual — engine runs as fast as compute allows, no real-time pacing' },
+            ]}
+            onSpeed={(v) => {
+              if (v === 'virtual') {
+                project.setTime('executionMode', 'virtual');
+                return;
+              }
+              if (virtual) project.setTime('executionMode', 'realtime');
+              setSpeed(Number(v));
             }}
-          >
-            {p.label}
-          </button>
-        ))}
-        <button
-          onClick={() => project.setTime('executionMode',
-            project.time.executionMode === 'virtual' ? 'realtime' : 'virtual')}
-          title="Toggle virtual mode — engine runs as fast as compute allows, no real-time pacing"
-          style={{
-            background: project.time.executionMode === 'virtual' ? SW_COLORS.brand : '#ffffff10',
-            color: project.time.executionMode === 'virtual' ? '#fff' : '#ffffffaa',
-            border: 'none',
-            borderRadius: SW_RADIUS.sm,
-            padding: '6px 12px',
-            fontFamily: SW_FONTS.mono,
-            fontSize: 11,
-            fontWeight: 700,
-            cursor: 'pointer',
-          }}
-        >
-          Virtual
-        </button>
-        <div
-          style={{
-            flex: 1,
-            position: 'relative',
-            height: 28,
-            background: '#ffffff08',
-            borderRadius: SW_RADIUS.sm,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: `${shiftPct}%`,
-              background: `linear-gradient(90deg, ${SW_COLORS.brand}, ${SW_COLORS.thread})`,
-            }}
+            accent={
+              paceMin != null
+                ? {
+                    label: 'PACE',
+                    value: paceMin.toFixed(3),
+                    unit: 'min/pc',
+                    title: `Bottleneck cycle time — ${bn.opName} sets the line's pace at ${paceMin.toFixed(3)} min per piece`,
+                  }
+                : null
+            }
+            progressPct={shiftPct}
+            progressLabel={`DAY ${dayN} · ${Math.round(shiftPct)}% · ${modelStr}`}
+            end={{ label: 'End shift →', onClick: () => navigate('/kpi') }}
           />
-          <span
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              color: '#fff',
-            }}
-          >
-            DAY {dayN} · {Math.round(shiftPct)}% complete · {modelStr}
-          </span>
-        </div>
-        <Button variant="secondary" size="sm" onClick={() => navigate('/kpi')}>
-          End shift →
-        </Button>
-      </div>
+        );
+      })()}
 
       <style>{`
         @keyframes sim-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
@@ -1881,8 +1797,7 @@ function SimLegend({ view }: { view: SimView }) {
     view === 'iso' ? 'ISO 3D'
       : view === 'top' ? 'TOP 2D'
         : view === 'heat' ? 'HEAT'
-          : view === 'logic' ? 'LOGIC'
-            : 'PML';
+          : 'LOGIC';
 
   return (
     <CanvasLegend label={viewLabel} width={320}>
@@ -2052,29 +1967,6 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
           glyph: <DiamondGlyph />,
           label: 'Bottleneck marker (◆)',
           hint: 'Diamond on a card header = this operation is the slowest in the line.',
-        },
-      ];
-    case 'pml':
-      return [
-        {
-          glyph: <CardGlyph color={SW_COLORS.brand} />,
-          label: 'PML block (Source / Op / Sink)',
-          hint: 'Each card = one node in the Process Modelling Library graph.',
-        },
-        {
-          glyph: <CardGlyph color={SW_COLORS.alarm} />,
-          label: 'Bottleneck block',
-          hint: 'Red border + dark fill = slowest block in the current run.',
-        },
-        {
-          glyph: <QBadgeGlyph />,
-          label: 'Q badge',
-          hint: 'Queue length including bundles in service at this block.',
-        },
-        {
-          glyph: <ThroughputGlyph />,
-          label: 'Throughput readout',
-          hint: 'Big white number = live pieces/hr through this block.',
         },
       ];
   }
@@ -2348,28 +2240,6 @@ function DiamondGlyph() {
       <circle cx={9} cy={9} r={7.5} fill="#ffffff22" />
       <text x={9} y={12.5} textAnchor="middle" fontFamily={SW_FONTS.display} fontSize={12} fontWeight={900} fill="#fff">
         ◆
-      </text>
-    </svg>
-  );
-}
-function QBadgeGlyph() {
-  return (
-    <svg width={26} height={16} viewBox="0 0 26 16">
-      <rect x={1} y={2} width={24} height={12} rx={3} fill={`${SW_COLORS.thread}25`} stroke={SW_COLORS.thread} strokeWidth={0.8} />
-      <text x={13} y={11.5} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={900} fill={SW_COLORS.thread}>
-        Q 7
-      </text>
-    </svg>
-  );
-}
-function ThroughputGlyph() {
-  return (
-    <svg width={32} height={16} viewBox="0 0 32 16">
-      <text x={2} y={12} fontFamily={SW_FONTS.mono} fontSize={11} fontWeight={900} fill="#fff">
-        842
-      </text>
-      <text x={22} y={12} fontFamily={SW_FONTS.mono} fontSize={6} fontWeight={700} fill="#ffffff90">
-        pcs/hr
       </text>
     </svg>
   );
@@ -2781,7 +2651,7 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
       {[...ambientCells]
         .sort((a, b) => a.gx + a.gy - (b.gx + b.gy))
         .map((a) => (
-          <IsoAmbientBlock key={`amb-${a.wsId}`} amb={a} simTime={simTime} />
+          <IsoAmbientBlock key={`amb-${a.wsId}`} amb={a} />
         ))}
 
       {/* Conveyor between rows of stations — only meaningful when cells are
@@ -3239,18 +3109,7 @@ function IsoSewingStation({
  * family (`cat`) so a fabric rack reads differently from a press table
  * which reads differently from an inspect bench. Static — no live state.
  */
-// Per-fixture role code stamped on the badge over an operator-family ambient
-// block. Falls back to a generic "OPR" when the catalogId isn't a known
-// op_*. Mirrors the role taxonomy in domain/workers.ts.
-const OP_BADGE_CODE: Record<string, string> = {
-  op_sewer: 'SEW',
-  op_cutter: 'CUT',
-  op_helper: 'HLP',
-  op_super: 'SUP',
-  op_qc: 'QC',
-};
-
-function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number }) {
+function IsoAmbientBlock({ amb }: { amb: AmbientLayout }) {
   const origin = isoProj(amb.gx, amb.gy);
 
   // Asset-family palette — keeps service blocks visually grouped on the
@@ -3266,7 +3125,6 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
     store: { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'STORE' },
     mh:    { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'MH'    },
     buf:   { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'BUF'   },
-    op:    { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'OPR'   },
     conv:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'CONV'  },
     zone:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'ZONE'  },
     arch:  { top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, label: 'ARCH'  },
@@ -3276,99 +3134,15 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
   };
   const pal = palette[amb.cat] ?? palette.fix;
 
-  // Buffers, mat-handling carts and operators sit at floor level — short
-  // height so they don't overpower the engine stations.
+  // Buffers and mat-handling carts sit at floor level — short height so
+  // they don't overpower the engine stations.
   const h = Math.max(0.2, Math.min(amb.h, 1.6));
-
-  // Operators get a tiny walking jitter so the scene feels alive even when
-  // the sewing line is idle — the spreader / packer / supervisor crews
-  // sway around their post.
-  const jitterX = amb.cat === 'op' ? Math.cos(simTime * 1.2 + amb.gx) * 0.08 : 0;
-  const jitterY = amb.cat === 'op' ? Math.sin(simTime * 1.2 + amb.gy) * 0.08 : 0;
-
-  // ── Operator-family ambient blocks read as PEOPLE, not red cubes ─────────
-  //
-  // Every other `cat` (cut/fix/store/mh/buf/conv/zone/util/sew) is a piece
-  // of equipment — a fabric rack, a press table, a buffer bin — and the
-  // generic cuboid below renders fine. But `cat === 'op'` represents a
-  // human post (supervisor stand, helper, QC seat, etc.) and the Builder
-  // already has a rich isometric standing-figure for it via the catalog's
-  // own `draw()` function. Delegating to that same function keeps Sim and
-  // Builder visually identical: whatever silhouette the user sees when
-  // they drop an `op_super` block in Builder is exactly what they see on
-  // the simulation floor.
-  if (amb.cat === 'op') {
-    const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === amb.catalogId);
-    const figH = fixture?.h ?? 2.4;
-    const j = isoProj(jitterX, jitterY, 0);
-    const o = isoProj(0, 0, 0);
-    const badgeCode = OP_BADGE_CODE[amb.catalogId] ?? 'OPR';
-    return (
-      <g transform={`translate(${origin.sx}, ${origin.sy})`} pointerEvents="none">
-        {/* Foot shadow — tight ellipse under the figure (smaller than the
-            generic cuboid shadow because a person has a tighter footprint
-            than a fabric rack). */}
-        {(() => {
-          const c = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, 0);
-          return (
-            <ellipse
-              cx={c.sx - o.sx}
-              cy={c.sy - o.sy + 3}
-              rx={amb.w * 9}
-              ry={amb.d * 4}
-              fill="#0F141955"
-            />
-          );
-        })()}
-        {/* The figure itself — Builder catalog's draw(), called with this
-            block's footprint and rotation. If the fixture lookup fails for
-            any reason, we still keep the scene populated by falling back
-            to the small IsoOperatorBody silhouette used by the walking
-            sewing crew. */}
-        <g transform={`translate(${j.sx - o.sx}, ${j.sy - o.sy})`}>
-          {fixture
-            ? fixture.draw({ w: amb.w, d: amb.d, h: figH, r: amb.rotation })
-            : (() => {
-                const c = isoProj(amb.w / 2, amb.d / 2, 0);
-                return (
-                  <g transform={`translate(${c.sx - o.sx}, ${c.sy - o.sy})`}>
-                    <IsoOperatorBody working={false} />
-                  </g>
-                );
-              })()}
-        </g>
-        {/* Role badge — sits above the figure's head, encoding the specific
-            op role (SUP / QC / HLP / SEW / CUT) so the user can scan the
-            floor and tell a supervisor stand from a QC seat at a glance. */}
-        {(() => {
-          const p = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, figH + 0.25);
-          return (
-            <g transform={`translate(${p.sx - o.sx}, ${p.sy - o.sy})`}>
-              <rect x={-12} y={-9} width={24} height={10} rx={2} fill={alpha(SW_COLORS.void, 0.8)} stroke={alpha(SW_COLORS.ink, 0.25)} strokeWidth={0.8} />
-              <text
-                x={0}
-                y={-2}
-                textAnchor="middle"
-                fontFamily={SW_FONTS.mono}
-                fontSize={6}
-                fontWeight={900}
-                fill={SW_COLORS.muted}
-                letterSpacing="0.1em"
-              >
-                {badgeCode}
-              </text>
-            </g>
-          );
-        })()}
-      </g>
-    );
-  }
 
   return (
     <g transform={`translate(${origin.sx}, ${origin.sy})`} opacity={0.78} pointerEvents="none">
       {/* Shadow under the block — sells the height. */}
       {(() => {
-        const c = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, 0);
+        const c = isoProj(amb.w / 2, amb.d / 2, 0);
         const o = isoProj(0, 0, 0);
         return (
           <ellipse
@@ -3381,22 +3155,14 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
         );
       })()}
       {/* Body — short cuboid in the asset-family palette. */}
-      <g
-        transform={(() => {
-          const a = isoProj(jitterX, jitterY, 0);
-          const o = isoProj(0, 0, 0);
-          return `translate(${a.sx - o.sx}, ${a.sy - o.sy})`;
-        })()}
-      >
-        {CuboidFaces({
-          w: amb.w,
-          d: amb.d,
-          h,
-          top: pal.top,
-          left: pal.left,
-          right: pal.right,
-        })}
-      </g>
+      {CuboidFaces({
+        w: amb.w,
+        d: amb.d,
+        h,
+        top: pal.top,
+        left: pal.left,
+        right: pal.right,
+      })}
       {/* Small category-tag pip on top — a 6×6 brand-coloured square that
           encodes the block role so the user can scan the floor and tell
           a rack from a cart from a press. */}
@@ -4203,355 +3969,6 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
 }
 
 // ============================================================================
-// PML VIEW — block-graph snapshot of the active twin
-// ============================================================================
-//
-// Reads `kpiObserved` off each workstation in the active twin and renders
-// a card grid sorted by throughput. Inline `▶ Run PML` button kicks off
-// a fresh sim against the active twin without leaving this page. Skips
-// the per-tick streaming animation that the legacy views have — the PML
-// engine is one-shot for v1; per-minute timeseries playback is scoped to
-// a follow-up turn (the engine needs to record samples first).
-
-interface SimPmlViewProps {
-  garment: GarmentTemplate;
-  operators: number;
-  /** True when a reference paper has been loaded — currently unused beyond
-   *  the playback-reset effect since we always build from the garment prop
-   *  (which already folds in the reference's garmentTemplate when loaded). */
-  /** Dept/factory scope — run PML against the actual twin (every block,
-   *  every line, every garment) instead of a single-garment synth. PML is
-   *  twin-native: `runPmlOnTwin` already simulates every block in the twin
-   *  in one pass, so multi-line is just a matter of feeding the real twin
-   *  instead of a synthetic one. Defaults to false (single-line scope keeps
-   *  the synth so swapping garment in the HUD reshapes the grid). */
-  useActiveTwin?: boolean;
-}
-
-// In single-line scope the PML view synthesises a Source → ops → Sink twin
-// from the garment prop so picking a different garment in LiveSim's HUD
-// immediately reshapes the block grid. In dept/factory scope we drive PML
-// from the active twin directly — that's the only honest way to surface
-// every wired line's Petri-net behaviour in one pass.
-function SimPmlView({ garment, operators, useActiveTwin = false }: SimPmlViewProps) {
-  const activeTwin = useTwin(selectActiveTwin);
-  const garmentTwin = useMemo(
-    () => (useActiveTwin ? null : buildGarmentTwin(garment, operators)),
-    [garment, operators, useActiveTwin],
-  );
-  const twin = garmentTwin ?? activeTwin;
-  /** Last completed run, retained so the timeline can scrub through it. */
-  const [report, setReport] = useState<RunReport | null>(null);
-  /** Index into report.raw.samples — the frame currently rendered. */
-  const [frame, setFrame] = useState(0);
-  /** Wall-clock playback state. Each tick advances `frame` by 1. */
-  const [playing, setPlaying] = useState(false);
-  /** Sim-minutes per real-second (1× = real time, 60× = 1 sim-min/sec). */
-  const [speed, setSpeed] = useState(60);
-
-  // When the user switches garment / operator count / reference flag, the
-  // previous report's workstation ids no longer match the new twin's stations
-  // — every block card would vanish. Reset playback state so the user sees
-  // the empty "Run PML" prompt for the new twin instead of stale empty cards.
-  useEffect(() => {
-    setReport(null);
-    setFrame(0);
-    setPlaying(false);
-  }, [garment.id, operators, useActiveTwin]);
-
-  const samples = report?.raw.samples ?? [];
-  const lastFrame = Math.max(0, samples.length - 1);
-  const currentSample = samples[Math.min(frame, lastFrame)];
-  const simMin = currentSample?.time ?? 0;
-
-  // Playback loop. Advances `frame` every 50ms by `speed/20` sim-minutes
-  // (so speed=60 → 3 sim-min per 50ms = 60 sim-min/sec wall-clock).
-  // Uses setInterval rather than rAF so playback continues smoothly even
-  // when the tab is in the background or under a hidden preview frame.
-  useEffect(() => {
-    if (!playing || samples.length === 0) return;
-    const STEP_MS = 50;
-    const id = setInterval(() => {
-      setFrame((f) => {
-        const advance = Math.max(1, Math.round((speed * STEP_MS) / 1000));
-        const next = f + advance;
-        if (next >= lastFrame) {
-          setPlaying(false);
-          return lastFrame;
-        }
-        return next;
-      });
-    }, STEP_MS);
-    return () => clearInterval(id);
-  }, [playing, samples.length, speed, lastFrame]);
-  // Suppress unused-import lint until/unless we revisit rAF playback.
-  void useRef;
-
-  /** Build the per-block render list for the current frame. Throughput
-   *  is computed from cumulative pieces / elapsed sim hours, so the
-   *  numbers ramp up smoothly as playback advances. */
-  const blockData = useMemo(() => {
-    if (!currentSample || samples.length === 0) return [];
-    const elapsedHr = currentSample.time / 60;
-    return twin.workstations
-      .map((w) => {
-        const snap = currentSample.blocks[w.id];
-        if (!snap) return null;
-        const spec = getBlockSpec(w);
-        const tputPerHr = elapsedHr > 0 ? snap.producedPieces / elapsedHr : 0;
-        const obs = report?.raw.blocks.get(w.id);
-        return {
-          ws: w,
-          spec,
-          role: apparelRoleFor(w),
-          producedPieces: snap.producedPieces,
-          queueLen: snap.queueLen,
-          inService: snap.inService,
-          throughputPerHr: tputPerHr,
-          // util only makes sense for resource-using blocks at the run-end;
-          // mid-playback we show the live queue instead.
-          utilizationPct: obs?.utilization ? obs.utilization * 100 : 0,
-          bottleneck: obs?.bottleneck ?? false,
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
-      .filter((b) => b.producedPieces > 0 || b.queueLen > 0 || b.inService > 0)
-      .sort((a, b) => b.throughputPerHr - a.throughputPerHr);
-  }, [twin, currentSample, samples.length, report]);
-
-  const sinkThroughput = blockData
-    .filter((b) => b.spec.kind === 'Sink')
-    .reduce((s, b) => s + b.throughputPerHr, 0);
-  const bottleneck = blockData.find((b) => b.bottleneck);
-
-  const runIt = () => {
-    // Synthesised twin's workstation ids aren't in the store, so we skip
-    // writeKpiObserved — a silent no-op anyway. The Reports page still has
-    // its own auto-run that writes against the active store twin.
-    const r = runPmlOnTwin(twin, { samplePeriodMin: 1 });
-    setReport(r);
-    setFrame(0);
-    setPlaying(true);
-  };
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: 0,
-        padding: 24,
-        overflow: 'auto',
-        color: '#fff',
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 16,
-          marginBottom: 14,
-          flexWrap: 'wrap',
-        }}
-      >
-        <div style={{ fontFamily: SW_FONTS.display, fontSize: 18, fontWeight: 900, letterSpacing: '0.06em' }}>
-          ⚙ PML SIMULATION
-        </div>
-        <div style={{ fontSize: 12, color: '#ffffffaa', fontFamily: SW_FONTS.mono }}>
-          {twin.name} · {twin.workstations.length} blocks · {twin.connectors.length} connectors
-        </div>
-        <div style={{ flex: 1 }} />
-        <Button variant="primary" size="sm" icon="▶" onClick={runIt}>
-          Run PML
-        </Button>
-      </div>
-
-      {/* Playback strip — only shown after a run has produced samples. */}
-      {samples.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            marginBottom: 16,
-            padding: '8px 12px',
-            background: '#ffffff08',
-            border: '1px solid #ffffff20',
-            borderRadius: 6,
-          }}
-        >
-          <button
-            onClick={() => setPlaying((p) => !p)}
-            disabled={frame >= lastFrame && !playing}
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: '50%',
-              background: playing ? SW_COLORS.alarm : SW_COLORS.brand,
-              border: 'none',
-              color: '#fff',
-              fontSize: 14,
-              fontWeight: 900,
-              cursor: 'pointer',
-            }}
-            title={playing ? 'Pause' : 'Play'}
-          >
-            {playing ? '❚❚' : '▶'}
-          </button>
-          <button
-            onClick={() => {
-              setFrame(0);
-              setPlaying(false);
-            }}
-            style={{
-              padding: '4px 10px',
-              fontFamily: SW_FONTS.mono,
-              fontSize: 10,
-              fontWeight: 800,
-              color: '#fff',
-              background: 'transparent',
-              border: '1px solid #ffffff30',
-              borderRadius: 4,
-              cursor: 'pointer',
-            }}
-            title="Restart"
-          >
-            ↻ RESTART
-          </button>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 13, fontWeight: 700, minWidth: 80, color: SW_COLORS.brand }}>
-            t = {simMin.toFixed(0)} min
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={lastFrame}
-            value={frame}
-            onChange={(e) => {
-              setFrame(parseInt(e.target.value));
-              setPlaying(false);
-            }}
-            style={{ flex: 1, accentColor: SW_COLORS.brand }}
-          />
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: '#ffffff80' }}>
-            {frame + 1} / {samples.length}
-          </div>
-          <HudSelect
-            value={String(speed)}
-            onChange={(v) => setSpeed(parseInt(v))}
-            mono
-            size="sm"
-            minWidth={150}
-            title="Sim-minutes per wall-clock-second"
-            options={[
-              { value: '15', label: '15×', meta: 'SLOW' },
-              { value: '60', label: '60×' },
-              { value: '240', label: '240×', meta: 'FAST' },
-              { value: '480', label: '480×', meta: 'FASTEST' },
-            ]}
-          />
-        </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
-        <SimHudStat label="SINK THROUGHPUT" value={Math.round(sinkThroughput).toLocaleString()} unit="pcs/hr" color={SW_COLORS.brand} />
-        <SimHudStat label="SUNK PIECES"     value={(currentSample?.totalSunkPieces ?? 0).toLocaleString()}    unit=""        color={SW_COLORS.fabric} />
-        <SimHudStat label="BOTTLENECK"      value={bottleneck ? bottleneck.ws.name.slice(0, 18) : '—'}        unit=""        color={bottleneck ? SW_COLORS.alarm : '#ffffff60'} />
-        <SimHudStat label="MAX UTIL"        value={Math.max(0, ...blockData.map((b) => b.utilizationPct)).toFixed(0)} unit="%" color={SW_COLORS.thread} />
-      </div>
-
-      {blockData.length === 0 ? (
-        <div
-          style={{
-            padding: '40px 24px',
-            textAlign: 'center',
-            border: '1px dashed #ffffff30',
-            borderRadius: 8,
-            color: '#ffffff80',
-            fontFamily: SW_FONTS.mono,
-          }}
-        >
-          {samples.length === 0
-            ? <>No PML run on this twin yet. Click <strong style={{ color: SW_COLORS.brand }}>▶ Run PML</strong> to simulate the wired graph.</>
-            : 'No flow yet at this time. Press play to advance the timeline.'}
-        </div>
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
-          {blockData.map((b) => (
-            <SimPmlCard key={b.ws.id} block={b} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface PmlCardData {
-  ws: Workstation;
-  spec: ReturnType<typeof getBlockSpec>;
-  role: string;
-  producedPieces: number;
-  queueLen: number;
-  inService: number;
-  throughputPerHr: number;
-  utilizationPct: number;
-  bottleneck: boolean;
-}
-
-/** One block card in the PML view, fed by a per-frame snapshot so values
- *  ramp up as playback advances. */
-function SimPmlCard({ block: b }: { block: PmlCardData }) {
-  return (
-    <div
-      style={{
-        padding: 12,
-        background: b.bottleneck ? '#3a1212' : '#ffffff08',
-        border: `1px solid ${b.bottleneck ? SW_COLORS.alarm : '#ffffff20'}`,
-        borderLeft: `4px solid ${b.bottleneck ? SW_COLORS.alarm : SW_COLORS.brand}`,
-        borderRadius: 6,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-        color: '#fff',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ display: 'inline-flex', color: SW_COLORS.brand }}>
-          <b.spec.spec.Icon size={16} color={SW_COLORS.brand} />
-        </span>
-        <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.06em', color: '#ffffffcc' }}>
-          {b.spec.kind.toUpperCase()}
-        </span>
-        {b.bottleneck && (
-          <span style={{ marginLeft: 'auto', fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 800, color: SW_COLORS.alarm, letterSpacing: '0.1em' }}>
-            ◆ BOTTLENECK
-          </span>
-        )}
-      </div>
-      <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: '#fff', lineHeight: 1.2 }}>
-        {b.ws.name}
-      </div>
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffff80' }}>
-        {b.role}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 4 }}>
-        <div>
-          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 18, fontWeight: 900, color: '#fff' }}>
-            {Math.round(b.throughputPerHr).toLocaleString()}
-          </span>
-          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffff80', marginLeft: 4 }}>
-            pcs/hr
-          </span>
-        </div>
-        {b.queueLen + b.inService > 0 && (
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.thread }}>
-            Q {b.queueLen + b.inService}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
 // SEWING LINES STRIP — per-line KPI cards above the canvas
 // ============================================================================
 
@@ -4768,7 +4185,8 @@ function SimChartRail({
         }}
         title="Live curves for this run"
       >
-        {open ? '▾' : '▸'} CURVES {ready ? '' : '· press play'}
+        <Chevron open={open} color={alpha(SW_COLORS.ink, 0.8)} style={{ marginRight: 6, verticalAlign: '-3px' }} />
+        CURVES {ready ? '' : '· press play'}
       </button>
       {open && (
         <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>

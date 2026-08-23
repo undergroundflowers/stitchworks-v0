@@ -33,9 +33,31 @@ export const PROCESS_BLOCK_H = 56;
 // block (and short, legible wires between them).
 export const PROCESS_GAP_X = 104; // horizontal gap between columns → 160px step
 export const PROCESS_ROW_GAP = 64; // vertical gap between rows → 120px step (holds the label)
-export const PROCESS_GROUP_GAP = 52; // vertical gap between line groups
-export const PROCESS_PAD_X = 24;
-export const PROCESS_PAD_TOP = 24;
+export const PROCESS_GROUP_GAP = 50; // vertical gap between line groups
+export const PROCESS_PAD_X = 20;
+export const PROCESS_PAD_TOP = 20;
+
+/**
+ * Placement quantum for a hand-dragged or hand-dropped block, in world px.
+ *
+ * This is `FLAT_CELL / 4` — the tier-4 subdivision of the canvas grid — so
+ * from zoom 1.6 upward every position a block can land on is a line the user
+ * can actually see. The old value was 8, which is not a divisor of the 40px
+ * cell and so coincided with no drawn line at any zoom: the grid was decor and
+ * the lattice was invisible.
+ *
+ * The three constants above are 20 / 20 / 50 rather than 24 / 24 / 52 for the
+ * same reason — with COL_W = 160 and ROW_H = 120 (both multiples of 40 and of
+ * 10) it puts the *seeded* layout on the lattice too. It was never on the old
+ * one either: 52 % 8 === 4, so seeded rows alternated on and off the 8-grid.
+ * Nobody noticed, because there was no visible grid to be off.
+ */
+export const PROCESS_SNAP = 10;
+
+/** Snap a world-px coordinate to the placement lattice. */
+export function snapProcess(v: number): number {
+  return Math.round(v / PROCESS_SNAP) * PROCESS_SNAP;
+}
 
 /** Columns per row before the sequence wraps. Keeps a long tandem line as a
  *  readable grid instead of an endless horizontal strip. */

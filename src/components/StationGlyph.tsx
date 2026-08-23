@@ -1,11 +1,18 @@
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { MACHINE_GLYPH_FAMILY, glyphMark } from '../domain/machine-glyphs';
+import { glyphFamilyOf, glyphMark, type GlyphFamily } from '../domain/machine-glyphs';
 import type { MachineCode } from '../domain/machines';
 
 interface StationGlyphProps {
   /** Machine code — draws the family mark plus the code as its label. */
   code?: MachineCode;
+  /** Mark to draw, when the caller already knows it. A user-authored station
+   *  type picks its family directly and its code is free text, so it cannot
+   *  route through `MACHINE_GLYPH_FAMILY`; passing both here draws the same
+   *  mark a built-in machine gets. Ignored when `code` resolves a family. */
+  family?: GlyphFamily;
+  /** Free-text code drawn under the mark. Use with `family`; `code` wins. */
+  markCode?: string;
   /** Non-machine fixture (rack, trolley, buffer): label only, no mark. */
   label?: string;
   /** Box to fill, in the parent's user space. Drawn from (0,0). */
@@ -29,11 +36,15 @@ interface StationGlyphProps {
  */
 export function StationGlyph({
   code,
+  family,
+  markCode,
   label,
   width,
   height,
   muted,
 }: StationGlyphProps) {
+  const markFamily = glyphFamilyOf({ code, family });
+  const text = code ?? markCode;
   const min = Math.min(width, height);
 
   // Degrade rather than render mush. Below ~22px there is no room for a
@@ -42,7 +53,7 @@ export function StationGlyph({
   const showCode = height >= 22 && min >= 14;
   const showMark = min >= 14;
 
-  const hasMark = showMark && !!code;
+  const hasMark = showMark && !!markFamily;
   // The mark spans half the station's short side — big enough to read at a
   // glance on a 30-station floor, small enough to leave the footprint legible.
   const s = min * 0.5;
@@ -68,9 +79,9 @@ export function StationGlyph({
       />
 
       <g>
-        {hasMark && glyphMark(MACHINE_GLYPH_FAMILY[code], cx, cy, s, SW_COLORS.muted)}
+        {hasMark && glyphMark(markFamily, cx, cy, s, SW_COLORS.muted)}
 
-        {showCode && (code || label) && (
+        {showCode && (text || label) && (
           <text
             x={cx}
             y={textY}
@@ -81,7 +92,7 @@ export function StationGlyph({
             fill={alpha(SW_COLORS.ink, 0.55)}
             style={{ pointerEvents: 'none', letterSpacing: '0.06em' }}
           >
-            {code ?? label?.slice(0, 10).toUpperCase()}
+            {text ?? label?.slice(0, 10).toUpperCase()}
           </text>
         )}
       </g>

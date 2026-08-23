@@ -26,13 +26,21 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS, SW_MOTION, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
-import { alpha } from '../design/color-utils';
+import { PML_CATEGORY_TINT, SW_COLORS, SW_CONTROL, SW_FONTS, SW_MOTION, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
+import { alpha, contrastInk } from '../design/color-utils';
 import {
+  Caret,
+  Chevron,
   HudSelect,
+  Icon,
   StationGlyph,
+  BlockParamRow,
+  StationTypeDialog,
+  CanvasGrid,
   CanvasLegend,
+  PmlBlockFace,
   ViewSwitch,
+  Sym,
   ViewTitle,
   ZoomHud,
   useCanvasCamera,
@@ -41,10 +49,7 @@ import {
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { ServiceQueueParams } from '../components/ServiceQueueParams';
 import {
-  ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
-  type ApparelCategory,
-  type ApparelCategoryId,
   APPAREL_FIXTURE_PALETTE,
   ptsToStr,
   type IsoFixture,
@@ -57,6 +62,12 @@ import {
   ISO_FIXTURE_TO_MACHINE_CODE,
   CAM_IDENTITY,
   fitBounds,
+  visibleCellRange,
+  lookupFixture,
+  resolveBlockKindForDrop,
+  stationMark,
+  stationTypeFor,
+  type StationType,
   type Cam,
 } from '../domain';
 import {
@@ -115,6 +126,7 @@ import {
   PROCESS_BLOCK_H,
   PROCESS_PAD_X,
   PROCESS_PAD_TOP,
+  snapProcess,
 } from '../domain/processLayout';
 
 // ============================================================================
@@ -212,10 +224,11 @@ function flowStyleFor(c: Connector): FlowStyle {
  *  all three Builder views (2d · iso · process) to render focus-dimming. */
 const FOCUS_DIM = 0.22;
 
-/** Resolve a catalog id to its IsoFixture entry. Used to look up draw-fn,
- *  footprint, and label from ids that live in the apparel palette. */
+/** Resolve a catalog id to its IsoFixture entry — draw-fn, footprint and
+ *  label. Goes through the registry, so a user-authored station type
+ *  resolves exactly like a built-in fixture. */
 function resolveFixture(catalogId: string): IsoFixture | undefined {
-  return ISO_FIXTURE_CATALOG.find((f) => f.id === catalogId);
+  return lookupFixture(catalogId);
 }
 
 /** Effective footprint for a workstation. Per-ws `size` override wins over
@@ -230,7 +243,7 @@ function resolveFixture(catalogId: string): IsoFixture | undefined {
  *  The raw (unrotated) catalog dims are still available via
  *  `wsBaseFootprint` when a fixture's draw fn needs them. */
 function wsBaseFootprint(ws: Workstation): { w: number; d: number; h: number } {
-  const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+  const fix = lookupFixture(ws.catalogId);
   return {
     w: ws.size?.w ?? fix?.w ?? 1,
     d: ws.size?.d ?? fix?.d ?? 1,
@@ -274,6 +287,17 @@ const btnSec = (): CSSProperties => ({
   cursor: 'pointer',
   borderRadius: 6,
   color: SW_COLORS.muted,
+});
+
+/** Square icon-only variant of btnSec — same chrome, glyph-sized box. */
+const btnIcon = (): CSSProperties => ({
+  ...btnSec(),
+  padding: 0,
+  width: 30,
+  height: 30,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
 });
 
 const sectionLabel: CSSProperties = {
@@ -425,6 +449,58 @@ export function BuilderPage() {
   // Project meta name (the authoritative label the TopBar shows) — the
   // Builder's factory picker mirrors this so both surfaces agree.
   const projectName = useProject((s) => s.meta.name);
+  // Station types the user authored. They render as their own palette
+  // sections and resolve through the fixture registry once placed.
+  const stationTypes = useProject((s) => s.stationTypes);
+  const addStationType = useProject((s) => s.addStationType);
+  const updateStationType = useProject((s) => s.updateStationType);
+  const removeStationType = useProject((s) => s.removeStationType);
+  const [typeDialogOpen, setTypeDialogOpen] = useState(false);
+  const [editingType, setEditingType] = useState<StationType | null>(null);
+
+  /** Commit the dialog. An edit keeps the id, so every station already placed
+   *  from that type re-draws with the change — which is the point of editing
+   *  a type rather than a station. */
+  const saveStationType = useCallback(
+    (type: StationType) => {
+      if (stationTypes.some((t) => t.id === type.id)) {
+        updateStationType(type.id, type);
+      } else {
+        addStationType(type);
+      }
+      setTypeDialogOpen(false);
+      setEditingType(null);
+    },
+    [stationTypes, addStationType, updateStationType],
+  );
+
+  /** Delete a type, refusing while stations of it are still on the floor —
+   *  dropping it would leave them unresolvable, and silently deleting the
+   *  stations too is not the user's ask. */
+  const deleteStationType = useCallback(
+    async (type: StationType) => {
+      const placed = twin.workstations.filter((w) => w.catalogId === type.id);
+      if (placed.length > 0) {
+        await confirm({
+          title: `${type.label} is in use`,
+          message: `${placed.length} station${placed.length === 1 ? '' : 's'} on the floor ${
+            placed.length === 1 ? 'is' : 'are'
+          } of this type. Delete or change ${placed.length === 1 ? 'it' : 'them'} first, then the type can go.`,
+          confirmLabel: 'OK',
+          cancelLabel: null,
+        });
+        return;
+      }
+      const ok = await confirm({
+        title: `Delete ${type.label}?`,
+        message: 'The type is removed from the palette. Nothing on the floor uses it.',
+        confirmLabel: 'Delete',
+        variant: 'danger',
+      });
+      if (ok) removeStationType(type.id);
+    },
+    [twin.workstations, confirm, removeStationType],
+  );
   // Saved factories from the library so the picker can switch to any
   // archived factory (not just scenarios of the active canonical).
   const savedFactories = useFactoryLibrary((s) => s.savedFactories);
@@ -580,6 +656,54 @@ export function BuilderPage() {
   // dependencies) can read the latest selection without re-binding.
   const selectedWsIdsRef = useRef(selectedWsIds);
   selectedWsIdsRef.current = selectedWsIds;
+
+  /**
+   * Apply a selection click to the workstation multi-selection model.
+   *
+   * SHIFT toggles a station in and out without disturbing the rest — the
+   * Figma/Sketch convention. A plain click replaces the selection.
+   *
+   * Shared by the floor canvas and the PROCESS graph. The two canvases used
+   * to disagree about this because only one of them had multi-select at all;
+   * one implementation is what keeps them honest.
+   */
+  const selectWs = useCallback(
+    (s: { kind: 'ws'; id: string } | null, additive?: boolean) => {
+      if (additive && s?.kind === 'ws') {
+        const id = s.id;
+        const anchorIsWs = selected?.kind === 'ws';
+        const anchorId = anchorIsWs ? selected.id : null;
+        if (anchorId === id) {
+          // Toggling off the anchor — promote an extra if any, else clear.
+          if (extraSelectedWs.size > 0) {
+            const [next, ...rest] = Array.from(extraSelectedWs);
+            setSelected({ kind: 'ws', id: next });
+            setExtraSelectedWs(new Set(rest));
+          } else {
+            setSelected(null);
+          }
+          return;
+        }
+        if (extraSelectedWs.has(id)) {
+          const next = new Set(extraSelectedWs);
+          next.delete(id);
+          setExtraSelectedWs(next);
+          return;
+        }
+        // Not yet selected — add. With no ws anchor this id becomes one.
+        if (!anchorIsWs) {
+          setSelected({ kind: 'ws', id });
+          setExtraSelectedWs(new Set());
+        } else {
+          setExtraSelectedWs(new Set([...extraSelectedWs, id]));
+        }
+        return;
+      }
+      setExtraSelectedWs(new Set());
+      setSelected(s);
+    },
+    [selected, extraSelectedWs],
+  );
 
   // Best scenario — leader on latest-run throughput/hr, with efficiencyPct as
   // a tiebreaker. Scenarios with no runs are ignored. Null when nothing's
@@ -898,21 +1022,40 @@ export function BuilderPage() {
    *  STATIONS palette can render one continuous scroller with a section
    *  header per category instead of a tab strip. Search narrows within
    *  each section; sections that go empty are dropped by the pane. */
-  const apparelSections = useMemo(() => {
+  const apparelSections = useMemo<ApparelSection[]>(() => {
     const q = paletteSearch.trim().toLowerCase();
-    return APPAREL_CATEGORIES.map((cat) => {
-      const items = APPAREL_FIXTURE_PALETTE[cat.id]
+    const hits = (label: string, id: string) =>
+      !q || label.toLowerCase().includes(q) || id.toLowerCase().includes(q);
+
+    const builtIn: ApparelSection[] = APPAREL_CATEGORIES.map((cat) => ({
+      ...cat,
+      items: APPAREL_FIXTURE_PALETTE[cat.id]
         .map(resolveFixture)
         .filter((f): f is IsoFixture => Boolean(f))
-        .filter(
-          (f) =>
-            !q ||
-            f.label.toLowerCase().includes(q) ||
-            f.id.toLowerCase().includes(q),
-        );
-      return { ...cat, items };
+        .filter((f) => hits(f.label, f.id)),
+    }));
+
+    // Authored types, one section per group the user named, in first-authored
+    // order so the palette doesn't reshuffle itself as types are added.
+    const groups: string[] = [];
+    for (const t of stationTypes) if (!groups.includes(t.group)) groups.push(t.group);
+    const authored: ApparelSection[] = groups.map((group) => {
+      const types = stationTypes.filter(
+        (t) => t.group === group && hits(t.label, t.code),
+      );
+      return {
+        id: `grp:${group}`,
+        label: group,
+        icon: '✎',
+        items: types
+          .map((t) => resolveFixture(t.id))
+          .filter((f): f is IsoFixture => Boolean(f)),
+        types,
+      };
     });
-  }, [paletteSearch]);
+
+    return [...builtIn, ...authored];
+  }, [paletteSearch, stationTypes]);
 
   // ── Canvas pointer handlers ────────────────────────────────────────────────
   const onCanvasMouseMove = useCallback(
@@ -949,10 +1092,14 @@ export function BuilderPage() {
       // When the drop originated from the BLOCKS palette (apparel preset),
       // stamp the preset's default params + auto-name with its label.
       const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
+      // An authored station type auto-names the same way a preset does, so
+      // three drops read "Inline iron 1 / 2 / 3". Its params are stamped by
+      // `makeWorkstation` from the type itself.
+      const authored = stationTypeFor(drop.catalogId);
       const id = addWorkstation({
         catalogId: drop.catalogId,
         position: { x: hoverCell.x, y: hoverCell.y },
-        presetLabel: preset?.label,
+        presetLabel: preset?.label ?? authored?.label,
         blockParams: preset?.defaultParams,
       });
       setSelected({ kind: 'ws', id });
@@ -969,20 +1116,26 @@ export function BuilderPage() {
 
 
   /** Project a screen point to SVG user-space — the same coordinate system
-   *  the canvas <g> renders in after applying `translate(pan) scale(zoom)`.
-   *  Used by the marquee handler so the rectangle can be authored in the
-   *  same space the workstation centres live in. */
+   *  the active canvas's inner <g> renders in after applying
+   *  `translate(cam) scale(cam.z)`. Used by the marquee handler so the
+   *  rectangle can be authored in the same space the entity centres live in.
+   *
+   *  Reads whichever camera the current view is driving. Both canvases use a
+   *  centred viewBox with pixel-for-pixel user units, so one expression
+   *  serves both — only the camera differs, which is the same trick
+   *  `readCam` plays for the gesture layer. */
   const screenToWorldSvg = useCallback(
     (clientX: number, clientY: number) => {
       const el = stageRef.current;
       if (!el) return { sx: 0, sy: 0 };
       const r = el.getBoundingClientRect();
+      const c = canvasMode === 'process' ? processCam : { x: pan.x, y: pan.y, z: zoom };
       return {
-        sx: (clientX - r.left - r.width / 2 - pan.x) / zoom,
-        sy: (clientY - r.top - r.height / 2 - pan.y) / zoom,
+        sx: (clientX - r.left - r.width / 2 - c.x) / c.z,
+        sy: (clientY - r.top - r.height / 2 - c.y) / c.z,
       };
     },
-    [pan, zoom],
+    [pan, zoom, processCam, canvasMode],
   );
 
   const beginSelectRect = useCallback(
@@ -1020,17 +1173,32 @@ export function BuilderPage() {
         const maxSx = Math.max(sx0, sx1);
         const minSy = Math.min(sy0, sy1);
         const maxSy = Math.max(sy0, sy1);
-        // Every workstation whose projected footprint centre falls
-        // inside the marquee joins the selection. We use the centre rather
-        // than the bounding rect so small marquees can still pick
-        // tightly-packed stations without overlap fights.
+        // Every workstation whose centre falls inside the marquee joins the
+        // selection. Centre rather than bounding rect so small marquees can
+        // still pick tightly-packed stations without overlap fights.
+        //
+        // The two canvases place entities in unrelated spaces, so only the
+        // centre differs: the floor projects a rotated footprint, the PROCESS
+        // graph reads the same resolved positions it renders from (and that
+        // `processContentBounds` frames with), offset to the block's middle.
         const t = twinRef.current;
         const hits: string[] = [];
-        for (const w of t.workstations) {
-          const fp = wsFootprint(w);
-          const c = proj.project(w.position.x + fp.w / 2, w.position.y + fp.d / 2);
-          if (c.sx >= minSx && c.sx <= maxSx && c.sy >= minSy && c.sy <= maxSy) {
-            hits.push(w.id);
+        const inRect = (sx: number, sy: number) =>
+          sx >= minSx && sx <= maxSx && sy >= minSy && sy <= maxSy;
+        if (canvasModeRef.current === 'process') {
+          const positions = resolveProcessPositions(t);
+          for (const w of t.workstations) {
+            const pos = positions.get(w.id);
+            if (!pos) continue;
+            if (inRect(pos.x + PROCESS_BLOCK_W / 2, pos.y + PROCESS_BLOCK_H / 2)) {
+              hits.push(w.id);
+            }
+          }
+        } else {
+          for (const w of t.workstations) {
+            const fp = wsFootprint(w);
+            const c = proj.project(w.position.x + fp.w / 2, w.position.y + fp.d / 2);
+            if (inRect(c.sx, c.sy)) hits.push(w.id);
           }
         }
         const merged = new Set<string>(baseIds);
@@ -1062,10 +1230,6 @@ export function BuilderPage() {
     const t = e.target as Element;
     // Only react to background drags — let entity clicks bubble.
     if (t.tagName !== 'svg' && !(t as SVGElement).getAttribute?.('data-canvas-bg')) return;
-    if (canvasMode === 'process') {
-      cam.beginPan(e.clientX, e.clientY);
-      return;
-    }
     if (tool === 'select') {
       e.preventDefault();
       beginSelectRect(e.clientX, e.clientY, e.shiftKey);
@@ -1460,8 +1624,8 @@ export function BuilderPage() {
           minWidth: 0,
         }}
       >
-        <button onClick={() => navigate('/')} style={btnSec()} title="Back to menu" aria-label="Back to menu">
-          ←
+        <button onClick={() => navigate('/')} style={btnIcon()} title="Back to menu" aria-label="Back to menu">
+          <Icon name="back" />
         </button>
         {/* Title and the full action row (FACTORY picker, SAVE, SAVE AS,
             DELETE, ✓ READY chip, SIMULATE, BEST) sit on a single
@@ -1469,7 +1633,7 @@ export function BuilderPage() {
             SIMULATE so the pre-flight health is read right before the
             user commits to a sim run. */}
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <ViewTitle kicker="Authoring" title="Factory Builder" />
+          <ViewTitle title="Factory Builder" />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
             <HudSelect
@@ -1521,27 +1685,34 @@ export function BuilderPage() {
             onClick={onSave}
             style={{
               ...btnPrim(),
+              ...btnIcon(),
               background: savedAt ? SW_COLORS.ok : SW_COLORS.brand,
+              border: 'none',
+              color: SW_COLORS.void,
               transition: 'background 160ms',
             }}
+            aria-label="Save"
             title={
-              activeScenarioId === null
-                ? 'Save the current configuration into the canonical factory'
-                : 'Save the current configuration into this scenario'
+              savedAt
+                ? `Saved at ${savedAt} — save again`
+                : activeScenarioId === null
+                  ? 'Save the current configuration into the canonical factory'
+                  : 'Save the current configuration into this scenario'
             }
           >
-            {savedAt ? `✓ SAVED · ${savedAt}` : '💾 SAVE'}
+            <Icon name={savedAt ? 'check' : 'save'} />
           </button>
           <button
             onClick={onSaveAsOpen}
-            style={btnSec()}
+            style={btnIcon()}
+            aria-label="Save as new scenario"
             title={
               activeScenarioId === null
-                ? 'Fork the canonical twin into a new scenario'
-                : 'Fork this scenario into a new branched scenario'
+                ? 'Save as… — fork the canonical twin into a new scenario'
+                : 'Save as… — fork this scenario into a new branched scenario'
             }
           >
-            ✦ SAVE AS…
+            <Icon name="saveAs" />
           </button>
           <button
             onClick={async () => {
@@ -1554,7 +1725,7 @@ export function BuilderPage() {
             }}
             disabled={activeScenarioId === null}
             style={{
-              ...btnSec(),
+              ...btnIcon(),
               color: activeScenarioId === null ? SW_COLORS.muted : SW_COLORS.alarm,
               borderColor: activeScenarioId === null ? SW_COLORS.line : SW_COLORS.alarm + '60',
               cursor: activeScenarioId === null ? 'not-allowed' : 'pointer',
@@ -1565,8 +1736,9 @@ export function BuilderPage() {
                 ? 'Canonical factory cannot be deleted — switch to a scenario first, or fork via SAVE AS…'
                 : `Delete the active scenario "${twin.name}"`
             }
+            aria-label="Delete scenario"
           >
-            🗑 DELETE
+            <Icon name="trash" />
           </button>
           {/* Pre-flight graph health chip — sits between DELETE and
               SIMULATE so the green / amber / red status is the last
@@ -1598,15 +1770,29 @@ export function BuilderPage() {
                 fontFamily: SW_FONTS.mono,
                 fontSize: 10,
                 fontWeight: 800,
+                height: 30,
+                padding: '0 9px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
               }}
+              aria-label={`Pre-flight — ${errorCount} error, ${warnCount} warning, ${infoCount} hint`}
             >
-              {errorCount > 0
-                ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
-                : warnCount > 0
-                  ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
-                  : infoCount > 0
-                    ? `✓ READY · ${infoCount} HINT`
-                    : '✓ READY'}
+              {/* Glyph carries the verdict, the digits carry the volume —
+                  no words, same read as the rest of the toolbar. */}
+              <Icon
+                name={errorCount > 0 ? 'alert' : warnCount > 0 ? 'warn' : 'check'}
+                size={12}
+              />
+              {pmlIssues.length > 0 && (
+                <span>
+                  {errorCount > 0
+                    ? `${errorCount}${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount}` : ''}`
+                    : warnCount > 0
+                      ? `${warnCount}${infoCount > 0 ? ` · ${infoCount}` : ''}`
+                      : `${infoCount}`}
+                </span>
+              )}
             </button>
             {issuesOpen && pmlIssues.length > 0 && (
               <div
@@ -1857,6 +2043,16 @@ export function BuilderPage() {
         );
       })()}
 
+      {/* Station-type authoring. Mounted here rather than inside the palette
+          so it survives the palette collapsing while the dialog is open. */}
+      <StationTypeDialog
+        open={typeDialogOpen}
+        editing={editingType}
+        groups={Array.from(new Set(stationTypes.map((t) => t.group)))}
+        onSave={saveStationType}
+        onCancel={() => { setTypeDialogOpen(false); setEditingType(null); }}
+      />
+
       {/* LEFT PALETTE — collapses to a click-to-open rail */}
       {paletteOpen ? (
         <Palette
@@ -1866,6 +2062,8 @@ export function BuilderPage() {
           onPaletteSearch={setPaletteSearch}
           drop={drop}
           onPickWs={(catalogId, presetId) => setDrop({ kind: 'ws', catalogId, presetId })}
+          onEditStationType={(t) => { setEditingType(t); setTypeDialogOpen(true); }}
+          onDeleteStationType={deleteStationType}
           onCollapse={() => setPaletteOpen(false)}
         />
       ) : (
@@ -2003,7 +2201,10 @@ export function BuilderPage() {
           </div>
         )}
 
-        {/* Empty-state hint */}
+        {/* Empty floor — the ONE empty state for the canvas, in every view.
+            It lives on the stage rather than inside a view so 2D, ISO and
+            PROCESS cannot disagree about whether the floor is empty; only the
+            second line changes, because the palette changes with the view. */}
         {twin.workstations.length === 0 && drop.kind === 'none' && (
           <div
             style={{
@@ -2022,7 +2223,9 @@ export function BuilderPage() {
               Empty factory
             </div>
             <div style={{ fontSize: 13 }}>
-              Pick a station from the palette and click anywhere to place it.
+              {canvasMode === 'process'
+                ? 'Pick a block from the palette and click anywhere to place it, then wire the ports.'
+                : 'Pick a station from the palette and click anywhere to place it.'}
             </div>
           </div>
         )}
@@ -2087,47 +2290,7 @@ export function BuilderPage() {
                   }
                   return;
                 }
-                // SHIFT+click toggles a workstation in/out of multi-selection
-                // without disturbing the rest — the Figma/Sketch convention.
-                // Departments are not multi-selectable, so SHIFT+dept still
-                // behaves like a single-select.
-                if (modifiers?.shift && s?.kind === 'ws') {
-                  const id = s.id;
-                  const anchorIsWs = selected?.kind === 'ws';
-                  const anchorId = anchorIsWs ? selected.id : null;
-                  const inExtras = extraSelectedWs.has(id);
-                  if (anchorId === id) {
-                    // Toggling off the anchor — promote an extra if any, else
-                    // clear the selection entirely.
-                    if (extraSelectedWs.size > 0) {
-                      const [next, ...rest] = Array.from(extraSelectedWs);
-                      setSelected({ kind: 'ws', id: next });
-                      setExtraSelectedWs(new Set(rest));
-                    } else {
-                      setSelected(null);
-                    }
-                    return;
-                  }
-                  if (inExtras) {
-                    const next = new Set(extraSelectedWs);
-                    next.delete(id);
-                    setExtraSelectedWs(next);
-                    return;
-                  }
-                  // Not yet selected — add. If no ws anchor, this id becomes
-                  // the anchor (preserving any dept anchor would be confusing
-                  // since multi-select is ws-only).
-                  if (!anchorIsWs) {
-                    setSelected({ kind: 'ws', id });
-                    setExtraSelectedWs(new Set());
-                  } else {
-                    setExtraSelectedWs(new Set([...extraSelectedWs, id]));
-                  }
-                  return;
-                }
-                // Plain click — single selection (resets any multi-select).
-                setExtraSelectedWs(new Set());
-                setSelected(s);
+                selectWs(s, modifiers?.shift);
               }}
               onRemoveConnector={removeConnector}
               onStartDrag={(kind, id, e) => {
@@ -2141,12 +2304,13 @@ export function BuilderPage() {
           <BuilderProcessView
             twin={twin}
             selected={selected}
-            onSelect={setSelected}
+            selectedWsIds={selectedWsIds}
+            onSelect={selectWs}
+            selectRect={selectRect}
+            selectToolArmed={tool === 'select'}
             drop={drop}
             setDrop={setDrop}
             addWorkstation={addWorkstation}
-            moveWorkstation={moveWorkstation}
-            updateWorkstation={updateWorkstation}
             addConnector={addConnector}
             removeConnector={removeConnector}
             setProcessPositions={setProcessPositions}
@@ -2509,17 +2673,26 @@ function PaneCollapseButton({ side, onClick }: { side: 'left' | 'right'; onClick
       title={side === 'left' ? 'Collapse palette' : 'Collapse inspector'}
       aria-label={side === 'left' ? 'Collapse palette' : 'Collapse inspector'}
       style={{
+        // Square, on the shared header-row unit: the palette « and the
+        // inspector » are the same control mirrored, and both sit level with
+        // the chips beside them.
+        width: SW_CONTROL.icon,
+        height: SW_CONTROL.icon,
+        flex: 'none',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
         background: 'transparent',
         border: `1px solid ${hover ? SW_COLORS.ink : SW_COLORS.line}`,
-        borderRadius: 4,
+        borderRadius: SW_RADIUS.sm,
         cursor: 'pointer',
-        padding: '3px 6px',
+        padding: 0,
         lineHeight: 1,
         fontFamily: SW_FONTS.mono,
-        fontSize: 11,
+        fontSize: 15,
         fontWeight: 800,
         color: hover ? SW_COLORS.ink : SW_COLORS.muted,
-        transition: 'border-color 120ms ease, color 120ms ease',
+        transition: `border-color ${SW_MOTION.instant}ms linear, color ${SW_MOTION.instant}ms linear`,
       }}
     >
       {side === 'left' ? '«' : '»'}
@@ -2531,10 +2704,20 @@ function PaneCollapseButton({ side, onClick }: { side: 'left' | 'right'; onClick
 // PALETTE (left)
 // ============================================================================
 
-/** One STATIONS section: an apparel category plus the fixtures that survive
- *  the current palette search. */
-interface ApparelSection extends ApparelCategory {
+/** One STATIONS section: a heading plus the fixtures that survive the
+ *  current palette search.
+ *
+ *  `id` is a plain string, not an `ApparelCategoryId`: only the sewing
+ *  machines are built in, and every other section is a group the user named
+ *  while authoring a station type. */
+interface ApparelSection {
+  id: string;
+  label: string;
+  icon: string;
   items: IsoFixture[];
+  /** Station types in this section, aligned index-for-index with `items`.
+   *  Absent on the built-in section. */
+  types?: StationType[];
 }
 
 interface PaletteProps {
@@ -2552,8 +2735,60 @@ interface PaletteProps {
    *  drops, enabling default-param stamping + auto-naming. Other palette
    *  drops from the STATIONS tab call this without a presetId. */
   onPickWs: (catalogId: string, presetId?: ApparelPresetId) => void;
+  /** Open the station-type dialog. `type` = edit that one, null = author a
+   *  new one. */
+  onEditStationType: (type: StationType | null) => void;
+  /** Delete an authored type. The Builder owns this because only it can see
+   *  whether the twin still has stations of that type. */
+  onDeleteStationType: (type: StationType) => void;
   /** Collapse the pane to its rail. */
   onCollapse: () => void;
+}
+
+/** Corner control on an authored palette tile. Kept tiny and monochrome so
+ *  it reads as chrome on the tile rather than competing with the station
+ *  artwork underneath it. */
+function TileAction({
+  glyph,
+  title,
+  onClick,
+}: {
+  glyph: string;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        // The tile behind this arms a drop — a click on the control must not
+        // also place a station.
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        width: 15,
+        height: 15,
+        padding: 0,
+        lineHeight: 1,
+        fontSize: 8,
+        fontFamily: SW_FONTS.display,
+        fontWeight: 900,
+        color: SW_COLORS.muted,
+        background: SW_COLORS.paper,
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: 3,
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {glyph}
+    </button>
+  );
 }
 
 function Palette(props: PaletteProps) {
@@ -2563,8 +2798,8 @@ function Palette(props: PaletteProps) {
   /** Collapsed STATIONS sections, by category id. Local to the palette —
    *  it's view furniture, not authored twin state, so it doesn't belong in
    *  the store or a saved factory. */
-  const [collapsedSections, setCollapsedSections] = useState<Set<ApparelCategoryId>>(new Set());
-  const toggleSection = (id: ApparelCategoryId) =>
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const toggleSection = (id: string) =>
     setCollapsedSections((prev) => {
       const next = new Set(prev);
       if (!next.delete(id)) next.add(id);
@@ -2613,8 +2848,11 @@ function Palette(props: PaletteProps) {
               letterSpacing: '0.08em',
               background: SW_COLORS.steelLite,
               color: SW_COLORS.ink,
-              borderRadius: 4,
-              padding: '5px 8px',
+              borderRadius: SW_RADIUS.sm,
+              height: SW_CONTROL.height,
+              display: 'inline-flex',
+              alignItems: 'center',
+              padding: '0 8px',
             }}
           >
             {props.tab === 'ws' ? 'STN' : 'BLK'}
@@ -2651,6 +2889,26 @@ function Palette(props: PaletteProps) {
                 </button>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => props.onEditStationType(null)}
+              title="Define a station of your own — how it looks, and what it is to the simulation"
+              style={{
+                width: '100%',
+                marginBottom: 6,
+                padding: '6px 8px',
+                background: SW_COLORS.paper,
+                border: `1px dashed ${SW_COLORS.line}`,
+                borderRadius: SW_RADIUS.sm,
+                cursor: 'pointer',
+                ...SW_TYPE.kicker,
+                fontSize: 9,
+                color: SW_COLORS.brandText,
+                textAlign: 'center',
+              }}
+            >
+              + NEW STATION TYPE
+            </button>
             <input
               value={props.paletteSearch}
               onChange={(e) => props.onPaletteSearch(e.target.value)}
@@ -2695,19 +2953,7 @@ function Palette(props: PaletteProps) {
                       textAlign: 'left',
                     }}
                   >
-                    <span
-                      style={{
-                        fontSize: 9,
-                        color: SW_COLORS.muted,
-                        lineHeight: 1,
-                        display: 'inline-block',
-                        width: 8,
-                        transform: open ? 'rotate(90deg)' : 'none',
-                        transition: 'transform 120ms',
-                      }}
-                    >
-                      ▶
-                    </span>
+                    <Chevron open={open} />
                     <span style={{ fontSize: 12, color: SW_COLORS.muted, lineHeight: 1 }}>{section.icon}</span>
                     <span style={{ ...sectionLabel, flex: 1 }}>{section.label.toUpperCase()}</span>
                     <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted }}>
@@ -2715,47 +2961,61 @@ function Palette(props: PaletteProps) {
                     </span>
                   </button>
                   <div hidden={!open} style={{ padding: 8, display: open ? 'grid' : 'none', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                    {section.items.map((a) => {
+                    {section.items.map((a, i) => {
                       const armed = props.drop.kind === 'ws' && props.drop.catalogId === a.id;
+                      const authored = section.types?.[i];
+                      const mark = stationMark(a.id);
                       return (
-                        <button
-                          key={a.id}
-                          onClick={() => props.onPickWs(a.id)}
-                          title={a.label}
-                          style={{
-                            background: armed ? SW_COLORS.brandLite : SW_COLORS.paper,
-                            border: `1px solid ${armed ? SW_COLORS.brand : SW_COLORS.line}`,
-                            borderRadius: 6,
-                            padding: 6,
-                            cursor: 'pointer',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            gap: 4,
-                          }}
-                        >
-                          {/* Machines show their family mark + type code — the
-                              same thing they will look like once dropped on the
-                              floor. Non-machine fixtures keep the isometric
-                              cuboid, which is what distinguishes a rack from a
-                              trolley. */}
-                          {ISO_FIXTURE_TO_MACHINE_CODE[a.id] ? (
-                            <svg width={56} height={42} style={{ display: 'block' }}>
-                              <StationGlyph
-                                code={ISO_FIXTURE_TO_MACHINE_CODE[a.id]}
-                                width={56}
-                                height={42}
+                        <div key={a.id} style={{ position: 'relative' }}>
+                          <button
+                            onClick={() => props.onPickWs(a.id)}
+                            title={a.label}
+                            style={{
+                              width: '100%',
+                              background: armed ? SW_COLORS.brandLite : SW_COLORS.paper,
+                              border: `1px solid ${armed ? SW_COLORS.brand : SW_COLORS.line}`,
+                              borderRadius: 6,
+                              padding: 6,
+                              cursor: 'pointer',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              gap: 4,
+                            }}
+                          >
+                            {/* Anything with a mark shows it — the same thing
+                                it will look like once dropped on the floor.
+                                Fixtures with no mechanism to draw keep the
+                                isometric cuboid, which is what distinguishes a
+                                rack from a trolley. */}
+                            {mark.code || mark.markCode ? (
+                              <svg width={56} height={42} style={{ display: 'block' }}>
+                                <StationGlyph {...mark} width={56} height={42} />
+                              </svg>
+                            ) : (
+                              <svg width={56} height={42} viewBox="-32 -24 64 48" style={{ display: 'block' }}>
+                                {a.draw({ w: a.w, d: a.d, h: a.h }) as ReactNode}
+                              </svg>
+                            )}
+                            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, textAlign: 'center', lineHeight: 1.2 }}>
+                              {a.label}
+                            </div>
+                          </button>
+                          {authored && (
+                            <div style={{ position: 'absolute', top: 2, right: 2, display: 'flex', gap: 2 }}>
+                              <TileAction
+                                glyph="✎"
+                                title={`Edit ${authored.label}`}
+                                onClick={() => props.onEditStationType(authored)}
                               />
-                            </svg>
-                          ) : (
-                            <svg width={56} height={42} viewBox="-32 -24 64 48" style={{ display: 'block' }}>
-                              {a.draw({ w: a.w, d: a.d, h: a.h }) as ReactNode}
-                            </svg>
+                              <TileAction
+                                glyph="✕"
+                                title={`Delete ${authored.label}`}
+                                onClick={() => props.onDeleteStationType(authored)}
+                              />
+                            </div>
                           )}
-                          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, textAlign: 'center', lineHeight: 1.2 }}>
-                            {a.label}
-                          </div>
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -2840,7 +3100,6 @@ function PmlPalettePane({
                 const baseSpec = PML_BLOCK_LIBRARY[preset.baseKind];
                 const fixtureId = pmlFixtureId(preset.baseKind);
                 const armed = drop.kind === 'ws' && drop.catalogId === fixtureId;
-                const tint = PML_CATEGORY_TINT[baseSpec.category];
                 const ports = `${baseSpec.inputs.length} IN · ${baseSpec.outputs.length} OUT${baseSpec.usesResources ? ' · uses resources' : ''}`;
                 return (
                   <button
@@ -2849,8 +3108,16 @@ function PmlPalettePane({
                     aria-label={preset.label}
                     title={`${preset.label} — ${preset.blurb}\n${ports}${preset.example ? '\n\n' + preset.example : ''}`}
                     style={{
-                      background: armed ? SW_COLORS.brandLite : tint.fill,
-                      border: `1px solid ${armed ? SW_COLORS.brand : tint.stroke}`,
+                      // Neutral chrome. The tile used to BE the coloured square,
+                      // inverted against the canvas (coloured glyph on a 14%
+                      // well, where the canvas draws a white glyph on a solid
+                      // plate). Now the button is just a surface and the face
+                      // inside it is the literal miniature of what lands — the
+                      // same answer the STATIONS palette gives with StationGlyph.
+                      // The armed state stays on the button rather than mutating
+                      // the face, so the preview never lies about the colour.
+                      background: armed ? SW_COLORS.brandLite : SW_COLORS.paper,
+                      border: `1px solid ${armed ? SW_COLORS.brand : SW_COLORS.line}`,
                       borderRadius: 6,
                       padding: 0,
                       aspectRatio: '1 / 1',
@@ -2861,7 +3128,10 @@ function PmlPalettePane({
                       justifyContent: 'center',
                     }}
                   >
-                    <baseSpec.Icon size={20} color={tint.stroke} title={preset.label} />
+                    <svg width={30} height={30} style={{ display: 'block', overflow: 'visible' }}>
+                      <title>{preset.label}</title>
+                      <PmlBlockFace category={baseSpec.category} Icon={baseSpec.Icon} size={30} />
+                    </svg>
                   </button>
                 );
               })}
@@ -2946,49 +3216,20 @@ function CanvasSVG(props: CanvasSVGProps) {
   const lineFocused = (line: SewingLine) =>
     twin.workstations.some((w) => w.lineId === line.id && selectedWsIds.has(w.id));
 
-  // Grid subdivision density. As the user zooms in, each integer cell is
-  // divided into more sub-cells (powers of 2). Steps are tuned so the next
-  // tier kicks in just after the previous one becomes too coarse to track
-  // sub-cell sizing in the inspector.
-  const subdivisions = zoom < 0.9 ? 1 : zoom < 1.6 ? 2 : zoom < 2.4 ? 4 : 8;
-
   // Centred 1:1 viewBox — SVG user-space units == stage CSS pixels, with
   // (0,0) at the element centre. The cursor handler in the parent relies
-  // on this to map clientX/Y → world cells without an aspect-ratio fudge.
+  // on this to map clientX/Y -> world cells without an aspect-ratio fudge.
   const W = Math.max(1, stageSize.w);
   const H = Math.max(1, stageSize.h);
   const vbMinX = -W / 2;
   const vbMinY = -H / 2;
 
-  // Compute the visible cell range from the four screen corners. With a
-  // CSS transform of `translate(pan) scale(zoom)` on the wrapper, the
-  // pre-transform user-space coord under a screen corner offset
-  // `(cx, cy)` (from element centre) is `((cx - pan.x)/zoom, (cy - pan.y)/zoom)`.
-  // Inverting iso projection at those four corners gives the cell bounds
-  // currently in view; we render the floor + grid over that span (plus a
-  // small pad) so the canvas feels infinite at any pan.
-  const screenCorners: Array<[number, number]> = [
-    [-W / 2, -H / 2],
-    [ W / 2, -H / 2],
-    [ W / 2,  H / 2],
-    [-W / 2,  H / 2],
-  ];
-  let visMinX = Infinity, visMaxX = -Infinity;
-  let visMinY = Infinity, visMaxY = -Infinity;
-  for (const [cx, cy] of screenCorners) {
-    const sx = (cx - pan.x) / zoom;
-    const sy = (cy - pan.y) / zoom;
-    const cell = projection.unproject(sx, sy);
-    if (cell.x < visMinX) visMinX = cell.x;
-    if (cell.x > visMaxX) visMaxX = cell.x;
-    if (cell.y < visMinY) visMinY = cell.y;
-    if (cell.y > visMaxY) visMaxY = cell.y;
-  }
-  const PAD = 4;
-  const gMinX = Math.floor(visMinX) - PAD;
-  const gMaxX = Math.ceil(visMaxX) + PAD;
-  const gMinY = Math.floor(visMinY) - PAD;
-  const gMaxY = Math.ceil(visMaxY) + PAD;
+  // Visible cell range, from the shared camera helper. The grid needs it and
+  // so does the floor base polygon below, which is why it lives in
+  // `domain/camera.ts` rather than inside `<CanvasGrid>`.
+  const cam: Cam = { x: pan.x, y: pan.y, z: zoom };
+  const { minX: gMinX, maxX: gMaxX, minY: gMinY, maxY: gMaxY } =
+    visibleCellRange(projection, cam, stageSize);
 
   const floorTL = P(gMinX, gMinY);
   const floorTR = P(gMaxX, gMinY);
@@ -3039,64 +3280,10 @@ function CanvasSVG(props: CanvasSVGProps) {
         stroke="none"
       />
 
-      {/* Grid lines — sub-cell tier first (drawn under the integer tier so
-          the cell boundaries stay visually dominant). Sub-cell density grows
-          with zoom; at zoom 1× there are none. Range tracks the visible
-          cell bounds rather than the original grid. */}
-      {subdivisions > 1 &&
-        Array.from(
-          { length: (gMaxX - gMinX) * subdivisions + 1 },
-          (_, i) => {
-            if (i % subdivisions === 0) return null;
-            const x = gMinX + i / subdivisions;
-            const a = P(x, gMinY);
-            const b = P(x, gMaxY);
-            return (
-              <line
-                key={`vs-${i}`}
-                x1={a.sx}
-                y1={a.sy}
-                x2={b.sx}
-                y2={b.sy}
-                stroke="#E8EDF508"
-                strokeWidth={0.3}
-              />
-            );
-          },
-        )}
-      {subdivisions > 1 &&
-        Array.from(
-          { length: (gMaxY - gMinY) * subdivisions + 1 },
-          (_, i) => {
-            if (i % subdivisions === 0) return null;
-            const y = gMinY + i / subdivisions;
-            const a = P(gMinX, y);
-            const b = P(gMaxX, y);
-            return (
-              <line
-                key={`hs-${i}`}
-                x1={a.sx}
-                y1={a.sy}
-                x2={b.sx}
-                y2={b.sy}
-                stroke="#E8EDF508"
-                strokeWidth={0.3}
-              />
-            );
-          },
-        )}
-      {Array.from({ length: gMaxX - gMinX + 1 }, (_, i) => {
-        const x = gMinX + i;
-        const a = P(x, gMinY);
-        const b = P(x, gMaxY);
-        return <line key={`v-${x}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#E8EDF512" strokeWidth={0.6} />;
-      })}
-      {Array.from({ length: gMaxY - gMinY + 1 }, (_, i) => {
-        const y = gMinY + i;
-        const a = P(gMinX, y);
-        const b = P(gMaxX, y);
-        return <line key={`h-${y}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#E8EDF512" strokeWidth={0.6} />;
-      })}
+      {/* Grid — the same component the PROCESS canvas uses, so the two
+          views rule the same paper. Pitch comes from `projection`, so this
+          is a diamond lattice in ISO and a square one in 2D with no branch. */}
+      <CanvasGrid projection={projection} cam={cam} stageSize={stageSize} />
 
       {/* Original factory footprint — drawn as a faint outline so the user
           retains a "you are here" reference inside the otherwise infinite
@@ -3335,7 +3522,7 @@ function RotationCellsOverlay({
           .map((id) => wsById.get(id))
           .filter((w): w is NonNullable<typeof w> => !!w)
           .map((w) => {
-            const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === w.catalogId);
+            const fixture = lookupFixture(w.catalogId);
             const fw = w.size?.w ?? fixture?.w ?? 1;
             const fd = w.size?.d ?? fixture?.d ?? 1;
             const cx = w.position.x + fw / 2;
@@ -3406,7 +3593,7 @@ function SewingLineBand({
   // Bounding box of all member workstations, in world cells.
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const w of members) {
-    const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === w.catalogId);
+    const fixture = lookupFixture(w.catalogId);
     const fw = w.size?.w ?? fixture?.w ?? 1;
     const fd = w.size?.d ?? fixture?.d ?? 1;
     if (w.position.x < minX) minX = w.position.x;
@@ -3589,7 +3776,7 @@ function FlatStationBody({ ws, fixture }: { ws: Workstation; fixture: IsoFixture
   const { w: fw, d: fd } = wsFootprint(ws);
   const W = fw * FLAT_CELL;
   const H = fd * FLAT_CELL;
-  const code = ISO_FIXTURE_TO_MACHINE_CODE[ws.catalogId];
+  const mark = stationMark(ws.catalogId);
   // Machines get their family mark and type code; everything else (racks,
   // trolleys, buffers, zones) gets the same box with an abbreviated label,
   // because there is no mechanism to draw.
@@ -3601,8 +3788,10 @@ function FlatStationBody({ ws, fixture }: { ws: Workstation; fixture: IsoFixture
   // a diagonal stroke does not.
   return (
     <StationGlyph
-      code={code}
-      label={code ? undefined : fixture.label.split('\u00b7')[0].trim()}
+      {...mark}
+      label={
+        mark.code || mark.markCode ? undefined : fixture.label.split('\u00b7')[0].trim()
+      }
       width={W}
       height={H}
       muted={fixture.cat === 'zone'}
@@ -3659,7 +3848,7 @@ function WorkstationSprite({
   // Declared before the early return below so hook order stays stable across
   // renders (react-hooks/rules-of-hooks).
   const [hovered, setHovered] = useState(false);
-  const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+  const fixture = lookupFixture(ws.catalogId);
   if (!fixture) return null;
 
   const P = projection.project;
@@ -4287,7 +4476,7 @@ function ConnectorLayer({
 
 function HoverPreview({ cell, drop, projection }: { cell: { x: number; y: number }; drop: DropTool; projection: Projection }) {
   if (drop.kind === 'ws') {
-    const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === drop.catalogId);
+    const fixture = lookupFixture(drop.catalogId);
     if (!fixture) return null;
     const P = projection.project;
     const tl = P(cell.x, cell.y);
@@ -4329,7 +4518,17 @@ function HoverPreview({ cell, drop, projection }: { cell: { x: number; y: number
 interface BuilderProcessViewProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'ws'; id: string } | null;
-  onSelect: (s: { kind: 'ws'; id: string } | null) => void;
+  /** Full selection (primary anchor + marquee/shift extras). Every id in here
+   *  gets the selection ring and moves together on a drag. `selected` stays
+   *  the single anchor the Inspector binds to. */
+  selectedWsIds: Set<string>;
+  onSelect: (s: { kind: 'ws'; id: string } | null, additive?: boolean) => void;
+  /** Live marquee rectangle in this canvas's world px, or null. */
+  selectRect: { sx0: number; sy0: number; sx1: number; sy1: number } | null;
+  /** True while the SELECT tool is armed — the background drag is then a
+   *  marquee rather than a pan, and its mouseup owns the selection, so the
+   *  background's click handler must not second-guess it. */
+  selectToolArmed: boolean;
   /** Active drop tool. `kind === 'ws'` makes a click in any dept lane
    *  drop a new workstation in that dept. */
   drop: DropTool;
@@ -4343,8 +4542,6 @@ interface BuilderProcessViewProps {
     blockParams?: Record<string, unknown>;
     processPos?: { x: number; y: number };
   }) => string;
-  moveWorkstation: (id: string, position: { x: number; y: number }) => void;
-  updateWorkstation: (id: string, patch: Partial<Workstation>) => void;
   /** Connector store mutators — drag-to-connect creates, select+Del removes. */
   addConnector: (input: {
     kind: ConnectorKind;
@@ -4395,31 +4592,6 @@ interface ProcessNode {
   line: SewingLine | undefined;
 }
 
-/** Tints by PML category — keeps the diagram visually parseable at a glance.
- *  Fills are dark tinted wells derived from the category accent so the cards
- *  sit on the void stage like every other surface (the old pastel fills were
- *  a light-theme remnant that glared inside the dark inspector). */
-const PML_CATEGORY_TINT: Record<string, { fill: string; stroke: string }> = {
-  lifecycle: { fill: alpha('#F2C12E', 0.14), stroke: '#F2C12E' },
-  buffer:    { fill: alpha('#3D6EE5', 0.14), stroke: '#3D6EE5' },
-  service:   { fill: alpha('#E63946', 0.14), stroke: '#E63946' },
-  routing:   { fill: alpha('#1FB36B', 0.14), stroke: '#1FB36B' },
-  batch:     { fill: alpha('#7E5BEF', 0.14), stroke: '#7E5BEF' },
-  movement:  { fill: alpha('#C8915E', 0.14), stroke: '#C8915E' },
-};
-
-/** Picks a legible glyph colour (near-white or near-black) for a solid fill,
- *  so the PML symbol reads on both light (amber) and dark (blue/red) squares. */
-function contrastInk(hex: string): string {
-  const h = hex.replace('#', '');
-  if (h.length < 6) return '#FFFFFF';
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
-  return yiq >= 150 ? '#1A1A1A' : '#FFFFFF';
-}
-
 /** Returns the SVG-space center of a port on a node. Inputs are spread
  *  along the left edge, outputs along the right edge. */
 function portPosition(
@@ -4439,7 +4611,10 @@ function portPosition(
 function BuilderProcessView({
   twin,
   selected,
+  selectedWsIds,
   onSelect,
+  selectRect,
+  selectToolArmed,
   drop,
   setDrop,
   addWorkstation,
@@ -4461,12 +4636,17 @@ function BuilderProcessView({
 
   // ── Interaction state ─────────────────────────────────────────────────
   // Declared up-front because the layout/extent pass below reads the live
-  // drag position. `dragNodePos` is the ghost position during a drag (only
-  // committed to the store on drop); `pendingWire` is the rubber-band while
-  // drawing a connector; `hoverPort` is the input port currently under the
-  // wire end; `selectedConnId` is the wire selected for deletion.
-  const [dragWsId, setDragWsId] = useState<string | null>(null);
-  const [dragNodePos, setDragNodePos] = useState<{ x: number; y: number } | null>(null);
+  // drag position. `dragWsIds` + `dragDelta` are the ghost offset during a
+  // drag (only committed to the store on drop); `pendingWire` is the
+  // rubber-band while drawing a connector; `hoverPort` is the input port
+  // currently under the wire end; `selectedConnId` is the wire selected for
+  // deletion.
+  //
+  // A SET and a shared DELTA rather than one id and one absolute position:
+  // dragging a marquee selection has to move every member rigidly, and a
+  // delta does that without tracking a separate origin per block.
+  const [dragWsIds, setDragWsIds] = useState<Set<string>>(() => new Set());
+  const [dragDelta, setDragDelta] = useState<{ dx: number; dy: number } | null>(null);
   const [pendingWire, setPendingWire] = useState<
     { fromWsId: string; fromPort: string; x: number; y: number } | null
   >(null);
@@ -4477,6 +4657,11 @@ function BuilderProcessView({
     setHoverPort(v);
   };
   const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
+  /** Snapped top-left of the block that would land if the user clicked now.
+   *  Process-world px — deliberately NOT the page's `hoverCell`, which is in
+   *  floor cells; conflating the two unrelated spaces is exactly what made
+   *  Cmd-V paste at a bogus cell here before. */
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   // Two-stage arm for AUTO-ARRANGE (see the button).
   const [arrangeArmed, setArrangeArmed] = useState(false);
   const arrangeTimer = useRef<number | null>(null);
@@ -4505,7 +4690,9 @@ function BuilderProcessView({
   const posOf = (wsId: string): { x: number; y: number } | null => {
     const n = positions.get(wsId);
     if (!n) return null;
-    if (wsId === dragWsId && dragNodePos) return dragNodePos;
+    if (dragDelta && dragWsIds.has(wsId)) {
+      return { x: n.x + dragDelta.dx, y: n.y + dragDelta.dy };
+    }
     return { x: n.x, y: n.y };
   };
 
@@ -4574,41 +4761,14 @@ function BuilderProcessView({
     onFitRequest();
   }, [twin.workstations.length, stageSize.w, stageSize.h, onFitRequest]);
 
-  // Grid, regenerated each frame for whatever the camera can currently see.
-  // That is what makes the canvas unbounded: there is no sheet with edges,
-  // just lines drawn where you happen to be looking — including at negative
-  // coordinates, which the old positive-quadrant sheet could not reach.
-  const gridLines = (() => {
-    const step = 24;
-    const halfW = stageSize.w / 2;
-    const halfH = stageSize.h / 2;
-    const x0 = (-halfW - cam.x) / cam.z;
-    const x1 = (halfW - cam.x) / cam.z;
-    const y0 = (-halfH - cam.y) / cam.z;
-    const y1 = (halfH - cam.y) / cam.z;
-    // Coarsen rather than emit thousands of nodes when zoomed far out.
-    const span = Math.max((x1 - x0) / step, (y1 - y0) / step);
-    const s2 = span > 400 ? step * 4 : step;
-    const gx0 = Math.floor(x0 / s2) * s2;
-    const gy0 = Math.floor(y0 / s2) * s2;
-    const out: ReactNode[] = [];
-    for (let x = gx0; x <= x1; x += s2) {
-      out.push(
-        <line key={`gx${x}`} x1={x} y1={y0} x2={x} y2={y1} stroke={alpha(SW_COLORS.paperEdge, 0.5)} strokeWidth={1 / cam.z} />,
-      );
-    }
-    for (let y = gy0; y <= y1; y += s2) {
-      out.push(
-        <line key={`gy${y}`} x1={x0} y1={y} x2={x1} y2={y} stroke={alpha(SW_COLORS.paperEdge, 0.5)} strokeWidth={1 / cam.z} />,
-      );
-    }
-    return out;
-  })();
-
   // No non-negative clamp: the canvas extends in every direction, and
   // clamping here was the second half of why you could not work to the left
   // of where the seed happened to put things.
-  const snap8 = (v: number) => Math.round(v / 8) * 8;
+  //
+  // `snapProcess` is a 10px lattice, the tier-4 subdivision of the grid drawn
+  // below, so a block settles on a line the user can see. `dropAtCursor` and
+  // the drop ghost both call it on the same expression, which is what makes
+  // the ghost's promise and the drop's behaviour identical by construction.
 
   /** Which line a newly-dropped block joins, now that there are no lanes to
    *  drop into: inherit from the selected block ("I am extending this line"),
@@ -4622,6 +4782,14 @@ function BuilderProcessView({
     const lines = twin.lines ?? [];
     return lines.length === 1 ? lines[0].id : undefined;
   };
+
+  /** Where a block dropped at cursor-point `p` lands: centred on the cursor,
+   *  snapped to the grid lattice. The ghost and the drop both call this, so
+   *  the preview cannot promise a position the drop does not honour. */
+  const dropPosAt = (p: { x: number; y: number }) => ({
+    x: snapProcess(p.x - BLOCK_W / 2),
+    y: snapProcess(p.y - BLOCK_H / 2),
+  });
 
   /** Place an armed palette block where the user clicked. */
   const dropAtCursor = (clientX: number, clientY: number): boolean => {
@@ -4642,7 +4810,7 @@ function BuilderProcessView({
       position,
       // Written at creation, not as a follow-up setProcessPositions call —
       // otherwise a single drop costs two undo steps.
-      processPos: { x: snap8(p.x - BLOCK_W / 2), y: snap8(p.y - BLOCK_H / 2) },
+      processPos: dropPosAt(p),
       presetLabel: preset?.label,
       blockParams: preset?.defaultParams,
     });
@@ -4654,31 +4822,45 @@ function BuilderProcessView({
     e.stopPropagation();
     e.preventDefault();
     setSelectedConnId(null);
+    // The grabbed block moves the whole selection when it is part of one —
+    // matching the floor's `startEntityDrag`. SHIFT peels a single block out
+    // of a group, which is the same escape hatch the floor offers.
+    const group =
+      !e.shiftKey && selectedWsIds.has(node.ws.id) && selectedWsIds.size > 1
+        ? new Set(selectedWsIds)
+        : new Set([node.ws.id]);
     const start = screenToSvg(e.clientX, e.clientY);
-    const base = posOf(node.ws.id) ?? { x: node.x, y: node.y };
-    const offX = start.x - base.x;
-    const offY = start.y - base.y;
-    setDragWsId(node.ws.id);
-    setDragNodePos({ x: base.x, y: base.y });
+    setDragWsIds(group);
+    setDragDelta({ dx: 0, dy: 0 });
     let didMove = false;
     const move = (ev: MouseEvent) => {
       const w = screenToSvg(ev.clientX, ev.clientY);
       didMove = true;
-      setDragNodePos({ x: w.x - offX, y: w.y - offY });
+      setDragDelta({ dx: w.x - start.x, dy: w.y - start.y });
     };
     const up = (ev: MouseEvent) => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
-      setDragWsId(null);
-      const w = screenToSvg(ev.clientX, ev.clientY);
-      setDragNodePos(null);
+      setDragWsIds(new Set());
+      setDragDelta(null);
       if (!didMove) {
-        onSelect({ kind: 'ws', id: node.ws.id });
+        onSelect({ kind: 'ws', id: node.ws.id }, ev.shiftKey);
         return;
       }
-      setProcessPositions([
-        { wsId: node.ws.id, pos: { x: snap8(w.x - offX), y: snap8(w.y - offY) } },
-      ]);
+      const w = screenToSvg(ev.clientX, ev.clientY);
+      const dx = w.x - start.x;
+      const dy = w.y - start.y;
+      // One bulk write, so a group move is a single undo step.
+      const entries: { wsId: string; pos: { x: number; y: number } }[] = [];
+      for (const wsId of group) {
+        const base = positions.get(wsId);
+        if (!base) continue;
+        entries.push({
+          wsId,
+          pos: { x: snapProcess(base.x + dx), y: snapProcess(base.y + dy) },
+        });
+      }
+      if (entries.length > 0) setProcessPositions(entries);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
@@ -4750,15 +4932,31 @@ function BuilderProcessView({
         // No `overflow: auto`. The canvas is not a sheet inside a scroll box
         // any more — it is an unbounded camera over an inner <g>, and a scroll
         // container would clamp panning to the positive quadrant again. The
-        // grid is drawn in SVG (see `gridLines`) rather than as a CSS
+        // grid is drawn in SVG (see `<CanvasGrid>`) rather than as a CSS
         // background, so it tracks the camera instead of the element.
         overflow: 'hidden',
-        backgroundColor: SW_COLORS.paperDeep,
+        // NO background of its own. The stage paints the void plus an overhead
+        // vignette, and `CanvasSVG` leaves its own base transparent so that
+        // ground reads through. Painting a flat `paperDeep` here occluded it,
+        // which is why 2D was near-black with a glow and PROCESS was flat
+        // slate — the single largest reason the two canvases did not look like
+        // the same sheet of paper.
         // Only the states this view knows about. Everything else — the
         // grab hand, space-pan, mid-pan grabbing — is the stage's cursor
         // showing through, so it reads the same in every view.
-        cursor: connect.on ? 'crosshair' : dragWsId ? 'grabbing' : undefined,
+        cursor: connect.on ? 'crosshair' : dragWsIds.size > 0 ? 'grabbing' : undefined,
       }}
+      // Ghost tracking is bound HERE, on the container, not on the background
+      // <rect>: the rect is occluded by every block and every wire, so a
+      // rect-bound handler would freeze the ghost the moment the cursor
+      // crossed a node. This div is inset:0 and receives everything by
+      // bubbling. The page's own mousemove early-returns in PROCESS and the
+      // camera hook binds none outside an active pan, so nothing contends.
+      onMouseMove={(e) => {
+        if (drop.kind !== 'ws') return;
+        setHoverPos(dropPosAt(screenToSvg(e.clientX, e.clientY)));
+      }}
+      onMouseLeave={() => setHoverPos(null)}
     >
       <svg
         width="100%"
@@ -4793,13 +4991,21 @@ function BuilderProcessView({
           fill="transparent"
           onClick={(e) => {
             if (dropAtCursor(e.clientX, e.clientY)) return;
+            // With the SELECT tool armed the marquee's own mouseup already
+            // resolved the selection; clearing here would undo it on every
+            // successful drag-select. Same guard the floor's onCanvasClick has.
+            if (selectToolArmed) return;
             onSelect(null);
             setSelectedConnId(null);
           }}
         />
 
         <g ref={svgRef} transform={`translate(${cam.x} ${cam.y}) scale(${cam.z})`}>
-          {gridLines}
+          {/* The same grid the floor draws. FLAT_PROJECTION is what makes it
+              the same: it multiplies by FLAT_CELL, and this canvas's world
+              units are plain px, so the lines land 40 world px apart —
+              identical pitch to 2D at identical zoom. */}
+          <CanvasGrid projection={FLAT_PROJECTION} cam={cam} stageSize={stageSize} />
 
         {/* Connector wires (drawn before blocks so blocks sit on top).
             Wires stay full opacity when either endpoint is part of the focus,
@@ -4898,19 +5104,21 @@ function BuilderProcessView({
             when the selected dept is its parent lane (so picking a dept lights
             up all of its blocks). */}
         {Array.from(positions.values()).map((n) => {
-          const isSelected = selected?.kind === 'ws' && selected.id === n.ws.id;
-          const isDragging = dragWsId === n.ws.id;
-          const renderX = isDragging && dragNodePos ? dragNodePos.x : n.x;
-          const renderY = isDragging && dragNodePos ? dragNodePos.y : n.y;
+          const isSelected = selectedWsIds.has(n.ws.id);
+          const isDragging = dragWsIds.has(n.ws.id);
+          const live = posOf(n.ws.id) ?? { x: n.x, y: n.y };
+          const renderX = live.x;
+          const renderY = live.y;
+          // Port dots pick up the category accent so a wire's endpoints read as
+          // belonging to the block they leave. The face itself resolves its own
+          // tint from the same token.
           const tint = PML_CATEGORY_TINT[n.block.spec.category] ?? {
             fill: SW_COLORS.paper,
             stroke: SW_COLORS.line,
           };
           const bottleneck = !!n.ws.kpiObserved?.bottleneck;
-          const focusActive = selected !== null;
-          const blockFocused = isSelected;
-          const focusOpacity =
-            focusActive && !blockFocused ? FOCUS_DIM : 1;
+          const focusActive = selectedWsIds.size > 0;
+          const focusOpacity = focusActive && !isSelected ? FOCUS_DIM : 1;
           return (
             <g
               key={n.ws.id}
@@ -4935,7 +5143,7 @@ function BuilderProcessView({
               onClick={(e) => {
                 e.stopPropagation();
                 setSelectedConnId(null);
-                onSelect({ kind: 'ws', id: n.ws.id });
+                onSelect({ kind: 'ws', id: n.ws.id }, e.shiftKey);
               }}
             >
               {/* Selection / bottleneck halo — drawn behind the symbol so it
@@ -4995,14 +5203,18 @@ function BuilderProcessView({
                   </g>
                 );
               })()}
-              {/* Symbol — a solid, category-coloured square holding the PML
-                  glyph (AnyLogic-style). Nothing else lives on the block face. */}
-              <rect x={0} y={0} width={n.w} height={n.h} rx={12} fill={tint.stroke} />
-              <n.block.spec.Icon
-                size={30}
-                color={contrastInk(tint.stroke)}
-                x={(n.w - 30) / 2}
-                y={(n.h - 30) / 2}
+              {/* Symbol — a solid, category-coloured plate (AnyLogic-style).
+                  `stationMark` decides what sits on it: a real machine shows
+                  its own family mark and type code, exactly as it does on the
+                  2D floor and in the STATIONS palette, so a DNLS is a DNLS in
+                  every tab instead of a generic Service gear here and a seam
+                  diagonal next door. PML fixtures resolve to no mark and fall
+                  back to the kind's glyph. */}
+              <PmlBlockFace
+                category={n.block.spec.category}
+                Icon={n.block.spec.Icon}
+                mark={stationMark(n.ws.catalogId)}
+                size={n.w}
               />
               {/* Name — centred beneath the symbol, the only text on the node. */}
               <text
@@ -5150,27 +5362,50 @@ function BuilderProcessView({
           );
         })}
 
+        {/* Drop ghost — what an armed palette tile will place, drawn at the
+            position it will actually land on. The floor canvas has had one of
+            these (`HoverPreview`) all along; without it this canvas dropped
+            blind. Rendered last so it sits over the diagram, and guarded at
+            render rather than cleared in an effect — a stale hoverPos behind
+            this guard is invisible, and the effect would trip
+            react-hooks/set-state-in-effect for nothing. */}
+        {drop.kind === 'ws' && hoverPos && (() => {
+          const spec = PML_BLOCK_LIBRARY[resolveBlockKindForDrop(drop.catalogId)];
+          return (
+            <g transform={`translate(${hoverPos.x}, ${hoverPos.y})`} pointerEvents="none">
+              <PmlBlockFace
+                category={spec.category}
+                Icon={spec.Icon}
+                mark={stationMark(drop.catalogId)}
+                size={BLOCK_W}
+                ghost
+              />
+            </g>
+          );
+        })()}
+
+        {/* Marquee — same treatment as the floor's, including the zoom-
+            compensated stroke so the rectangle is 1px at every scale. */}
+        {selectRect && (
+          <rect
+            x={Math.min(selectRect.sx0, selectRect.sx1)}
+            y={Math.min(selectRect.sy0, selectRect.sy1)}
+            width={Math.abs(selectRect.sx1 - selectRect.sx0)}
+            height={Math.abs(selectRect.sy1 - selectRect.sy0)}
+            fill={alpha(SW_COLORS.brand, 0.09)}
+            stroke={SW_COLORS.brand}
+            strokeWidth={1 / Math.max(0.001, cam.z)}
+            strokeDasharray={`${4 / Math.max(0.001, cam.z)} ${3 / Math.max(0.001, cam.z)}`}
+            style={{ pointerEvents: 'none' }}
+          />
+        )}
+
         </g>
       </svg>
 
-      {/* Empty state — an HTML overlay so it neither scales with the camera
-          nor needs a canvas extent to position against. */}
-      {twin.workstations.length === 0 && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            pointerEvents: 'none',
-            ...SW_TYPE.body,
-            color: SW_COLORS.muted,
-          }}
-        >
-          No blocks yet — pick one from the palette and click anywhere on the canvas.
-        </div>
-      )}
+      {/* No empty state here on purpose: the stage renders one for every view
+          (see "Empty floor" below). This canvas used to draw its own, so the
+          PROCESS view showed two overlapping messages on a blank floor. */}
     </div>
     {/* Auto-arrange — reflow every block into the flow-ordered serpentine
         seed. A clean way out of a tangled canvas.
@@ -5614,7 +5849,7 @@ function LinePolicyEditor({
         }}
         title="System-specific behaviour knobs"
       >
-        <span>{open ? '▾' : '▸'}</span>
+        <Chevron open={open} />
         <span>POLICY</span>
         <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
           {overrideCount > 0
@@ -5905,7 +6140,7 @@ function InspectorBody(props: InspectorProps) {
   // Workstation
   const ws = props.twin.workstations.find((w) => w.id === props.selected!.id);
   if (!ws) return <div style={wrapper}>Selection lost.</div>;
-  const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+  const fixture = lookupFixture(ws.catalogId);
   // Every line in the factory is assignable — the floor is free space, so a
   // station's line membership is not constrained by where it physically sits.
   const allLines = props.twin.lines ?? [];
@@ -5951,8 +6186,18 @@ function InspectorBody(props: InspectorProps) {
       {/* Stat tiles — bulletin SMV and required staffing, side by side. */}
       {(boundOp || ws.resources.workersRequired > 0) && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '12px 0 2px' }}>
-          <InspectorStat label="SMV" value={boundOp ? boundOp.smv.toFixed(2) : '—'} unit="min" />
-          <InspectorStat label="OPR" value={String(ws.resources.workersRequired)} unit="required" />
+          {/* SMV is the mean service time and OPR is the parallel-channel
+              count, so both are Kendall–Lee quantities and carry their symbol. */}
+          <InspectorStat
+            label={<>SMV <Sym quantity="serviceTime" bracketed color={SW_COLORS.brandText} /></>}
+            value={boundOp ? boundOp.smv.toFixed(2) : '—'}
+            unit="min"
+          />
+          <InspectorStat
+            label={<>OPR <Sym quantity="servers" bracketed color={SW_COLORS.brandText} /></>}
+            value={String(ws.resources.workersRequired)}
+            unit="required"
+          />
         </div>
       )}
       <div style={{ height: 10 }} />
@@ -6138,7 +6383,7 @@ function InspectorBody(props: InspectorProps) {
 
       <LensSection id="ws.resources" title="Resources" active={props.lens === 'resources'}>
         <NumField
-          label="Workers required"
+          label={<>Workers required <Sym quantity="servers" bracketed color={SW_COLORS.brandText} /></>}
           value={ws.resources.workersRequired}
           onChange={(v) => props.onSetResources(ws.id, { workersRequired: v })}
         />
@@ -6153,7 +6398,7 @@ function InspectorBody(props: InspectorProps) {
 
       <LensSection id="ws.targets" title="KPI targets" active={props.lens === 'kpis'}>
         <NumField
-          label="Capacity / hr"
+          label={<>Capacity / hr <Sym quantity="mu" bracketed color={SW_COLORS.brandText} /></>}
           value={ws.kpiTargets.capacityPerHr ?? 0}
           onChange={(v) => props.onSetKpiTargets(ws.id, { capacityPerHr: v })}
         />
@@ -6165,16 +6410,22 @@ function InspectorBody(props: InspectorProps) {
         />
         <div style={{ height: 8 }} />
         <NumField
-          label="Utilisation %"
+          label={<>Utilisation % <Sym quantity="rho" bracketed color={SW_COLORS.brandText} /></>}
           value={ws.kpiTargets.utilizationPct ?? 0}
           onChange={(v) => props.onSetKpiTargets(ws.id, { utilizationPct: v })}
         />
         {ws.kpiObserved ? (
           <InspectorGroup id="ws.observed" title="Observed (last run)" defaultOpen={false}>
             <div style={{ padding: 10, background: SW_COLORS.paperDeep, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}>
-              <ObservedRow label="Capacity / hr" value={ws.kpiObserved.capacityPerHr.toFixed(0)} />
+              <ObservedRow
+                label={<>Capacity / hr <Sym quantity="mu" bracketed color={SW_COLORS.brandText} /></>}
+                value={ws.kpiObserved.capacityPerHr.toFixed(0)}
+              />
               <ObservedRow label="Efficiency %" value={ws.kpiObserved.efficiencyPct.toFixed(1)} />
-              <ObservedRow label="Utilisation %" value={ws.kpiObserved.utilizationPct.toFixed(1)} />
+              <ObservedRow
+                label={<>Utilisation % <Sym quantity="rho" bracketed color={SW_COLORS.brandText} /></>}
+                value={ws.kpiObserved.utilizationPct.toFixed(1)}
+              />
               {ws.kpiObserved.bottleneck && (
                 <div style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: SW_COLORS.alarm }}>
                   ◆ Bottleneck in last run
@@ -6451,53 +6702,85 @@ function BlockParamFields({
         BLOCK PARAMETERS
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {fields.map((f) => {
-          const isAuthored = authored[f.id] !== undefined;
-          const live = f.resolveDefault(resolved);
-          return (
-            <div key={f.id}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ ...fieldLabel, marginBottom: 0, flex: 1 }}>
-                  {f.label} <span style={{ color: SW_COLORS.muted, fontWeight: 500 }}>{f.unit.trim()}</span>
-                </span>
-                <span
-                  style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: isAuthored ? SW_COLORS.brand : SW_COLORS.muted,
-                  }}
-                >
-                  {isAuthored ? 'SET' : 'auto'}
-                </span>
-                {isAuthored && (
-                  <button
-                    onClick={() => clearParam(f.id)}
-                    style={{ ...btnSec(), padding: '1px 6px', fontSize: 9 }}
-                    title="Drop this override and fall back to the catalog default"
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-              <input
-                type="number"
-                value={live}
-                step={f.step}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (isFinite(v)) setParam(f.id, v);
-                }}
-                style={{ ...inputBase, fontFamily: SW_FONTS.mono, fontWeight: 700 }}
-              />
-              <div style={{ marginTop: 2, fontSize: 10, color: SW_COLORS.muted }}>
-                {f.hint}
-              </div>
-            </div>
-          );
-        })}
+        {fields.map((f) => (
+          <BlockParamRow
+            key={f.id}
+            field={f}
+            value={f.resolveDefault(resolved)}
+            isAuthored={authored[f.id] !== undefined}
+            onSet={(v) => setParam(f.id, v)}
+            onClear={() => clearParam(f.id)}
+          />
+        ))}
       </div>
+      <ArrivalProcessField ws={ws} block={block} onSetBlock={onSetBlock} />
       <KendallReadout ws={ws} kind={block.kind} />
+    </>
+  );
+}
+
+/**
+ * Arrival process for a Source — the `a` field of Kendall–Lee.
+ *
+ * Every station's classification opens with M, which asserts Poisson arrivals.
+ * The engine only delivers that when the Source carries an exponential
+ * inter-arrival distribution; without one it emits on a fixed 60/λ interval,
+ * which is a D process, and the closed-form numbers are then solved for a model
+ * the run is not. The pre-flight check warns about it — this is the control that
+ * lets the user act on the warning.
+ */
+function ArrivalProcessField({
+  ws,
+  block,
+  onSetBlock,
+}: {
+  ws: Workstation;
+  block: PmlBlock;
+  onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
+}) {
+  if (block.kind !== 'Source') return null;
+  const params = getBlockParams(ws);
+  const ratePerHr = Math.max(1e-6, params.sourceRatePerHr);
+  const poisson = params.arrivalDist?.kind === 'exp';
+
+  const setArrival = (next: 'M' | 'D') => {
+    onSetBlock(ws.id, {
+      kind: block.kind,
+      inputs: ws.block?.inputs,
+      outputs: ws.block?.outputs,
+      params: {
+        ...(ws.block?.params ?? {}),
+        // Exponential gaps at mean 60/λ minutes IS the Poisson process; the
+        // deterministic path is the engine's own fallback, so D clears it.
+        arrivalDist: next === 'M' ? { kind: 'exp', mean: 60 / ratePerHr } : undefined,
+      },
+    });
+  };
+
+  return (
+    <>
+      <div style={{ height: 10 }} />
+      {/* No symbol here: λ is the RATE, shown on the field above. This field
+          sets the `a` slot of a/b/c:d/e — the shape of the gaps, not the rate —
+          and repeating λ on both would read as two controls for one quantity. */}
+      <label style={fieldLabel}>Arrival process · Kendall a</label>
+      <HudSelect
+        value={poisson ? 'M' : 'D'}
+        onChange={(v) => setArrival(v as 'M' | 'D')}
+        variant="light"
+        size="sm"
+        mono
+        width="100%"
+        options={[
+          { value: 'M', label: 'Poisson · exponential gaps (M)', tag: 'TEXTBOOK' },
+          { value: 'D', label: 'Fixed interval · every 60/λ min (D)' },
+        ]}
+      />
+      <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, lineHeight: 1.4 }}>
+        {poisson
+          ? `Bundles arrive randomly at a mean ${ratePerHr.toFixed(0)}/hr — the M the queueing classification assumes.`
+          : `Bundles arrive exactly every ${(60 / ratePerHr).toFixed(2)} min. That is a D arrival process, so the M in the classification is not accurate.`}
+      </div>
     </>
   );
 }
@@ -6856,15 +7139,13 @@ function InspectorGroup({
         title={forceOpen ? 'Pinned open while this station carries an override' : isOpen ? 'Collapse' : 'Expand'}
         style={{
           display: 'flex',
-          alignItems: 'baseline',
+          alignItems: 'center',
           gap: 6,
           cursor: forceOpen ? 'default' : 'pointer',
           userSelect: 'none',
         }}
       >
-        <span aria-hidden style={{ fontSize: 9, color: SW_COLORS.muted, width: 10, flexShrink: 0 }}>
-          {isOpen ? '▾' : '▸'}
-        </span>
+        <Chevron open={isOpen} />
         <span style={{ ...sectionLabel, marginBottom: 0, flex: 1 }}>{title}</span>
         {right && <span onClick={(e) => e.stopPropagation()}>{right}</span>}
       </div>
@@ -6898,7 +7179,7 @@ function LensSection({ id, title, active, children }: { id: string; title: strin
         }}
         style={{
           display: 'flex',
-          alignItems: 'baseline',
+          alignItems: 'center',
           gap: 6,
           cursor: active ? 'default' : 'pointer',
           userSelect: 'none',
@@ -6906,9 +7187,7 @@ function LensSection({ id, title, active, children }: { id: string; title: strin
         }}
       >
         {!active && (
-          <span aria-hidden style={{ fontSize: 9, color: SW_COLORS.muted, width: 10, flexShrink: 0 }}>
-            {isOpen ? '▾' : '▸'}
-          </span>
+          <Chevron open={isOpen} />
         )}
         <span style={{ ...sectionLabel, color: active ? SW_COLORS.brandDeep : SW_COLORS.muted, marginBottom: 0 }}>
           {title}
@@ -6920,7 +7199,7 @@ function LensSection({ id, title, active, children }: { id: string; title: strin
   );
 }
 
-function NumField({ label, value, onChange, step }: { label: string; value: number; onChange: (v: number) => void; step?: number }) {
+function NumField({ label, value, onChange, step }: { label: ReactNode; value: number; onChange: (v: number) => void; step?: number }) {
   return (
     <div>
       <label style={fieldLabel}>{label}</label>
@@ -6938,7 +7217,7 @@ function NumField({ label, value, onChange, step }: { label: string; value: numb
   );
 }
 
-function ObservedRow({ label, value }: { label: string; value: string }) {
+function ObservedRow({ label, value }: { label: ReactNode; value: string }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '3px 0', color: SW_COLORS.muted }}>
       <span>{label}</span>
@@ -6993,7 +7272,7 @@ function InspectorChip({
 /** Stat tile for the inspector masthead — micro label, display value, quiet
  *  unit. Authoring facts only (bulletin SMV, staffing); sim results live in
  *  the Sim view. */
-function InspectorStat({ label, value, unit, tone }: { label: string; value: string; unit?: string; tone?: string }) {
+function InspectorStat({ label, value, unit, tone }: { label: ReactNode; value: string; unit?: string; tone?: string }) {
   return (
     <div
       style={{
@@ -7272,19 +7551,7 @@ function ControlsMenu() {
         }}
       >
         <span>Controls</span>
-        <span
-          aria-hidden
-          style={{
-            display: 'inline-block',
-            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
-            transition: 'transform 180ms ease',
-            color: open ? SW_COLORS.brand : SW_COLORS.muted,
-            fontSize: 10,
-            lineHeight: 1,
-          }}
-        >
-          ▾
-        </span>
+        <Caret open={open} />
       </button>
       <div
         role="listbox"

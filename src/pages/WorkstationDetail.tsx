@@ -18,7 +18,7 @@ import {
   Card,
   LineSimEmpty,
   SectionHeader,
-  SimTransportBar,
+  QueueingReference,
   StationTimeseriesGrid,
 } from '../components';
 import { BalkRatePanel, ConvergenceChart, LittlesLawCheck } from '../components/charts';
@@ -78,6 +78,9 @@ export function WorkstationDetailPage() {
     // could cap a station but never uncap it. PmlBlockParams encodes unbounded
     // as 0, while Operation.queueCapacity encodes it as undefined.
     if ('queueCapacity' in patch) params.queueCapacity = patch.queueCapacity ?? 0;
+    // The discipline was the one field this handler dropped, so changing it
+    // here relabelled the station without changing the run.
+    if (patch.queueDiscipline) params.queueDiscipline = patch.queueDiscipline;
     setBlock(ws.id, {
       ...(ws.block ?? {}),
       kind: getBlockKind(ws),
@@ -192,7 +195,6 @@ export function WorkstationDetailPage() {
           <SectionHeader
             title="Simulated vs. theory"
             sub="Solid = measured from the run. Dashed = the closed-form steady state for this station's Kendall–Lee class. They should converge as the shift plays."
-            right={<SimTransportBar />}
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <ConvergenceChart
@@ -234,40 +236,9 @@ export function WorkstationDetailPage() {
         </Card>
       )}
 
-      <Card>
-        <SectionHeader title="Queueing-theory cheat sheet" />
-        <ul
-          style={{
-            fontSize: 13,
-            lineHeight: 1.6,
-            paddingLeft: 18,
-            margin: 0,
-            color: SW_COLORS.ink,
-          }}
-        >
-          <li>
-            <strong>ρ (rho)</strong> — traffic intensity. For a single server ρ = λ/μ; for c servers
-            ρ = λ/(cμ). Must be &lt; 1 for an infinite-buffer line to stay stable.
-          </li>
-          <li>
-            <strong>Lq</strong> — average number of bundles waiting in queue. This is the bottleneck
-            signal: high Lq → bundles pile up here → upstream throughput throttled.
-          </li>
-          <li>
-            <strong>L = Lq + ρ</strong> — average WIP at this station (queue + in-service). When you
-            sum L across all stations you get the line's total WIP.
-          </li>
-          <li>
-            <strong>Wq</strong>, <strong>W</strong> — average time a bundle spends waiting / in the
-            station. Little's law: L = λW, Lq = λWq.
-          </li>
-          <li>
-            <strong>Balking</strong> — bundles rejected when the buffer is full (only in M/M/c/N).
-            Real sewing lines block upstream instead of dropping; here we approximate with balking
-            for textbook coherence.
-          </li>
-        </ul>
-      </Card>
+      {/* The reference is generated from the same symbol vocabulary the
+          Inspector fields use, so the sheet cannot drift from the labels. */}
+      <QueueingReference />
     </div>
   );
 }

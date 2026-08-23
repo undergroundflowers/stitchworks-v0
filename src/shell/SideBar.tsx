@@ -2,8 +2,6 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { ROUTES, type RouteDef } from '../lib/routes';
-import { useProject } from '../store';
-import { useTwin } from '../store/twin';
 
 /** Fixed pixel width of the rail. Tuned so the icon + small label below it
  *  read cleanly without crowding the active-state left bar. */
@@ -11,8 +9,11 @@ export const SIDEBAR_WIDTH = 76;
 
 /**
  * Slim left navigation rail: icon + tiny label per surface, active state
- * marked by a brand-coloured left bar. Factory + scenario context sits at the
- * top as a compact pill; Settings is pinned to the bottom.
+ * marked by a brand-coloured left bar. Settings is pinned to the bottom.
+ *
+ * The rail carried a factory/scenario pill under the logo. It duplicated the
+ * FACTORY picker that already sits in the Builder top bar — same name, less
+ * room, no way to act on it — so the rail is nav and nothing else.
  *
  * Dark like everything else now. The rail used to be the one inverted (light)
  * surface in the app, which made it the loudest element on screen — the
@@ -26,14 +27,6 @@ export const SIDEBAR_WIDTH = 76;
 export function SideBar() {
   const navigate = useNavigate();
   const location = useLocation();
-  const factoryName = useProject((s) => s.meta.name);
-  const activeScenarioId = useTwin((s) => s.activeScenarioId);
-  const scenarioName = useTwin((s) =>
-    s.activeScenarioId === null
-      ? null
-      : s.scenarios.find((sc) => sc.id === s.activeScenarioId)?.name ?? null,
-  );
-
   /**
    * Which tab to light up.
    *
@@ -100,50 +93,6 @@ export function SideBar() {
             strokeLinecap="square"
           />
         </svg>
-      </div>
-
-      {/* Factory + scenario pill. Full name on hover; a brand dot signals that
-          a scenario — not the canonical twin — is active. */}
-      <div
-        title={
-          (factoryName || 'Stitchworks') +
-          (scenarioName ? ` · ${scenarioName}` : ' · Canonical')
-        }
-        style={{
-          margin: '0 8px 6px',
-          padding: '6px 0',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 2,
-          borderRadius: SW_RADIUS.sm,
-          border: `1px solid ${SW_COLORS.lineSoft}`,
-          background: SW_COLORS.paperDeep,
-        }}
-      >
-        <div
-          style={{
-            fontFamily: SW_FONTS.display,
-            fontSize: 9.5,
-            fontWeight: 700,
-            lineHeight: 1.1,
-            letterSpacing: '0.02em',
-            color: SW_COLORS.ink,
-            textAlign: 'center',
-            wordBreak: 'break-word',
-            padding: '0 4px',
-          }}
-        >
-          {factoryName || 'Stitchworks'}
-        </div>
-        <div
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: 999,
-            background: activeScenarioId === null ? SW_COLORS.faint : SW_COLORS.brand,
-          }}
-        />
       </div>
 
       <div style={{ height: 1, background: SW_COLORS.lineSoft, margin: '4px 10px 6px' }} />

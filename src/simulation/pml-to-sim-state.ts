@@ -44,6 +44,7 @@ import type {
   StationView,
 } from './sim-state';
 import {
+  disciplineFor,
   serversFor,
   systemCapacityFor,
   type PmlSimResult,
@@ -210,7 +211,9 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     // resolver is what makes that class of drift impossible.
     const capacity = systemCapacityFor(ws);
     const servers = serversFor(ws);
-    const discipline = op?.queueDiscipline ?? 'FCFS';
+    // Resolve through the engine's own function so the classification label
+    // and the run can never disagree about which discipline is in force.
+    const discipline = disciplineFor(ws);
     if (discipline !== 'FCFS') nonFifoStations.push(opName);
 
     stations.push({
@@ -341,9 +344,16 @@ function unstableAnalytical(lambda: number): AnalyticalKpis {
     L: 0,
     W: 0,
     D: NaN,
+    pNOrMore: (n) => (n <= 0 ? 1 : 0),
     isStable: false,
     pWaitGreaterThan: () => 0,
+    pSystemGreaterThan: () => 0,
+    pWait: 0,
+    pNoWait: 1,
+    pBalk: 0,
+    lambdaOffered: lambda,
     lambdaEff: lambda,
+    discipline: 'FCFS',
   };
 }
 
@@ -389,7 +399,8 @@ function emptyStationView(st: StationStatic): StationView {
     LObserved: 0,
     WqObservedMin: 0,
     balkFraction: 0,
-    disciplineNotSimulated: st.discipline !== 'FCFS',
+    // The engine dequeues per discipline now, so nothing is left unsimulated.
+    disciplineNotSimulated: false,
   };
 }
 
@@ -588,7 +599,8 @@ export function pmlSampleToSimState(
       LObserved: dAreaL / win,
       WqObservedMin: dWaitN > 0 ? dWaitSum / dWaitN : 0,
       balkFraction: offered > 0 ? dBalk / offered : 0,
-      disciplineNotSimulated: st.discipline !== 'FCFS',
+      // The engine dequeues per discipline now, so nothing is left unsimulated.
+    disciplineNotSimulated: false,
     };
   });
 

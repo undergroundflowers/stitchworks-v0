@@ -1,10 +1,10 @@
 /**
  * Colour helpers for deriving alpha/shade variants from design tokens.
  *
- * IMPORTANT: always call these at render time (inside the component body or
- * event handler), never hoist the result into a module-level const — the vibe
- * system mutates SW_COLORS in place, and a hoisted result goes permanently
- * stale (see Button's old VARIANTS bug).
+ * These used to carry a warning against hoisting their results into
+ * module-level consts, because the old "vibe" system mutated SW_COLORS in
+ * place and a hoisted value went stale. That system is gone (see the header of
+ * `tokens.ts`), so a module-level derived colour is now safe.
  */
 
 function parseColor(color: string): { r: number; g: number; b: number; a: number } | null {
@@ -44,4 +44,21 @@ export function darken(color: string, f: number): string {
   if (!p) return color;
   const k = 1 - Math.max(0, Math.min(1, f));
   return `rgba(${Math.round(p.r * k)},${Math.round(p.g * k)},${Math.round(p.b * k)},${p.a})`;
+}
+
+/**
+ * A legible glyph colour — near-black or near-white — for a solid fill.
+ *
+ * Straight YIQ luma against a 150 threshold. Lives beside `alpha` because both
+ * the PROCESS block face and the Inspector's block chip need it, and it is a
+ * pure function of a colour with no design opinion beyond "stay readable".
+ */
+export function contrastInk(hex: string): string {
+  const h = hex.replace('#', '');
+  if (h.length < 6) return '#FFFFFF';
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 150 ? '#1A1A1A' : '#FFFFFF';
 }

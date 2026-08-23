@@ -22,6 +22,7 @@ import {
   type ProjectState,
 } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
+import { normalizeTwin } from '../domain/twin';
 import type { Twin, Scenario as TwinScenario } from '../domain/twin';
 import { indexedDbStorage } from './storage/indexedDbStorage';
 
@@ -183,10 +184,16 @@ function applyProject(snap: ProjectState): void {
 function applyTwin(snap: TwinSnapshot): void {
   // Twin store has no full-snapshot import. Splice the data fields directly
   // — zustand setState shallow-merges, so the action references are kept.
+  //
+  // Snapshots go through `normalizeTwin` on the way in for the same reason
+  // the twin store's own `migrate` does: an entry archived under an older
+  // schema (dead catalog ids, department fields) must not re-enter the app
+  // unmigrated just because it arrived from the library rather than from
+  // the twin store's own persisted payload.
   useTwin.setState({
     schemaVersion: TWIN_STORE_SCHEMA_VERSION,
-    canonical: snap.canonical,
-    scenarios: snap.scenarios,
+    canonical: normalizeTwin(snap.canonical),
+    scenarios: snap.scenarios.map((scn) => ({ ...scn, twin: normalizeTwin(scn.twin) })),
     activeScenarioId: snap.activeScenarioId,
   });
 }

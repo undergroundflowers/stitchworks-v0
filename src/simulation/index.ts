@@ -44,6 +44,12 @@ export {
 export {
   runPmlSim,
   validatePmlGraph,
+  // Shared Kendall–Lee resolvers. UI that displays c, N or the discipline must
+  // go through these, not read the operation directly — otherwise the label
+  // can describe a different model than the one the engine runs.
+  disciplineFor,
+  serversFor,
+  systemCapacityFor,
   type PmlSimOpts,
   type PmlSimResult,
   type PmlSimSample,

@@ -1,5 +1,9 @@
 import { PML_ICONS, type PmlIconComponent } from '../assets/pml-icons';
 import { apparelLabelForKind } from './apparelPresets';
+// Type-only: erased at build time, so the domain layer keeps no runtime
+// dependency on the simulation layer.
+import type { QuantityId } from '../simulation/notation';
+import type { QueueDiscipline } from '../simulation/queueing';
 
 /**
  * Process Modeling Library (PML) — block taxonomy adapted from AnyLogic's
@@ -412,20 +416,18 @@ export function blocksInCategory(cat: PmlCategory): PmlBlockSpec[] {
 const CATALOG_TO_BLOCK: Record<string, PmlBlockKind> = {
   // Line heads / tails — `buf_in` always sits at the start of a flow and
   // `buf_out` always at the end (intermediate buffers use `buf_wip` or
-  // `a_wip_rack`). Mapping them to Queue would leave the PML engine with
+  // `buf_wip`). Mapping them to Queue would leave the PML engine with
   // no Source → no arrivals → all-zero KPIs in Reports/LiveSim. Treat the
   // catalog ids as the lifecycle blocks they actually represent. Users can
   // still override per-workstation via `block.kind` from the inspector.
   buf_in:           'Source',
   buf_out:          'Sink',
   buf_wip:          'Queue',
-  a_wip_rack:       'Queue',
   a_fabric_rack:    'Queue',
   st_rack:          'Queue',
   st_pallet:        'Queue',
   st_roll:          'Queue',
   st_bin:           'Queue',
-  a_bundle_trolley: 'Queue',
 
   // Sewing machines + cutting machines = Service (op + machine)
   a_snls:        'Service', a_dnls:        'Service',
@@ -444,11 +446,9 @@ const CATALOG_TO_BLOCK: Record<string, PmlBlockKind> = {
   cut_spread: 'Service', cut_knife: 'Service', cut_band: 'Service', cut_cnc: 'Service',
 
   // Iron + press tables = Service (operator + station)
-  a_iron_inline: 'Service',
   fx_press:      'Service',
   fx_pack:       'Service',
   fx_table:      'Delay',
-  a_op_desk:     'Delay',
 
   // QC inspection — pass/fail router
   a_inspect_table: 'SelectOutput',
@@ -467,13 +467,6 @@ const CATALOG_TO_BLOCK: Record<string, PmlBlockKind> = {
   mh_pallet:   'MoveTo',
   mh_trolley:  'MoveTo',
   mh_agv:      'MoveTo',
-
-  // Operators = ResourcePool unit
-  op_sewer:  'ResourcePool',
-  op_cutter: 'ResourcePool',
-  op_helper: 'ResourcePool',
-  op_super:  'ResourcePool',
-  op_qc:     'ResourcePool',
 };
 
 /**
@@ -485,7 +478,6 @@ export function inferBlockKindFromCatalog(catalogId: string): PmlBlockKind {
   if (explicit) return explicit;
 
   // Heuristic prefix fallback for catalog ids we haven't enumerated.
-  if (catalogId.startsWith('op_'))   return 'ResourcePool';
   if (catalogId.startsWith('mach_')) return 'Service';
   if (catalogId.startsWith('a_'))    return 'Service';
   if (catalogId.startsWith('cut_'))  return 'Service';
@@ -535,6 +527,12 @@ export interface PmlBlockParams {
    *  case where one cut stroke produces N panels in a single emission.
    *  Default 1. */
   piecesPerAgent?: number;
+  /**
+   * Service / Queue — per-station queue discipline, the `e` field of
+   * Kendall–Lee. Overrides the bound operation's discipline for THIS station
+   * only, mirroring how `servers` and `queueCapacity` work.
+   */
+  queueDiscipline?: QueueDiscipline;
   /** Service — number of parallel servers (machines) at this station.
    *  An apparel sewing station typically has one machine and therefore
    *  one server; doubling-up at a bottleneck means servers = 2. Caps
@@ -647,22 +645,14 @@ export function apparelRoleFor(subject: BlockSubject): string {
   switch (subject.catalogId) {
     case 'a_inspect_table': return '4-point inspect';
     case 'fx_qctab':        return 'QC audit';
-    case 'a_iron_inline':   return 'Iron op';
     case 'fx_press':        return 'Press op';
     case 'fx_pack':         return 'Pack op';
     case 'a_cut_table':     return 'Cut → bundle';
-    case 'a_wip_rack':      return 'WIP rack';
     case 'a_fabric_rack':   return 'Fabric rack';
-    case 'a_bundle_trolley':return 'Bundle trolley';
     case 'buf_in':          return 'Inbound buffer';
     case 'buf_out':         return 'Outbound buffer';
     case 'mh_forklift':     return 'Forklift';
     case 'mh_agv':          return 'AGV';
-    case 'op_sewer':        return 'Sewer pool';
-    case 'op_cutter':       return 'Cutter pool';
-    case 'op_qc':           return 'QC pool';
-    case 'op_helper':       return 'Helper pool';
-    case 'op_super':        return 'Supervisor';
   }
   return apparelLabelForKind(getBlockKind(subject));
 }
@@ -811,11 +801,18 @@ export type ParamFieldId = keyof PmlBlockParams;
 export interface ParamFieldSpec {
   id: ParamFieldId;
   label: string;
+  /**
+   * The textbook quantity this field sets, when it is one. The Inspector
+   * renders the symbol from the shared vocabulary rather than baking it into
+   * `label`, because field labels are uppercased in CSS and that transform
+   * turns λ into Λ. Fields with no queueing meaning leave this unset.
+   */
+  quantity?: QuantityId;
   /** Suffix shown after the input (e.g. "/hr", "s", "%"). */
   unit: string;
   /** Step for the number input. */
   step: number;
-  /** One-line hint shown under the input. */
+  /** Short explanation, revealed by the field's ? help toggle. */
   hint: string;
   /** Resolves the live default value to seed the input when no override is set. */
   resolveDefault: (resolved: ResolvedBlockParams) => number;
@@ -823,19 +820,21 @@ export interface ParamFieldSpec {
 
 const FIELD_SOURCE_RATE: ParamFieldSpec = {
   id: 'sourceRatePerHr',
-  label: 'Rate',
+  label: 'Arrival rate',
+  quantity: 'lambda',
   unit: '/hr',
   step: 1,
-  hint: 'Agents generated per hour. e.g. 60 = one bundle every minute.',
+  hint: 'Bundles released into the line per hour. 60 = one a minute, on average.',
   resolveDefault: (r) => r.sourceRatePerHr,
 };
 
 const FIELD_CYCLE_S: ParamFieldSpec = {
   id: 'cycleS',
   label: 'Cycle',
+  quantity: 'serviceTime',
   unit: 's',
   step: 1,
-  hint: 'Seconds per agent. Sets the per-server processing time.',
+  hint: 'Mean seconds one server takes per bundle (1/μ).',
   resolveDefault: (r) => r.cycleS,
 };
 
@@ -844,7 +843,7 @@ const FIELD_PASS_PROB: ParamFieldSpec = {
   label: 'Pass',
   unit: '%',
   step: 0.5,
-  hint: 'Percentage of agents routed to the pass port. The rest go to fail.',
+  hint: 'Share routed to the pass port; the rest go to fail.',
   resolveDefault: (r) => Math.round(r.passProb * 1000) / 10,
 };
 
@@ -853,7 +852,7 @@ const FIELD_CAPACITY: ParamFieldSpec = {
   label: 'Capacity',
   unit: ' units',
   step: 1,
-  hint: 'How many concurrent units this pool provides (e.g. operators).',
+  hint: 'Concurrent units this pool provides, such as operators.',
   resolveDefault: (r) => r.capacity,
 };
 
@@ -862,7 +861,7 @@ const FIELD_BATCH_SIZE: ParamFieldSpec = {
   label: 'Batch size',
   unit: ' agents',
   step: 1,
-  hint: 'Collect this many agents before emitting one bundled agent.',
+  hint: 'Agents collected before one bundle is emitted.',
   resolveDefault: (r) => r.batchSize,
 };
 
@@ -871,7 +870,7 @@ const FIELD_PIECES_PER_AGENT: ParamFieldSpec = {
   label: 'Pieces / agent',
   unit: '',
   step: 1,
-  hint: 'Pieces carried by each emission. e.g. 50 = one cut → fifty panels.',
+  hint: 'Pieces carried per emission. 50 = one cut → fifty panels.',
   resolveDefault: (r) => r.piecesPerAgent,
 };
 
@@ -885,13 +884,13 @@ const FIELD_PIECES_PER_AGENT: ParamFieldSpec = {
  */
 const FIELD_SERVERS: ParamFieldSpec = {
   id: 'servers',
-  label: 'Servers (c)',
+  label: 'Servers',
+  quantity: 'servers',
   unit: '',
   step: 1,
   hint:
-    'Operators or machines working this station in parallel. c = 2 means two '
-    + 'people doing the same operation side by side, which halves the queue but '
-    + 'costs an operator. Overrides the garment operation for THIS station only.',
+    'Operators working this station in parallel. c = 2 is two people on the same '
+    + 'operation — shorter queue, one more operator. This station only.',
   resolveDefault: (r) => r.servers,
 };
 
@@ -905,15 +904,13 @@ const FIELD_SERVERS: ParamFieldSpec = {
  */
 const FIELD_QUEUE_CAPACITY: ParamFieldSpec = {
   id: 'queueCapacity',
-  label: 'Buffer (N)',
+  label: 'Buffer',
+  quantity: 'capacity',
   unit: ' max at station',
   step: 1,
   hint:
-    'Most bundles allowed at this station at once, waiting plus in service — '
-    + 'the cart or rack size. 0 = unbounded (M/M/c). Any positive value makes '
-    + 'it M/M/c/N: arrivals that find it full are turned away and counted as '
-    + 'balks, and the upstream station blocks rather than piling up. Note that '
-    + 'rework re-entry bypasses this cap.',
+    'Bundles allowed at the station at once — the cart or rack size. 0 = no limit. '
+    + 'Above 0, arrivals that find it full balk and upstream blocks.',
   resolveDefault: (r) => r.queueCapacity,
 };
 

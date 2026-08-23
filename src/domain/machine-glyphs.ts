@@ -28,6 +28,12 @@ import type { MachineCode } from './machines';
  * bottleneck, blocked, selected — and a machine that is orange because it is
  * a lockstitch cannot also be orange because it is the constraint.
  *
+ * The PROCESS canvas draws these same marks on a category-coloured plate, and
+ * that is not a violation: the mark there is `contrastInk` — black or white,
+ * chosen purely so it reads — while the hue belongs to the plate behind it and
+ * encodes the block's PML *role*, not the machine's identity. The contract is
+ * about a mark's own hue carrying identity, and no mark ever has one.
+ *
  * Emitted with `createElement` rather than JSX so this stays a `.ts` module in
  * `domain/`, callable from both the flat plan view and the isometric
  * fixtures. One vocabulary, two projections, no drift.
@@ -151,4 +157,20 @@ export function glyphMark(
   })();
 
   return createElement('g', { 'aria-hidden': true }, ...parts);
+}
+
+/**
+ * The family for a `stationMark()` result.
+ *
+ * A built-in machine carries a `code` and resolves through the table above; a
+ * user-authored station type carries its family directly, because its code is
+ * free text and cannot be a `MachineCode`. Both the flat plan body and the
+ * PROCESS block face need this rule, so it lives here rather than being
+ * written out at each call site.
+ */
+export function glyphFamilyOf(mark: {
+  code?: MachineCode;
+  family?: GlyphFamily;
+}): GlyphFamily | undefined {
+  return mark.code ? MACHINE_GLYPH_FAMILY[mark.code] : mark.family;
 }

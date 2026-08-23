@@ -69,7 +69,7 @@ import { getBlockSpec } from '../domain/pml';
  * rather than letting a stale 4 % sit next to a fresh 83 % in the Inspector.
  * They are re-derived by the next run.
  */
-export const TWIN_STORE_SCHEMA_VERSION = 7 as const;
+export const TWIN_STORE_SCHEMA_VERSION = 8 as const;
 
 /** Maximum number of pre-mutation snapshots kept in the undo stack.
  *  Each snapshot is a structural clone of the full twin tree, so the cap
@@ -1163,6 +1163,11 @@ export const useTwin = create<TwinState>()(
       // v2 → v4: drop the now-removed CAD underlay field (handled by
       // normalizeTwin, which simply ignores it on load).
       // v5 → v6: clear `kpiObserved` — its utilizationPct changed meaning.
+      // v7 → v8: the sewing-fixture / materials-handling / operator palette
+      // sections were deleted along with their fixtures. Same trick as v6 → v7
+      // — the bump exists to push every persisted twin back through
+      // `normalizeTwin`, which rewrites the dead catalog ids via
+      // `LEGACY_CATALOG_ID` so no saved factory loses a station.
       // v6 → v7: retire departments. The bump exists purely to force every
       // already-persisted twin back through `normalizeTwin`, which strips the
       // dead `departments` array and every `deptId`. Without it a saved

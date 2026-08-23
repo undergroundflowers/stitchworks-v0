@@ -26,13 +26,14 @@
  */
 
 import {
-  ISO_FIXTURE_CATALOG,
+  LEGACY_CATALOG_ID,
   defaultPropsFor,
   type IsoFixtureProps,
 } from './iso';
+import { lookupFixture, resolveBlockKindForDrop, stationTypeFor } from './fixture-registry';
 import {
+  pmlFixtureId,
   pmlKindFromFixtureId,
-  inferBlockKindFromCatalog,
   type PmlBlockOverride,
   type PmlBlockParams,
 } from './pml';
@@ -453,7 +454,10 @@ export interface Workstation {
    *  line runs as its own end-to-end tandem network; unlined stations draw
    *  from the factory-level operator pool. */
   lineId?: string;
-  /** Catalogue id from ISO_FIXTURE_CATALOG. Drives the sprite + footprint. */
+  /** Catalogue id — a built-in `ISO_FIXTURE_CATALOG` entry or a user-authored
+   *  station type id. Resolve it with `lookupFixture`, never by scanning the
+   *  built-in catalog, or authored types render as holes. Drives the sprite
+   *  + footprint. */
   catalogId: string;
   /** Display name. Defaults to the catalogue label at create time. */
   name: string;
@@ -791,6 +795,14 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
  */
 export function normalizeTwin(input: unknown): Twin {
   const t = (input ?? {}) as Partial<Twin> & Record<string, unknown>;
+  // Fixtures deleted with the sewing-fixture / handling / operator palette
+  // sections are rewritten to their surviving equivalent on load, so a
+  // factory saved before that keeps every station it had. One pass at load
+  // is enough — the rewritten id is what gets persisted from here on.
+  const relabel = <T extends { catalogId?: string }>(rec: T): T => {
+    const next = rec?.catalogId ? LEGACY_CATALOG_ID[rec.catalogId] : undefined;
+    return next ? { ...rec, catalogId: next } : rec;
+  };
   const dropDept = <T extends object>(rec: T): T => {
     if (!rec || typeof rec !== 'object' || !('deptId' in rec)) return rec;
     const rest = { ...(rec as T & { deptId?: string }) };
@@ -808,7 +820,7 @@ export function normalizeTwin(input: unknown): Twin {
     gridW: t.gridW ?? 36,
     gridH: t.gridH ?? 28,
     lines: (((t.lines as SewingLine[] | undefined) ?? []).map(dropDept)),
-    workstations: (t.workstations ?? []).map(dropDept),
+    workstations: (t.workstations ?? []).map(dropDept).map(relabel),
     connectors: t.connectors ?? [],
     operators: (((t.operators as Operator[] | undefined) ?? []).map(dropDept)),
     assignments: (t.assignments as Assignment[] | undefined) ?? [],
@@ -839,14 +851,14 @@ export function makeWorkstation(input: {
    *  add followed by a separate position write. */
   processPos?: Vec2;
 }): Workstation {
-  const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === input.catalogId);
+  const fixture = lookupFixture(input.catalogId);
   const fallbackName = fixture?.label ?? input.catalogId;
   const seedProps = defaultPropsFor(input.catalogId);
 
   // Heuristic resource defaults from the catalogue category. The user can
   // override these in the inspector; we just want a plausible starting point.
   const cat = fixture?.cat;
-  const isMachine = cat === 'sew' || cat === 'cut';
+  const isMachine = cat === 'sew' || cat === 'cut' || stationTypeFor(input.catalogId)?.form === 'machine';
   const workersRequired =
     typeof seedProps.operators_needed === 'number'
       ? (seedProps.operators_needed as number)
@@ -856,13 +868,31 @@ export function makeWorkstation(input: {
 
   // If the fixture is a PML primitive (`pml_*` id), auto-stamp the matching
   // block kind so the new workstation lands as e.g. a real Source / Queue /
-  // SelectOutput on first drop — no Inspector round-trip needed.
-  const pmlKind = pmlKindFromFixtureId(input.catalogId);
+  // SelectOutput on first drop — no Inspector round-trip needed. A
+  // user-authored station type carries its own kind for the same reason: the
+  // whole point of choosing one while authoring is that the station arrives
+  // already being that thing.
+  const stationType = stationTypeFor(input.catalogId);
 
-  // A processPos needs a block override to live on. When the fixture is not a
-  // PML primitive, pin the catalog-inferred kind — the same thing
-  // `setProcessPositions` does when it materialises an override.
-  const blockKind = pmlKind ?? (input.processPos ? inferBlockKindFromCatalog(input.catalogId) : null);
+  // A processPos needs a block override to live on, so a block authored on the
+  // PROCESS canvas resolves its kind all the way down — falling back to the
+  // catalog-inferred one, the same thing `setProcessPositions` does when it
+  // materialises an override. Off that canvas an ordinary fixture is left
+  // with no override at all and resolves its kind lazily at read time.
+  //
+  // `resolveBlockKindForDrop` is shared with the PROCESS drop ghost so the
+  // preview under the cursor and the station this function returns cannot
+  // disagree about what is being created.
+  const blockKind = input.processPos
+    ? resolveBlockKindForDrop(input.catalogId)
+    : (stationType?.kind ?? pmlKindFromFixtureId(input.catalogId));
+
+  // Authored defaults from the station type, overlaid by anything the caller
+  // passed explicitly.
+  const blockParams: Partial<PmlBlockParams> | undefined =
+    stationType || input.blockParams
+      ? { ...(stationType?.params ?? {}), ...(input.blockParams ?? {}) }
+      : undefined;
 
   return {
     id: newWorkstationId(),
@@ -883,7 +913,9 @@ export function makeWorkstation(input: {
     block: blockKind
       ? {
           kind: blockKind,
-          ...(input.blockParams ? { params: { ...input.blockParams } } : {}),
+          ...(blockParams && Object.keys(blockParams).length > 0
+            ? { params: { ...blockParams } }
+            : {}),
           ...(input.processPos ? { processPos: { ...input.processPos } } : {}),
         }
       : undefined,
@@ -1206,7 +1238,7 @@ export function migrateLegacyFactoryToTwin(
     workstations.push(
       makeWorkstation({
         lineId: sewingLine.id,
-        catalogId: 'op_sewer',
+        catalogId: pmlFixtureId('ResourcePool'),
         position: { x, y: y + 2 },
         name: `${line.name} · operator`,
       }),

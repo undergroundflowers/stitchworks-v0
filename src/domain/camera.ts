@@ -1,3 +1,5 @@
+import type { Projection } from './iso';
+
 /**
  * One camera for every canvas in the app.
  *
@@ -131,5 +133,50 @@ export function fitBounds(
     x: -((bounds.minX + bounds.maxX) / 2) * z,
     y: -((bounds.minY + bounds.maxY) / 2) * z,
     z,
+  };
+}
+
+/**
+ * The integer cell range currently inside the viewport, for a camera whose
+ * origin is the stage centre.
+ *
+ * Both SVG canvases need this: the floor to know how far to draw its base
+ * polygon and its grid, the PROCESS graph to know where to draw its grid. It
+ * is what makes either canvas feel unbounded — there is no sheet with edges,
+ * just lines drawn wherever you happen to be looking, negative coordinates
+ * included.
+ *
+ * The four screen corners are unprojected rather than the two opposite ones,
+ * because under an isometric projection the axis-aligned screen rectangle maps
+ * to a diamond: its extremes in cell space are at different corners than you
+ * would guess from a flat mapping.
+ */
+export function visibleCellRange(
+  projection: Projection,
+  cam: Cam,
+  stage: { w: number; h: number },
+  pad = 4,
+): CamBounds {
+  const W = Math.max(1, stage.w);
+  const H = Math.max(1, stage.h);
+  const corners: Array<[number, number]> = [
+    [-W / 2, -H / 2],
+    [W / 2, -H / 2],
+    [W / 2, H / 2],
+    [-W / 2, H / 2],
+  ];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [cx, cy] of corners) {
+    const cell = projection.unproject((cx - cam.x) / cam.z, (cy - cam.y) / cam.z);
+    if (cell.x < minX) minX = cell.x;
+    if (cell.x > maxX) maxX = cell.x;
+    if (cell.y < minY) minY = cell.y;
+    if (cell.y > maxY) maxY = cell.y;
+  }
+  return {
+    minX: Math.floor(minX) - pad,
+    maxX: Math.ceil(maxX) + pad,
+    minY: Math.floor(minY) - pad,
+    maxY: Math.ceil(maxY) + pad,
   };
 }

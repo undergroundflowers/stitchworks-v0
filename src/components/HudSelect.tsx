@@ -10,6 +10,7 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { Caret } from './Chevron';
 import { alpha } from '../design/color-utils';
 
 export interface HudSelectOption<T extends string> {
@@ -295,19 +296,7 @@ export function HudSelect<T extends string>({
             {headerLabel}
           </span>
         </span>
-        <span
-          aria-hidden
-          style={{
-            display: 'inline-block',
-            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
-            transition: 'transform 180ms ease',
-            color: open ? SW_COLORS.brand : palette.chevron,
-            fontSize: 10,
-            lineHeight: 1,
-          }}
-        >
-          ▾
-        </span>
+        <Caret open={open} color={palette.chevron} />
       </button>
 
       {/* Accordion panel — wrapper animates max-height for the fold effect,

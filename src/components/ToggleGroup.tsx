@@ -1,8 +1,11 @@
+import { type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 
 export interface ToggleOption<T extends string> {
   value: T;
-  label: string;
+  /** ReactNode so an option can carry its mathematical symbol alongside the
+   *  floor-language name, e.g. `Saturation (ρ)`. */
+  label: ReactNode;
 }
 
 interface ToggleGroupProps<T extends string> {
@@ -19,7 +22,11 @@ export function ToggleGroup<T extends string>({
   return (
     <div
       style={{
-        display: 'inline-flex',
+        // `flex` + wrap rather than `inline-flex`: the five service-time
+        // codes do not fit one row inside a narrow Inspector, and an
+        // inline-flex row clipped them at the pane edge instead of wrapping.
+        display: 'flex',
+        flexWrap: 'wrap',
         background: SW_COLORS.paperDeep,
         borderRadius: SW_RADIUS.sm,
         padding: 3,
@@ -36,8 +43,9 @@ export function ToggleGroup<T extends string>({
             style={{
               background: active ? SW_COLORS.paper : 'transparent',
               border: 'none',
-              padding: '6px 12px',
+              padding: '6px 10px',
               borderRadius: SW_RADIUS.sm - 2,
+              whiteSpace: 'nowrap',
               fontFamily: SW_FONTS.body,
               fontSize: 12,
               fontWeight: 600,

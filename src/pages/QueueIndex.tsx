@@ -19,8 +19,8 @@ import {
   LineSimEmpty,
   QueueDiagram,
   SectionHeader,
-  SimTransportBar,
   WipSparkline,
+  Sym,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { type StationView } from '../simulation';
@@ -110,7 +110,6 @@ export function QueueIndexPage({ embedded = false }: QueueIndexPageProps = {}) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <SimTransportBar />
           <button
             type="button"
             onClick={() => reset()}
@@ -164,7 +163,7 @@ export function QueueIndexPage({ embedded = false }: QueueIndexPageProps = {}) {
             marginBottom: 6,
           }}
         >
-          Line WIP over time
+          Line WIP over time (<Sym quantity="L" />, summed over stations)
         </div>
         <WipSparkline history={state.history} />
         <div
@@ -250,23 +249,26 @@ function StationTable({
         <Col w="40px">#</Col>
         <Col w="2fr">Operation</Col>
         <Col w="1.2fr">Classification</Col>
+        {/* Symbols go through <Sym>, which resets the header row's inherited
+            `text-transform: uppercase`. Written as plain text they render as
+            Λ, Ρ and LQ — a different letter and a different quantity. */}
         <Col w="60px" right>
-          c
+          <Sym quantity="servers" />
         </Col>
         <Col w="80px" right>
-          λ /hr
+          <Sym quantity="lambda" /> /hr
         </Col>
         <Col w="80px" right>
-          ρ̂ sim
+          <Sym quantity="rho" /> sim
         </Col>
         <Col w="70px" right>
-          ρ theory
+          <Sym quantity="rho" /> theory
         </Col>
         <Col w="70px" right>
-          L̄q sim
+          <Sym quantity="Lq" /> sim
         </Col>
         <Col w="70px" right>
-          Lq theory
+          <Sym quantity="Lq" /> theory
         </Col>
         <Col w="100px">Flags</Col>
         <Col w="100px" />

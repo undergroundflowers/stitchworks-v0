@@ -2,7 +2,18 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 
 interface StatProps {
-  label: string;
+  /**
+   * ReactNode, not string: this label is uppercased in CSS, and that transform
+   * turns ρ into Ρ and Lq into LQ. A quantity symbol must come through <Sym>,
+   * which opts out of the transform — see simulation/notation.ts.
+   */
+  label: ReactNode;
+  /**
+   * Plain-text form of the label, for the info button's `aria-label` and
+   * `title`, which cannot hold a node. Required only when `label` is not a
+   * string and `info` is set.
+   */
+  labelText?: string;
   value: ReactNode;
   unit?: string;
   delta?: number;
@@ -15,6 +26,7 @@ interface StatProps {
 
 export function Stat({
   label,
+  labelText,
   value,
   unit,
   delta,
@@ -53,7 +65,11 @@ export function Stat({
           }}
         >
           {label}
-          {info && <InfoButton label={label}>{info}</InfoButton>}
+          {info && (
+            <InfoButton label={labelText ?? (typeof label === 'string' ? label : 'this metric')}>
+              {info}
+            </InfoButton>
+          )}
         </span>
         {icon && <span style={{ fontSize: 14, color }}>{icon}</span>}
       </div>

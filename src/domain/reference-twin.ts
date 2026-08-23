@@ -29,6 +29,7 @@ import {
   makeWorkstation,
 } from './twin';
 import { defaultPropsFor } from './iso';
+import { pmlFixtureId } from './pml';
 import { defaultDist, distFromOpNotes } from '../simulation/distributions';
 
 // ============================================================================
@@ -134,7 +135,7 @@ export function buildGarmentTwin(
   workstations.push(wsSource);
 
   const wsPool = makeWorkstation({
-    catalogId: 'op_sewer',
+    catalogId: pmlFixtureId('ResourcePool'),
     position: { x: 2, y: 2 + ROW_DY * rowCount + 2 < gridH - 2 ? ORIGIN_Y + rowCount * ROW_DY : gridH - 3 },
     name: `Operators · ${operators} units`,
   });

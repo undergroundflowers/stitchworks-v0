@@ -130,9 +130,16 @@ export interface StationView {
   /** Fraction of offered arrivals turned away, 0..1. Compare against the
    *  analytical P_N for a finite-buffer station. */
   balkFraction: number;
-  /** True when the engine could not honour the authored discipline (it
-   *  dequeues FIFO). Lq/L/ρ are discipline-invariant for M/M/c, so the
-   *  analytical numbers hold; only the wait DISTRIBUTION differs. */
+  /**
+   * True when the engine could not honour the authored discipline.
+   *
+   * Now always false for Service and Queue blocks: the engine picks the next
+   * agent per discipline (FCFS head, SIRO uniform draw, Priority by order
+   * rank). Kept on the view because the analytical layer still reports
+   * discipline-invariant means — L, Lq, W and Wq are the same under all three,
+   * exactly as the textbook's Model III states — so a surface that wants to
+   * caveat the wait *distribution* has somewhere to read it from.
+   */
   disciplineNotSimulated: boolean;
 }
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useProject } from '../project';
 import { useTwin } from '../twin';
 import { useFactoryLibrary } from '../factoryLibrary';
+import { useLab } from '../lab';
 
 /**
  * True once every IndexedDB-backed store has finished async rehydration.
@@ -19,7 +20,8 @@ export function useStoresHydrated(): boolean {
     () =>
       useProject.persist.hasHydrated() &&
       useTwin.persist.hasHydrated() &&
-      useFactoryLibrary.persist.hasHydrated(),
+      useFactoryLibrary.persist.hasHydrated() &&
+      useLab.persist.hasHydrated(),
   );
 
   useEffect(() => {
@@ -27,7 +29,8 @@ export function useStoresHydrated(): boolean {
       if (
         useProject.persist.hasHydrated() &&
         useTwin.persist.hasHydrated() &&
-        useFactoryLibrary.persist.hasHydrated()
+        useFactoryLibrary.persist.hasHydrated() &&
+        useLab.persist.hasHydrated()
       ) {
         setHydrated(true);
       }
@@ -36,6 +39,7 @@ export function useStoresHydrated(): boolean {
       useProject.persist.onFinishHydration(check),
       useTwin.persist.onFinishHydration(check),
       useFactoryLibrary.persist.onFinishHydration(check),
+      useLab.persist.onFinishHydration(check),
     ];
     // Cover the race where a store hydrated between initial state and effect.
     check();

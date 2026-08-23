@@ -16,7 +16,9 @@ import {
 } from './pml';
 import type { PmlIconComponent } from '../assets/pml-icons';
 import type { MachineCode } from './machines';
+import type { StationType } from './stationTypes';
 import { glyphMark, type GlyphFamily } from './machine-glyphs';
+import { PML_CATEGORY_TINT } from '../design/tokens';
 
 // ============================================================================
 // ISO PROJECTION
@@ -453,52 +455,19 @@ function zoneFloor(label: string): IsoDrawFn {
   };
 }
 
-/** An operator: body + head.
+/**
+ * Per-PML-category accent colour, read straight from the shared token.
  *
- *  Two cuboids rather than one, because a single box is indistinguishable
- *  from a bin and LiveSim relies on operators reading as people. Role is
- *  carried by the badges the sim already draws, not by shirt colour.
- *
- *  Proportional reference (scale ≈ 0.6 m / unit): a standing adult ≈ 1.70 m
- *  → h 2.4, against a machine table+head at h 1.4. */
-function operatorFigure(): IsoDrawFn {
-  return ({ w, d, h, r = 0 }) => {
-    const bw = 0.30, bd = 0.22;
-    const hw = 0.24, hd = 0.20;
-    const bodyH = h * 0.86;
-    const off = (ow: number, od: number, z: number) => {
-      const o = isoProjR((w - ow) / 2, (d - od) / 2, z, r, w, d);
-      const base = isoProjR(0, 0, 0, r, w, d);
-      return `translate(${o.sx - base.sx}, ${o.sy - base.sy})`;
-    };
-    return createElement(
-      'g',
-      null,
-      createElement(
-        'g',
-        { transform: off(bw, bd, 0) },
-        CuboidFaces({ w: bw, d: bd, h: bodyH, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
-      ),
-      createElement(
-        'g',
-        { transform: off(hw, hd, bodyH) },
-        CuboidFaces({ w: hw, d: hd, h: h * 0.14, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
-      ),
-    );
-  };
+ * This used to be a hand-copied table whose comment claimed it matched the
+ * PROCESS canvas. It did not: five of six categories had drifted, and three of
+ * them had drifted onto the *status* ramp (`SW_PAL.red` is `alarm`,
+ * `SW_PAL.yellow` is `warn`, `SW_PAL.green` is `ok`), so a Source on the ISO
+ * floor was wearing the colour that means "choked" everywhere else. Reading
+ * the token makes the claim true by construction.
+ */
+function pmlCatAccent(cat: PmlCategory): string {
+  return PML_CATEGORY_TINT[cat]?.stroke ?? SW_PAL.ink;
 }
-
-/** Per-PML-category accent colour (matches the PROCESS canvas card tints
- *  in `pages/Builder.tsx > PML_CATEGORY_TINT` so a Source on the iso
- *  canvas reads the same as a Source in the PML diagram). */
-const PML_CAT_ACCENT: Record<PmlCategory, string> = {
-  lifecycle: SW_PAL.yellow,
-  buffer:    SW_PAL.blue,
-  service:   SW_PAL.red,
-  routing:   SW_PAL.green,
-  batch:     '#7E5BEF',
-  movement:  SW_PAL.wood,
-};
 
 /** A PML logic block. Body cuboid + the kind's icon.
  *
@@ -544,7 +513,6 @@ export type IsoCategoryId =
   | 'cut'
   | 'mh'
   | 'store'
-  | 'op'
   | 'buf'
   | 'fix'
   | 'pml';
@@ -563,7 +531,6 @@ export const ISO_CATEGORIES: IsoCategory[] = [
   { id: 'cut', label: 'Cutting', icon: '⫻' },
   { id: 'mh', label: 'Handling', icon: '⛟' },
   { id: 'store', label: 'Storage', icon: '▥' },
-  { id: 'op', label: 'Operators', icon: '☻' },
   { id: 'buf', label: 'Buffers', icon: '◫' },
   { id: 'fix', label: 'Fixtures', icon: '▭' },
   { id: 'pml', label: 'Process blocks', icon: '⚙' },
@@ -573,17 +540,13 @@ export const ISO_CATEGORIES: IsoCategory[] = [
 // APPAREL PALETTE — curated, dept-aware view of the catalog
 //
 // The Builder's workstation palette renders this instead of filtering the
-// raw fixture catalog by category. Items are grouped by what an apparel
-// IE actually thinks about: sewing machines vs. sewing fixtures, cutting
-// machines vs. cutting fixtures, materials handling, and operators.
-// Adding a new asset = add the catalog entry above, then add its id here.
+// raw fixture catalog by category. Only sewing machines ship built-in —
+// fixtures, handling and operators used to be fixed lists here and are now
+// authored by the user as station types (see `domain/stationTypes.ts`),
+// which the palette renders as its own sections alongside this one.
 // ============================================================================
 
-export type ApparelCategoryId =
-  | 'sew_mach'
-  | 'sew_fix'
-  | 'material'
-  | 'operator';
+export type ApparelCategoryId = 'sew_mach';
 
 export interface ApparelCategory {
   id: ApparelCategoryId;
@@ -592,22 +555,18 @@ export interface ApparelCategory {
 }
 
 export const APPAREL_CATEGORIES: ApparelCategory[] = [
-  { id: 'sew_mach', label: 'Sewing machines',  icon: '⌃' },
-  { id: 'sew_fix',  label: 'Sewing fixtures',  icon: '▭' },
-  { id: 'material', label: 'Materials handling', icon: '⛟' },
-  { id: 'operator', label: 'Operators',         icon: '☻' },
+  { id: 'sew_mach', label: 'Sewing machines', icon: '⌃' },
 ];
 
-/** Curated apparel asset list. Maps each apparel category to the catalogue
- *  ids the user should see in that group, in the order they should appear.
- *  Renamed from APPAREL_PALETTE to disambiguate from palette.ts's flat
- *  PaletteElement[] of the same name (caused a star-export conflict).
+/** The one built-in palette section: the sewing machines a garment op can
+ *  be run on, in the order they should appear. Renamed from APPAREL_PALETTE
+ *  to disambiguate from palette.ts's flat PaletteElement[] of the same name
+ *  (caused a star-export conflict).
  *
  *  Sewing-floor scope: cutting-room assets (spreaders, knives, CNC cutter,
- *  marker plotter, cut/inspection tables, fabric roll rack) and the
- *  role-specific operators are deliberately absent. They remain in
- *  ISO_FIXTURE_CATALOG so factories that already placed them still render
- *  and WORKER_ROLE_FIXTURE still resolves — they're just not offered. */
+ *  marker plotter, cut/inspection tables, fabric roll rack) are absent but
+ *  remain in ISO_FIXTURE_CATALOG, so factories that already placed them —
+ *  and the .xlsx floor importer — still resolve. */
 
 export const APPAREL_FIXTURE_PALETTE: Record<ApparelCategoryId, string[]> = {
   sew_mach: [
@@ -620,13 +579,6 @@ export const APPAREL_FIXTURE_PALETTE: Record<ApparelCategoryId, string[]> = {
     'a_kansai',
     'a_embroidery',
   ],
-  sew_fix: ['a_iron_inline', 'a_wip_rack', 'a_op_desk'],
-  // Bundle trolley moves work between sewing operations; the fabric roll
-  // rack belongs to the cutting room / store.
-  material: ['a_bundle_trolley'],
-  // One generic operator. Roles (sewer, helper, supervisor, …) are being
-  // superseded by a user-authored operator-type feature.
-  operator: ['op_generic'],
 };
 
 // ============================================================================
@@ -692,21 +644,6 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   { id: 'st_roll', cat: 'store', label: 'Fabric roll', w: 1, d: 3, h: 0.8, draw: fixtureBox('ROLL') },
   { id: 'st_bin', cat: 'store', label: 'Bin shelf', w: 2, d: 1, h: 3.5, draw: fixtureBox('BIN') },
 
-  // --- OPERATORS ---
-  // Standing operators — h=2.4 puts a worker at ~1.7m which is 1.7× a
-  // sewing-machine table+head (h=1.4). Matches real-floor anthropometry so
-  // workers visually overhang their machines rather than reading shorter.
-  // The palette offers only `op_generic` — Stitchworks is sewing-floor
-  // centric and roles are being replaced by a user-authored operator-type
-  // feature. The role-specific fixtures below stay in the catalogue because
-  // WORKER_ROLE_FIXTURE and already-placed operators still resolve to them.
-  { id: 'op_generic', cat: 'op', label: 'Operator', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-  { id: 'op_sewer', cat: 'op', label: 'Sewer', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-  { id: 'op_cutter', cat: 'op', label: 'Cutter', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-  { id: 'op_helper', cat: 'op', label: 'Helper', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-  { id: 'op_super', cat: 'op', label: 'Supervisor', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-  { id: 'op_qc', cat: 'op', label: 'QC inspector', w: 1, d: 1, h: 2.4, draw: operatorFigure() },
-
   // --- BUFFERS ---
   { id: 'buf_in', cat: 'buf', label: 'Inbound buffer', w: 2, d: 2, h: 0.4, draw: fixtureBox('IN') },
   { id: 'buf_out', cat: 'buf', label: 'Outbound buffer', w: 2, d: 2, h: 0.4, draw: fixtureBox('OUT') },
@@ -732,11 +669,6 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   { id: 'a_kansai',     cat: 'sew', label: 'Kansai · Multi-needle',      w: 1, d: 2, h: 1.4, draw: machineBox('edge', 'KS')  },
   { id: 'a_embroidery', cat: 'sew', label: 'Embroidery · Single-head',   w: 2, d: 3, h: 1.6, draw: machineBox('point', 'EMB') },
 
-  // ─── APPAREL — SEWING FIXTURES & SUPPORT ────────────────────────────────
-  { id: 'a_iron_inline', cat: 'fix', label: 'Inline iron table', w: 2, d: 1, h: 1.1, draw: machineBox('plate', 'PRESS') },
-  { id: 'a_wip_rack',    cat: 'fix', label: 'WIP buffer rack',   w: 2, d: 1, h: 3.5, draw: fixtureBox('WIP')      },
-  { id: 'a_op_desk',     cat: 'fix', label: 'Operator desk',     w: 1, d: 1, h: 1.0, draw: machineBox('bench', 'MNL')     },
-
   // ─── APPAREL — CUTTING MACHINES ─────────────────────────────────────────
   { id: 'a_spread_manual', cat: 'cut', label: 'Spread Table · Manual',   w: 6, d: 2, h: 1.0, draw: machineBox('plate', 'SPR') },
   { id: 'a_spread_auto',   cat: 'cut', label: 'Auto Spreader',           w: 6, d: 2, h: 1.4, draw: machineBox('plate', 'SPR')          },
@@ -751,7 +683,6 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
 
   // ─── APPAREL — MATERIALS & HANDLING ─────────────────────────────────────
   { id: 'a_fabric_rack',   cat: 'store', label: 'Fabric Roll Rack', w: 4, d: 1, h: 4.5, draw: fixtureBox('ROLL')          },
-  { id: 'a_bundle_trolley',cat: 'mh',    label: 'Bundle Trolley',   w: 1, d: 2, h: 1.0, draw: fixtureBox('CART')             },
 
   // ─── PML — PROCESS MODELING LIBRARY PRIMITIVES ──────────────────────────
   // Generated from PML_BLOCK_LIBRARY so adding a new kind in pml.ts adds a
@@ -765,7 +696,7 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
     w: 2,
     d: 2,
     h: 1.2,
-    draw: pmlBlock(spec.Icon, PML_CAT_ACCENT[spec.category]),
+    draw: pmlBlock(spec.Icon, pmlCatAccent(spec.category)),
   })),
 ];
 
@@ -796,15 +727,15 @@ export const MACHINE_CODE_TO_ISO_FIXTURE: Record<string, string> = {
   CUT:   'a_knife_straight',
   CAD:   'a_cnc_cutter',
   SPR:   'a_spread_auto',
-  FUSE:  'a_iron_inline',
-  PRESS: 'a_iron_inline',
-  STEAM: 'a_iron_inline',
+  FUSE:  'fx_press',
+  PRESS: 'fx_press',
+  STEAM: 'fx_press',
   INSP:  'a_inspect_table',
-  MNL:   'a_op_desk',
+  MNL:   'fx_table',
 };
 
 /** Inverse bridge: iso fixture id → top-down machine glyph code. The forward
- *  map above is lossy (FUSE/PRESS/STEAM all share a_iron_inline), so the
+ *  map above is lossy (FUSE/PRESS/STEAM all share fx_press), so the
  *  inverse is authored explicitly. Used by the Builder's 2D plan view to
  *  render `assets/workstations.tsx` top-down sprites for machine fixtures;
  *  ids missing here (racks, trolleys, buffers, zones, operators, PML blocks)
@@ -825,41 +756,71 @@ export const ISO_FIXTURE_TO_MACHINE_CODE: Record<string, MachineCode> = {
   a_knife_band: 'CUT', cut_band: 'CUT',
   a_cnc_cutter: 'CAD', cut_cnc: 'CAD',
   a_spread_auto: 'SPR', a_spread_manual: 'SPR', cut_spread: 'SPR',
-  a_iron_inline: 'PRESS', fx_press: 'PRESS',
+  fx_press: 'PRESS',
   a_inspect_table: 'INSP', fx_qctab: 'INSP',
-  a_op_desk: 'MNL',
+  fx_table: 'MNL',
 };
 
-/** Map each worker archetype role to its iso operator fixture. Roles that
- *  share visual identity collapse onto the same operator block (e.g. all
- *  QC-flavoured roles use op_qc). */
-export const WORKER_ROLE_TO_ISO_FIXTURE: Record<string, string> = {
-  sew_op:           'op_sewer',
-  helper:           'op_helper',
-  cutter:           'op_cutter',
-  spreader:         'op_cutter',
-  bundler:          'op_helper',
-  fuser:            'op_sewer',
-  embroidery_op:    'op_sewer',
-  qc_inline:        'op_qc',
-  qc_final:         'op_qc',
-  presser:          'op_sewer',
-  packer:           'op_helper',
-  material_handler: 'op_helper',
-  supervisor:       'op_super',
-  merchandiser:     'op_super',
+/**
+ * Build the iso fixture for a user-authored station type.
+ *
+ * Lives here rather than in `stationTypes.ts` so `machineBox` / `fixtureBox`
+ * / `pmlBlock` stay private to this module: a custom type is drawn by the
+ * same three functions the built-in catalog uses, which is what keeps an
+ * authored station from looking like a foreign object on the floor.
+ */
+export function fixtureForStationType(t: StationType): IsoFixture {
+  const draw =
+    t.form === 'machine'
+      ? machineBox(t.glyph, t.code)
+      : t.form === 'block'
+        ? pmlBlock(PML_BLOCK_LIBRARY[t.kind].Icon, pmlCatAccent(PML_BLOCK_LIBRARY[t.kind].category))
+        : fixtureBox(t.code);
+  return {
+    id: t.id,
+    // `fix` is the catalog's "a thing on the floor with no further
+    // taxonomy" bucket — the right home for an authored type, and it keeps
+    // LiveSim's ambient palette and `defaultPropsFor` on their generic paths.
+    cat: 'fix',
+    label: t.label,
+    w: t.w,
+    d: t.d,
+    h: t.h,
+    draw,
+  };
+}
+
+/**
+ * Catalog ids that no longer exist, and what they become.
+ *
+ * The sewing-fixture / materials-handling / operator palette sections were
+ * removed — the user authors those as station types now — and their fixtures
+ * went with them. A factory saved before that still carries the old ids, so
+ * every id is rewritten to the nearest surviving fixture: the iron and the
+ * operator desk keep their artwork under the catalog-only `fx_*` entries, the
+ * rack and trolley become the generic buffer/cart, and the operator figures
+ * become the PML ResourcePool block they always meant in the model.
+ *
+ * Applied once when a twin is loaded (`store/twin.ts`) and again as a
+ * fallback in `lookupFixture`, so a stale id can never render as a hole.
+ */
+export const LEGACY_CATALOG_ID: Record<string, string> = {
+  a_iron_inline: 'fx_press',
+  a_op_desk: 'fx_table',
+  a_wip_rack: 'buf_wip',
+  a_bundle_trolley: 'mh_trolley',
+  op_generic: pmlFixtureId('ResourcePool'),
+  op_sewer: pmlFixtureId('ResourcePool'),
+  op_cutter: pmlFixtureId('ResourcePool'),
+  op_helper: pmlFixtureId('ResourcePool'),
+  op_super: pmlFixtureId('ResourcePool'),
+  op_qc: pmlFixtureId('ResourcePool'),
 };
 
 /** Look up the iso fixture for a MachineCode or any catalog id. Returns the
  *  fixture object (with `draw`, `w`, `d`, `h`) or null. */
 export function isoFixtureForMachineCode(code: string): IsoFixture | null {
   const fid = MACHINE_CODE_TO_ISO_FIXTURE[code] ?? code;
-  return ISO_FIXTURE_CATALOG.find((f) => f.id === fid) ?? null;
-}
-
-/** Look up the iso fixture for a WorkerRole. */
-export function isoFixtureForWorkerRole(role: string): IsoFixture | null {
-  const fid = WORKER_ROLE_TO_ISO_FIXTURE[role] ?? 'op_helper';
   return ISO_FIXTURE_CATALOG.find((f) => f.id === fid) ?? null;
 }
 
@@ -888,9 +849,6 @@ const APPAREL_DEFAULT_PROPS: Record<string, IsoFixtureProps> = {
   a_kansai:      { capacity_per_hr: 128, cycle_s: 28, skill_required: 3, operators_needed: 1, accepts: 'waistband-strip', produces: 'multi-needle-band' },
   a_embroidery:  { capacity_per_hr:  20, cycle_s:180, skill_required: 2, operators_needed: 1, accepts: 'panel',           produces: 'embroidered-panel' },
 
-  a_iron_inline: { capacity_per_hr: 180, cycle_s: 20, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'pressed-pieces' },
-  a_wip_rack:    { capacity_units: 60, occupied_units: 0 },
-  a_op_desk:     { occupants: 1 },
 
   a_spread_manual:  { capacity_per_hr:  72, cycle_s: 50, skill_required: 3, operators_needed: 2, accepts: 'fabric-rolls', produces: 'fabric-lay' },
   a_spread_auto:    { capacity_per_hr: 150, cycle_s: 24, skill_required: 3, operators_needed: 1, accepts: 'fabric-rolls', produces: 'fabric-lay' },
@@ -902,7 +860,6 @@ const APPAREL_DEFAULT_PROPS: Record<string, IsoFixtureProps> = {
   a_inspect_table:  { capacity_per_hr: 120, cycle_s: 30, skill_required: 3, operators_needed: 1, accepts: 'fabric-roll', produces: 'inspected-roll · 4pt' },
 
   a_fabric_rack:    { capacity_units: 24, occupied_units: 0, accepts: 'fabric-rolls' },
-  a_bundle_trolley: { capacity_units: 30, occupied_units: 0, accepts: 'cut-bundles,sewn-bundles' },
 };
 
 export function defaultPropsFor(catalogId: string): IsoFixtureProps {
@@ -933,7 +890,6 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
       capacity_per_hr: 12,
       accepts: 'pallets,trolleys',
     };
-  if (a.cat === 'op') return { ...base, skill: 3, max_machines: 1 };
   if (a.cat === 'buf') return { ...base, capacity: 30, current: 0 };
   if (a.cat === 'conv') return { ...base, speed_m_min: 12, capacity_per_hr: 240 };
   if (a.cat === 'store') return { ...base, capacity_units: 80, occupied_units: 0 };

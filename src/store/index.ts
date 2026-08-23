@@ -1,3 +1,8 @@
+// Side-effect import: binds the project's station types to the domain-layer
+// fixture registry. Must run before anything resolves a catalog id, which is
+// why it sits at the top of the store barrel every page already imports.
+import './stationTypeSync';
+
 export {
   useProject,
   downloadProjectJson,

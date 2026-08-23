@@ -21,6 +21,7 @@ import type { SimState, StationView } from './sim-state';
 import type { BuildFromTwinMeta } from './model-from-twin';
 import { useProject } from '../store/project';
 import { useSimScope } from '../store/simScope';
+import { useGarments } from '../store/garments';
 import { simSpecKey, type SimSpec } from './sim-spec';
 import { useSimSession } from './useSimSession';
 import type { UseSimResult } from './usePmlSim';
@@ -51,6 +52,9 @@ export function useMultiPmlSim(
   opts?: { durationMin?: number; seed?: number; recordFlow?: boolean; warmupMin?: number },
 ): UseMultiPmlSimResult {
   const scopeWarmup = useSimScope((s) => s.warmupMin);
+  // Effective catalog (built-ins + project edits) so the engine's op-level
+  // resolvers see what the user authored, not the frozen built-ins.
+  const garmentsById = useGarments().byId;
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
   const recordFlow = opts?.recordFlow ?? false;
@@ -64,13 +68,14 @@ export function useMultiPmlSim(
         twin: lt.twin,
         garment: lt.garment,
       })),
+      garmentsById,
       durationMin,
       seed,
       samplePeriodMin: 1,
       recordFlow,
       warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
     }),
-    [lineTwins, durationMin, seed, recordFlow, warmupMin],
+    [lineTwins, garmentsById, durationMin, seed, recordFlow, warmupMin],
   );
 
   // Empty input ⇒ no key, no session, no interference. LiveSim renders this

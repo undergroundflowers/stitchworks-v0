@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Tag, Logo, useConfirm } from '../components';
+import { Card, Button, Chevron, Tag, Logo, useConfirm } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import {
@@ -173,12 +173,7 @@ export function MenuPage() {
             </span>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...SW_TYPE.kicker, fontWeight: 600, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
               STORED ON THIS DEVICE
-              <span
-                aria-hidden="true"
-                style={{ display: 'inline-block', transition: 'transform 160ms', transform: libraryOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}
-              >
-                ▾
-              </span>
+              <Chevron open={libraryOpen} />
             </span>
           </button>
           {libraryOpen && (

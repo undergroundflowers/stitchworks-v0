@@ -37,11 +37,16 @@ import {
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
-import { GARMENT_TEMPLATES } from '../domain';
+import { GARMENT_TEMPLATES, type GarmentTemplate } from '../domain';
 import { PRODUCTION_SYSTEMS } from '../domain/routings';
 import { changeoverDurationMin } from '../domain/changeover';
 import { MinHeap, mulberry32 } from './priority-queue';
-import { sample as sampleDist, type ServiceDist } from './distributions';
+import {
+  sample as sampleDist,
+  scaleServiceDist,
+  type ServiceDist,
+} from './distributions';
+import type { QueueDiscipline } from './queueing';
 
 // ============================================================================
 // PUBLIC API
@@ -89,6 +94,25 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
       level: 'warn',
       message: 'No Sink blocks. Agents will pile up at the end of the line and lead-time stats will be empty.',
     });
+  }
+
+  // Kendall–Lee honesty: the `a` field of every station's classification says
+  // M — Poisson arrivals — which holds only if the Source actually draws
+  // exponential gaps. Without an inter-arrival distribution the engine emits
+  // on a fixed 60/rate interval, which is a D arrival process, and every
+  // downstream analytical number is then solved for a model the run is not.
+  for (const ws of blockByKind.get('Source') ?? []) {
+    if (!getBlockParams(ws).arrivalDist) {
+      issues.push({
+        level: 'warn',
+        wsId: ws.id,
+        message:
+          `"${ws.name}" releases bundles on a fixed interval, not a Poisson stream. `
+          + 'The queueing classification assumes M (exponential gaps), so the '
+          + 'closed-form numbers will not match the run. Give the Source an '
+          + 'exponential inter-arrival distribution to make the M honest.',
+      });
+    }
   }
 
   // Service ↔ ResourcePool binding (implicit v1). Scoped to the sewing line,
@@ -235,6 +259,20 @@ export interface ChangeoverSpec {
 
 export interface PmlSimOpts {
   twin: Twin;
+  /**
+   * All known garment templates — the built-ins with the project's edits
+   * applied on top (`useGarments().byId` / `effectiveGarments(...).byId`).
+   *
+   * The op-level resolvers (`serversFor`, `systemCapacityFor`,
+   * `disciplineFor`) fall back to reading the operation off its garment. Left
+   * to themselves they read the frozen built-in catalog, which means a
+   * queueing parameter the user edited in the Inspector — c, N or the
+   * discipline — was silently ignored by the run unless it had also been baked
+   * into the workstation's block params. Passing the effective map closes that
+   * gap. Omit it and the resolvers fall back to the built-ins, which is what
+   * they did before.
+   */
+  garmentsById?: Record<string, GarmentTemplate>;
   /** Simulated duration in MINUTES. Tier-1 default: 480 (= one 8h shift). */
   durationMin: number;
   /** Seed for the RNG. Use the same seed for deterministic comparison. */
@@ -599,6 +637,11 @@ interface OperatorPool {
   capacity: number;
   /** Currently-busy units. */
   busy: number;
+  /** Stations queued on this pool, FCFS by the instant they first found every
+   *  unit taken. A Service that loses the race for an operator parks its id
+   *  here so the next release can wake it — without this the seize path was
+   *  write-only and the starved station sat idle behind a non-empty queue. */
+  waiting: string[];
   /** Cumulative busy-unit-minutes for utilization calc. */
   cumBusyUnitMin: number;
   lastChangeAt: number;
@@ -627,6 +670,12 @@ type Event =
   // Zero-delay (fires at the same sim time) so back-pressure relief cascades
   // upstream without recursion. De-duplicated via `retryScheduled`.
   | { time: number; kind: 'retryForward'; wsId: string }
+  // P6 — an operator pool handed back a unit; re-attempt the SEIZE at the
+  // stations queued on that pool. Zero-delay (fires at the same sim time) so a
+  // freed operator is picked up at the instant of release rather than whenever
+  // the starved station next happens to be poked. De-duplicated via
+  // `poolRetryScheduled`.
+  | { time: number; kind: 'poolRelease'; poolKey: string }
   // P5 — zero every queueing accumulator so the end-of-run rollup describes
   // the post-transient regime. Fires once, at `warmupMin`.
   | { time: number; kind: 'warmupReset' }
@@ -636,6 +685,10 @@ type Event =
 interface BlockState {
   ws: Workstation;
   kind: PmlBlockKind;
+  /** Queue discipline — decides WHICH waiting agent is picked next, not how
+   *  many. Means (L, Lq, W, Wq) are identical across disciplines; what changes
+   *  is the spread of individual waits, which is exactly what the sim is for. */
+  discipline: QueueDiscipline;
   /** Internal FIFO queue. Used by Queue, Service (when all units busy),
    *  Batch (accumulator), Hold (when blocked), SelectOutput, and the
    *  pass-through fallback — i.e. single-input blocks. */
@@ -944,8 +997,40 @@ function opCycleMinFor(ws: Workstation): number | null {
 
 /** Service / Delay cycle distribution if set; undefined ⇒ engine falls
  *  back to the deterministic `cycleMin`. */
-function cycleDistFor(ws: Workstation): ServiceDist | undefined {
-  return getBlockParams(ws).cycleDist;
+/**
+ * Per-agent service-time distribution — the `b` field of Kendall–Lee.
+ *
+ * Precedence mirrors `serversFor` / `systemCapacityFor`: the station's own
+ * block param wins (it is the per-station override the twin builders bake),
+ * then the bound operation's authored `serviceDistribution`.
+ *
+ * The op-level tier is what makes the textbook's Models IV, V and VI runnable.
+ * The Builder Inspector writes the service distribution onto the operation,
+ * but the engine read only `block.params.cycleDist` — so choosing Det (D) or
+ * Erlang (Eₖ) relabelled the station M/D/1 or M/E_k/1 while the run kept
+ * sampling whatever had been baked at build time. The classification was
+ * honest about the intent and dishonest about the run.
+ */
+function cycleDistFor(
+  ws: Workstation,
+  catalog: GarmentCatalog | undefined,
+  opEfficiency: Record<string, number> | undefined,
+  shareFactor: number,
+): ServiceDist | undefined {
+  const base = getBlockParams(ws).cycleDist ?? resolveOp(ws, catalog)?.serviceDistribution;
+  if (!base) return undefined;
+  // `cycleMinFor` divides the deterministic cycle by efficiency and by the
+  // operator's share factor. The sampled path has to take the same two
+  // adjustments or a station with a shared operator (or a skill multiplier)
+  // runs at nominal speed the moment the user picks any distribution —
+  // silently faster than the identical station on the deterministic path.
+  // scaleServiceDist moves location and scale together, so Cs is preserved and
+  // the Kendall service code does not change.
+  const opId = ws.operation?.opId;
+  const eff = clampSkillEfficiency(opId ? opEfficiency?.[opId] : undefined);
+  const share = clampShareFactor(shareFactor);
+  const factor = 1 / (eff * share);
+  return factor === 1 ? base : scaleServiceDist(base, factor);
 }
 
 /** Source arrival interval in MINUTES per agent (deterministic fallback). */
@@ -980,13 +1065,8 @@ function batchSizeFor(ws: Workstation): number {
  *  workstation isn't bound to an op that pins one. This is the SAME field the
  *  analytical M/M/c/K model reads (`Operation.queueCapacity`), so a Service
  *  authored with a finite buffer behaves consistently in DES and theory. */
-function resolveOpQueueCapacity(ws: Workstation): number | null {
-  const opId = ws.operation?.opId;
-  const garmentId = ws.operation?.garmentId;
-  if (!opId || !garmentId) return null;
-  const garment = GARMENT_TEMPLATES[garmentId];
-  if (!garment) return null;
-  const op = garment.operations.find((o) => o.id === opId);
+function resolveOpQueueCapacity(ws: Workstation, catalog?: GarmentCatalog): number | null {
+  const op = resolveOp(ws, catalog);
   if (!op || op.queueCapacity == null || op.queueCapacity <= 0) return null;
   return op.queueCapacity;
 }
@@ -1000,25 +1080,37 @@ function resolveOpQueueCapacity(ws: Workstation): number | null {
  *  DES reads the same value the analytical M/M/c/K model reads off the live
  *  operation. The op-level lookup is a fallback for twins built without baking
  *  (imports, hand-built) and reads the static garment seed. */
-export function systemCapacityFor(ws: Workstation): number {
+export function systemCapacityFor(ws: Workstation, catalog?: GarmentCatalog): number {
   const blockCap = getBlockParams(ws).queueCapacity; // 0 = unbounded
   if (blockCap > 0) return blockCap;
-  const opCap = resolveOpQueueCapacity(ws);
+  const opCap = resolveOpQueueCapacity(ws, catalog);
   if (opCap != null) return opCap;
   return Infinity;
 }
 
 /** Operation-level parallel-server count c, or null when the workstation
  *  isn't bound to an op that pins one. Mirrors `resolveOpQueueCapacity`. */
-function resolveOpServers(ws: Workstation): number | null {
+function resolveOpServers(ws: Workstation, catalog?: GarmentCatalog): number | null {
+  const op = resolveOp(ws, catalog);
+  if (!op || op.servers == null || op.servers <= 0) return null;
+  return Math.max(1, Math.round(op.servers));
+}
+
+/** Effective garment catalog: built-ins with project edits applied. */
+type GarmentCatalog = Record<string, GarmentTemplate>;
+
+/**
+ * The operation a workstation is bound to, resolved through the supplied
+ * catalog when there is one and the frozen built-ins otherwise. Single place
+ * so c, N and the discipline can never resolve against different catalogs.
+ */
+function resolveOp(ws: Workstation, catalog?: GarmentCatalog) {
   const opId = ws.operation?.opId;
   const garmentId = ws.operation?.garmentId;
   if (!opId || !garmentId) return null;
-  const garment = GARMENT_TEMPLATES[garmentId];
+  const garment = (catalog ?? GARMENT_TEMPLATES)[garmentId] ?? GARMENT_TEMPLATES[garmentId];
   if (!garment) return null;
-  const op = garment.operations.find((o) => o.id === opId);
-  if (!op || op.servers == null || op.servers <= 0) return null;
-  return Math.max(1, Math.round(op.servers));
+  return garment.operations.find((o) => o.id === opId) ?? null;
 }
 
 /**
@@ -1034,12 +1126,29 @@ function resolveOpServers(ws: Workstation): number | null {
  * `getBlockParams(ws).servers`, so an operation authored with c = 3 was
  * silently simulated as c = 1 unless the value had been baked into the block.
  */
-export function serversFor(ws: Workstation): number {
+export function serversFor(ws: Workstation, catalog?: GarmentCatalog): number {
   const p = ws.block?.params?.servers;
   if (p != null && p > 0) return Math.max(1, Math.round(p));
-  const opServers = resolveOpServers(ws);
+  const opServers = resolveOpServers(ws, catalog);
   if (opServers != null) return opServers;
   return Math.max(1, Math.round(getBlockParams(ws).servers));
+}
+
+/**
+ * Resolve a station's queue discipline — the fifth field of Kendall–Lee.
+ *
+ * Same precedence idea as `serversFor` / `systemCapacityFor`: read it off the
+ * bound operation, default to FCFS. Until this existed the discipline was
+ * authored, stored and shown in the classification label but the engine always
+ * popped the head of the buffer, so Model III (M/M/1 : ∞/SIRO) was a label with
+ * no behaviour behind it.
+ */
+export function disciplineFor(ws: Workstation, catalog?: GarmentCatalog): QueueDiscipline {
+  // Same precedence as `serversFor` / `systemCapacityFor`: the per-station
+  // block override wins, then the shared operation, then the default.
+  return (
+    ws.block?.params?.queueDiscipline ?? resolveOp(ws, catalog)?.queueDiscipline ?? 'FCFS'
+  );
 }
 
 // ============================================================================
@@ -1066,6 +1175,17 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   const { twin, durationMin, seed } = opts;
   const samplePeriodMin = opts.samplePeriodMin ?? 1;
   const rng = mulberry32(seed);
+  /**
+   * Separate stream for the queue-discipline draw.
+   *
+   * SIRO needs a random number per dequeue. Taking it from `rng` would shift
+   * every subsequent service-time and routing draw, so an FCFS run and a SIRO
+   * run at the same seed would differ for two reasons at once — the discipline
+   * AND a completely different random stream — and neither could be attributed.
+   * Its own stream keeps common random numbers intact: change only the
+   * discipline and only the discipline's effect shows up.
+   */
+  const disciplineRng = mulberry32(seed ^ 0x9e3779b9);
   const warnings: string[] = [];
   const samples: PmlSimSample[] = [];
   let hitUnbatchCap = false;
@@ -1125,12 +1245,13 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       busyMin: 0,
       inService: 0,
       cycleMin: cycleMinFor(ws, opts.opEfficiency, shareFactor),
-      cycleDist: cycleDistFor(ws),
+      cycleDist: cycleDistFor(ws, opts.garmentsById, opts.opEfficiency, shareFactor),
       arrivalIntervalMin: arrivalIntervalFor(ws),
       arrivalDist: arrivalDistFor(ws),
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
-      servers: serversFor(ws),
+      servers: serversFor(ws, opts.garmentsById),
+      discipline: disciplineFor(ws, opts.garmentsById),
       piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
       // P4 — order sequence tracking is enabled at engine-init time below,
       // once we know which lines have a non-empty orderSequence.
@@ -1138,7 +1259,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       orderEmittedSoFar: 0,
       // P2 — finite-buffer state. Unbounded by default → identical to the
       // pre-P2 push-semantics engine.
-      sysCapacity: systemCapacityFor(ws),
+      sysCapacity: systemCapacityFor(ws, opts.garmentsById),
       blocked: [],
       blockedMin: 0,
       blockedSince: null,
@@ -1208,6 +1329,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       key,
       capacity: 0,
       busy: 0,
+      waiting: [],
       cumBusyUnitMin: 0,
       lastChangeAt: 0,
     };
@@ -1246,6 +1368,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   /** Blocks with a retryForward already queued (de-dups the cascade so at most
    *  one pending retry exists per block per instant). Cleared when it fires. */
   const retryScheduled = new Set<string>();
+  /** Pools with a poolRelease already queued (collapses several releases at one
+   *  instant into a single sweep). Cleared when it fires. */
+  const poolRetryScheduled = new Set<string>();
 
   // ── Diagnostics ────────────────────────────────────────────────────────────
   // Reuse the same validator the toolbar's pre-flight chip uses, so the
@@ -1506,14 +1631,20 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // `advanceRotationPointer` below.
     const pool = operatorPools.get(poolKeyFor(b.ws));
     if (pool) {
-      if (pool.busy >= pool.capacity) return false; // no free unit
+      if (pool.busy >= pool.capacity) {
+        // No free unit. Park this station on the pool's wait list so the next
+        // release wakes it — returning bare `false` here is what let a station
+        // that lost the race idle behind a non-empty queue.
+        joinPoolQueue(pool, b.ws.id);
+        return false;
+      }
       bumpPoolAccum(pool, now);
       pool.busy += 1;
     }
     // Areas must be credited at the PRE-shift levels (one more waiting, one
     // fewer in service) before the mutations below.
     advanceAreas(b, now);
-    const a = b.queue.shift()!;
+    const a = dequeue(b)!;
     // Measured queue wait: the span this agent actually spent in the buffer.
     // This is the number Ŵq is built from — not Lq/λ rearranged, which is
     // what made Little's law untestable here before.
@@ -1572,6 +1703,65 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
   }
 
+  /** Is this Service ready to work and held up ONLY by the operator pool?
+   *  Mirrors every non-pool guard in `tryStartService`, so `true` means a free
+   *  unit would put it to work immediately. */
+  function starvedOnPool(b: BlockState): boolean {
+    if (b.kind !== 'Service') return false;
+    if (b.queue.length === 0) return false;
+    if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
+    return b.inService < b.servers;
+  }
+
+  /** Park a station at the BACK of a pool's wait list (idempotent). Station
+   *  counts are small, so the linear membership check is cheaper than carrying
+   *  a parallel Set. */
+  function joinPoolQueue(pool: OperatorPool, wsId: string): void {
+    if (!pool.waiting.includes(wsId)) pool.waiting.push(wsId);
+  }
+
+  /** A pool just took a unit back — schedule a zero-delay sweep if anyone is
+   *  queued on it. The releasing station keeps first refusal: its own call site
+   *  runs `tryStartService` synchronously, before this event can pop. A pool
+   *  nobody ever queued on schedules nothing, so uncontended runs are
+   *  untouched.
+   *
+   *  `retryForward` cannot stand in here: it clears DOWNSTREAM buffer space and
+   *  skips a pool-starved Service entirely, because such a station never got an
+   *  agent into service and so has an empty `blocked` list. */
+  function notifyPoolWaiters(pool: OperatorPool, now: number): void {
+    if (pool.waiting.length === 0) return;
+    if (poolRetryScheduled.has(pool.key)) return;
+    poolRetryScheduled.add(pool.key);
+    pq.push({ time: now, kind: 'poolRelease', poolKey: pool.key });
+  }
+
+  /** Hand a pool's free units to the stations queued on it, longest-waiting
+   *  first (FCFS on the resource). A station that starts and still has work
+   *  re-joins at the BACK, so one busy station cannot monopolise a pool that
+   *  several stations are waiting on — the property that keeps a serial line
+   *  flowing instead of piling every operator onto its first station.
+   *
+   *  Deterministic: the wait list is ordered by seize-failure time and mutated
+   *  only here and in `joinPoolQueue`, never by an event-heap tie-break — so a
+   *  given seed always resolves contention the same way.
+   *
+   *  Terminates: each pass either consumes a unit (bounded by `capacity`) or
+   *  drops a waiter (bounded by the list length). */
+  function wakePool(pool: OperatorPool, now: number): void {
+    let guard = pool.waiting.length + pool.capacity + 1;
+    while (pool.busy < pool.capacity && pool.waiting.length > 0 && guard-- > 0) {
+      const wsId = pool.waiting.shift()!;
+      const b = blocks.get(wsId);
+      if (!b) continue;
+      // A start consumes the unit we just freed; if this station still has
+      // work queued it goes to the back of the line rather than taking more.
+      // A station no longer startable is simply dropped — it re-registers on
+      // its next seize attempt.
+      if (tryStartService(b, now) && starvedOnPool(b)) joinPoolQueue(pool, wsId);
+    }
+  }
+
   /** Release one occupied server slot (and, for a Service, its dept-pool
    *  unit). The inverse of the seize in `tryStartService`. */
   function freeServer(b: BlockState, now: number): void {
@@ -1582,6 +1772,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       if (pool) {
         bumpPoolAccum(pool, now);
         pool.busy = Math.max(0, pool.busy - 1);
+        // The returned unit is free — wake whoever is queued on it.
+        notifyPoolWaiters(pool, now);
       }
     }
   }
@@ -1846,6 +2038,64 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
   }
 
+  /**
+   * Index of the agent this block serves next, per its queue discipline.
+   *
+   *  - **FCFS** — the head. The textbook's default and the sewing-floor norm:
+   *    the first bundle on the cart is the first one sewn.
+   *  - **SIRO** — a uniform pick over everything waiting (Model III). Drawn
+   *    from the run's seeded RNG so a replay reproduces exactly.
+   *  - **Priority** — the bundle whose order has the lowest `priority` number
+   *    (1 = highest), FIFO within a priority class. A rush order jumps the
+   *    cart. Agents with no order fall to the back of the ordering.
+   *
+   * Every discipline is work-conserving and none of them idles a free server,
+   * so the long-run means are unchanged — which is precisely the textbook's
+   * claim, and what `queueing.ts` relies on when it returns the same L, Lq, W
+   * and Wq for Model I and Model III.
+   */
+  function nextIndex(b: BlockState): number {
+    if (b.queue.length <= 1) return 0;
+    switch (b.discipline) {
+      case 'SIRO':
+        return Math.min(
+          b.queue.length - 1,
+          Math.floor(disciplineRng() * b.queue.length),
+        );
+      case 'Priority': {
+        let best = 0;
+        let bestRank = priorityRank(b.queue[0]);
+        for (let i = 1; i < b.queue.length; i++) {
+          const rank = priorityRank(b.queue[i]);
+          // Strictly-less keeps FIFO order inside a priority class.
+          if (rank < bestRank) {
+            best = i;
+            bestRank = rank;
+          }
+        }
+        return best;
+      }
+      case 'FCFS':
+      default:
+        return 0;
+    }
+  }
+
+  /** Lower sorts first. Orders without a priority, and agents without an
+   *  order, rank behind every explicitly prioritised bundle. */
+  function priorityRank(a: Agent): number {
+    if (!a.orderId) return Number.MAX_SAFE_INTEGER;
+    const order = orderById.get(a.orderId);
+    return order?.priority ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  /** Remove and return the next agent under this block's discipline. */
+  function dequeue(b: BlockState): Agent | undefined {
+    if (b.queue.length === 0) return undefined;
+    const idx = nextIndex(b);
+    return idx === 0 ? b.queue.shift() : b.queue.splice(idx, 1)[0];
+  }
+
   /** Drain a Queue block — forward head-of-line agents while the downstream
    *  target will accept. Stops when the target's buffer is full (back-pressure);
    *  the remaining agents stay in this Queue's own bounded buffer. Under the
@@ -1854,9 +2104,13 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function drainQueue(b: BlockState, now: number): void {
     if (b.kind !== 'Queue') return;
     while (b.queue.length > 0) {
-      if (!tryForwardFirstOutput(b, b.queue[0], now)) break; // downstream full
+      // Under a non-FCFS discipline the agent that leaves next is not
+      // necessarily the head, so pick first and then test THAT one against
+      // downstream capacity.
+      const idx = nextIndex(b);
+      if (!tryForwardFirstOutput(b, b.queue[idx], now)) break; // downstream full
       advanceAreas(b, now);
-      const moved = b.queue.shift()!;
+      const moved = b.queue.splice(idx, 1)[0];
       // A Queue block has no servers, so "leaving the queue" IS leaving the
       // block: credit both the wait and the sojourn from the same instant.
       b.waitSumMin += Math.max(0, now - (moved.queuedAt ?? now));
@@ -2308,6 +2562,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       const b = blocks.get(e.wsId);
       if (!b) continue;
       retryForward(b, now);
+      continue;
+    }
+
+    if (e.kind === 'poolRelease') {
+      poolRetryScheduled.delete(e.poolKey);
+      const pool = operatorPools.get(e.poolKey);
+      if (!pool) continue;
+      wakePool(pool, now);
       continue;
     }
 

@@ -6,7 +6,11 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // `.claude/worktrees` holds throwaway git worktrees created when a background
+  // task is spun off into its own copy of the repo. They contain a full second
+  // (and third) checkout, which makes typescript-eslint see several candidate
+  // tsconfig roots and fail to parse ANY file — so lint has to skip them.
+  globalIgnores(['dist', '.claude/worktrees']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

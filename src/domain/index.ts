@@ -12,6 +12,8 @@
  *   6. kpi.ts        — the formulas that turn run output into IE-friendly KPIs
  *   7. palette.ts    — the AnyLogic-style apparel palette catalog (UI-facing)
  *   8. iso.ts        — isometric fixture catalogue (Builder 2D + ISO views)
+ *   9. stationTypes.ts / fixture-registry.ts — user-authored station types,
+ *      and the lookup that resolves them and the built-in catalog together
  */
 
 export * from './machines';
@@ -23,4 +25,6 @@ export * from './kpi';
 export * from './balance-advisor';
 export * from './palette';
 export * from './iso';
+export * from './stationTypes';
+export * from './fixture-registry';
 export * from './camera';

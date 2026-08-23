@@ -9,14 +9,22 @@
  *  - ServiceQueueParams — the Builder's sim-free authoring group, where these
  *    same fields edit the operation's queueing parameters with no simulation.
  *
+ *  - BlockParamRow — one row of a PML block's authored parameters, rendered
+ *    from `PARAM_FIELDS_BY_KIND`. Used by the Builder Inspector on a selected
+ *    station and by the station-type dialog when authoring the defaults a new
+ *    type drops with, so both read identically.
+ *
  * Keeping the widgets here means a change to, say, the capacity control shows
  * up identically wherever queueing params are edited.
  */
 
-import { type CSSProperties, type ReactNode } from 'react';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import { HudSelect } from './HudSelect';
+import { FieldLabel, Sym } from './Sym';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { meanOf, type ServiceDist, type QueueDiscipline } from '../simulation';
+import { glossOf } from '../simulation/notation';
+import type { ParamFieldSpec } from '../domain/pml';
 
 export type DistKind = ServiceDist['kind'];
 
@@ -83,7 +91,7 @@ export function DistParamInputs({
       cols.push(
         <NumberField
           key="m"
-          label="Mean (min)"
+          label={<FieldLabel quantity="serviceTime" name="Mean service" />}
           value={dist.mean}
           min={0.01}
           step={0.05}
@@ -96,7 +104,7 @@ export function DistParamInputs({
       cols.push(
         <NumberField
           key="v"
-          label="Value (min)"
+          label={<FieldLabel quantity="serviceTime" name="Constant service" />}
           value={dist.value}
           min={0.01}
           step={0.05}
@@ -109,7 +117,7 @@ export function DistParamInputs({
       cols.push(
         <NumberField
           key="m"
-          label="Mean (min)"
+          label={<FieldLabel quantity="serviceTime" name="Mean service" />}
           value={dist.mean}
           min={0.01}
           step={0.05}
@@ -118,7 +126,7 @@ export function DistParamInputs({
         />,
         <NumberField
           key="v"
-          label="Variance (±%)"
+          label={<FieldLabel quantity="cs" name="Spread ±" showUnit={false} />}
           value={dist.variance * 100}
           min={0}
           max={100}
@@ -132,7 +140,7 @@ export function DistParamInputs({
       cols.push(
         <NumberField
           key="k"
-          label="Shape k"
+          label={<FieldLabel quantity="erlangK" name="Phases" />}
           value={dist.k}
           min={1}
           step={1}
@@ -141,7 +149,7 @@ export function DistParamInputs({
         />,
         <NumberField
           key="m"
-          label="Mean (min)"
+          label={<FieldLabel quantity="serviceTime" name="Mean service" />}
           value={dist.mean}
           min={0.01}
           step={0.05}
@@ -154,7 +162,7 @@ export function DistParamInputs({
       cols.push(
         <NumberField
           key="m"
-          label="Mean (min)"
+          label={<FieldLabel quantity="serviceTime" name="Mean service" />}
           value={dist.mean}
           min={0.01}
           step={0.05}
@@ -163,7 +171,7 @@ export function DistParamInputs({
         />,
         <NumberField
           key="s"
-          label="Std σ (min)"
+          label={<FieldLabel quantity="sigma" name="Std deviation" />}
           value={dist.std}
           min={0}
           step={0.05}
@@ -174,7 +182,16 @@ export function DistParamInputs({
       break;
   }
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols.length}, 1fr)`, gap: 10 }}>
+    // auto-fit rather than a fixed column count: the Inspector is resizable
+    // down to 260px, and a symbol-bearing label needs more room than the bare
+    // one did. Below the 96px floor the fields stack instead of clipping.
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(auto-fit, minmax(96px, 1fr))`,
+        gap: 10,
+      }}
+    >
       {cols}
     </div>
   );
@@ -189,7 +206,9 @@ export function NumberField({
   editable,
   onChange,
 }: {
-  label: string;
+  /** ReactNode so a caller can pass `<FieldLabel quantity="servers" />` and get
+   *  the textbook symbol beside the name without the CSS uppercase mangling it. */
+  label: ReactNode;
   value: number;
   min?: number;
   max?: number;
@@ -247,7 +266,7 @@ export function CapacityField({
           fontWeight: 700,
         }}
       >
-        Capacity (N)
+        <FieldLabel quantity="capacity" />
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
         <input
@@ -291,14 +310,16 @@ export function DropdownField<T extends string>({
   editable,
   onChange,
 }: {
-  label: string;
+  label: ReactNode;
   value: T;
   options: { value: T; label: string }[];
   editable: boolean;
   onChange: (v: T) => void;
 }) {
   return (
-    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    // minWidth:0 so the select can shrink to its grid column instead of
+    // pushing past the card edge.
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
       <span
         style={{
           fontFamily: SW_FONTS.mono,
@@ -359,4 +380,154 @@ export function patchDist(d: ServiceDist, p: Partial<DistParams>): ServiceDist {
     case 'normal':  return { kind: 'normal', mean: p.mean ?? d.mean, std: p.std ?? d.std };
     default: throw new Error(`patchDist: unsupported kind ${d.kind}`);
   }
+}
+
+
+// ============================================================================
+// BLOCK PARAM ROW
+// ============================================================================
+
+const blockFieldLabel: CSSProperties = {
+  fontFamily: SW_FONTS.body,
+  fontSize: 12,
+  fontWeight: 500,
+  letterSpacing: '0.005em',
+  color: SW_COLORS.muted,
+  display: 'block',
+};
+
+const blockInput: CSSProperties = {
+  width: '100%',
+  height: 32,
+  padding: '0 12px',
+  fontSize: 13,
+  fontFamily: SW_FONTS.mono,
+  fontWeight: 700,
+  border: `1px solid ${SW_COLORS.line}`,
+  borderRadius: SW_RADIUS.sm,
+  background: SW_COLORS.paper,
+  color: SW_COLORS.ink,
+};
+
+const helpDot = (open: boolean): CSSProperties => ({
+  background: SW_COLORS.paper,
+  border: `1px solid ${open ? SW_COLORS.brandText : SW_COLORS.line}`,
+  color: open ? SW_COLORS.brandText : SW_COLORS.muted,
+  padding: 0,
+  width: 16,
+  height: 16,
+  borderRadius: 8,
+  fontFamily: SW_FONTS.display,
+  fontSize: 10,
+  fontWeight: 900,
+  lineHeight: 1,
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+});
+
+/**
+ * One authored parameter: label, value, and a `?` toggle that reveals the
+ * explanation.
+ *
+ * The prose used to sit permanently under every input, which turned a list of
+ * four numbers into a wall of text — so it is behind the toggle now, together
+ * with the textbook gloss for the quantity when the field sets one.
+ *
+ * `onClear` is optional: the Inspector edits a station that can fall back to
+ * its catalog default, so it offers a clear; a station type is authoring the
+ * default itself and has nothing to fall back to.
+ */
+export function BlockParamRow({
+  field: f,
+  value,
+  isAuthored,
+  onSet,
+  onClear,
+}: {
+  field: ParamFieldSpec;
+  value: number;
+  isAuthored: boolean;
+  onSet: (v: number) => void;
+  onClear?: () => void;
+}) {
+  const [showHelp, setShowHelp] = useState(false);
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ ...blockFieldLabel, flex: 1 }}>
+          {f.label}{' '}
+          {f.quantity && <Sym quantity={f.quantity} bracketed color={SW_COLORS.brandText} />}{' '}
+          <span style={{ color: SW_COLORS.muted, fontWeight: 500 }}>{f.unit.trim()}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setShowHelp((v) => !v)}
+          aria-expanded={showHelp}
+          aria-label={`What is ${f.label}?`}
+          title={`What is ${f.label}?`}
+          style={helpDot(showHelp)}
+        >
+          ?
+        </button>
+        {onClear && (
+          <span
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 9,
+              fontWeight: 700,
+              color: isAuthored ? SW_COLORS.brand : SW_COLORS.muted,
+            }}
+          >
+            {isAuthored ? 'SET' : 'auto'}
+          </span>
+        )}
+        {onClear && isAuthored && (
+          <button
+            type="button"
+            onClick={onClear}
+            title="Drop this override and fall back to the catalog default"
+            style={{
+              background: SW_COLORS.paper,
+              border: `1px solid ${SW_COLORS.line}`,
+              borderRadius: SW_RADIUS.sm,
+              color: SW_COLORS.muted,
+              fontFamily: SW_FONTS.display,
+              fontWeight: 900,
+              padding: '1px 6px',
+              fontSize: 9,
+              cursor: 'pointer',
+            }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      <input
+        type="number"
+        value={value}
+        step={f.step}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          if (isFinite(v)) onSet(v);
+        }}
+        style={blockInput}
+      />
+      {showHelp && (
+        <div
+          style={{
+            marginTop: 4,
+            fontSize: 10,
+            lineHeight: 1.45,
+            color: SW_COLORS.muted,
+            whiteSpace: 'pre-line',
+          }}
+        >
+          {f.hint}
+          {f.quantity ? `\n${glossOf(f.quantity)}` : ''}
+        </div>
+      )}
+    </div>
+  );
 }

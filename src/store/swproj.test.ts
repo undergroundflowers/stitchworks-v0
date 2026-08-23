@@ -69,6 +69,40 @@ describe('.swproj format', () => {
     expect(() => parseSwproj(null)).toThrow();
   });
 
+  it('carries authored station types through export → load', () => {
+    // The library archive and the .swproj file both go through
+    // exportProject / loadProject, and `exportProject` names its fields
+    // explicitly — so a slice added to the store is dropped on save unless
+    // it is named there too. This is the guard for that.
+    const type = {
+      id: 'cst-roundtrip',
+      label: 'Inline iron',
+      group: 'Sewing fixtures',
+      form: 'bench' as const,
+      glyph: 'plate' as const,
+      code: 'IRN',
+      w: 2,
+      d: 1,
+      h: 1.1,
+      kind: 'Service' as const,
+      params: { cycleS: 20 },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    useProject.getState().addStationType(type);
+
+    const exported = useProject.getState().exportProject();
+    expect(exported.stationTypes).toContainEqual(type);
+
+    useProject.getState().removeStationType(type.id);
+    expect(useProject.getState().stationTypes).toHaveLength(0);
+
+    const applied = applySwproj(parseSwproj(JSON.parse(JSON.stringify(
+      buildSwproj(exported, sampleTwinExport(), '2026-01-01T00:00:00.000Z'),
+    ))));
+    expect(applied.ok).toBe(true);
+    expect(useProject.getState().stationTypes).toContainEqual(type);
+  });
+
   it('applySwproj restores the twin into the live store', () => {
     const project = useProject.getState().exportProject();
     const demo = buildStarterLine();

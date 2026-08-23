@@ -71,7 +71,7 @@ export interface ImportedFloor {
 }
 
 // ── Modelama machine vernacular → ISO_FIXTURE_CATALOG id ─────────────────
-// Long/specific patterns first; falls through to a_op_desk if nothing
+// Long/specific patterns first; falls through to fx_table if nothing
 // matches so unrecognised cells still place a station (and we surface a
 // warning). Each entry covers the abbreviations Modelama actually uses on
 // these layout sheets — see the four xlsx samples in MODELAMA DATA/.
@@ -95,9 +95,9 @@ const FIXTURE_PATTERNS: { pattern: RegExp; catalogId: string; label: string }[] 
   { pattern: /\b(cutter|cut\b|straight\s*knife|band\s*knife)/i, catalogId: 'a_knife_straight', label: 'cutter' },
   { pattern: /\bspread/i, catalogId: 'a_spread_auto', label: 'spreader' },
   // Pressing / fusing / steam
-  { pattern: /\bfusing\b|\bfuse\b/i, catalogId: 'a_iron_inline', label: 'fusing' },
-  { pattern: /\bsteam\s*tunnel\b|\bsteam\b/i, catalogId: 'a_iron_inline', label: 'steam' },
-  { pattern: /\biron\b|\bpress\b/i, catalogId: 'a_iron_inline', label: 'iron / press' },
+  { pattern: /\bfusing\b|\bfuse\b/i, catalogId: 'fx_press', label: 'fusing' },
+  { pattern: /\bsteam\s*tunnel\b|\bsteam\b/i, catalogId: 'fx_press', label: 'steam' },
+  { pattern: /\biron\b|\bpress\b/i, catalogId: 'fx_press', label: 'iron / press' },
   // Inspection
   { pattern: /\btable\b/i, catalogId: 'a_inspect_table', label: 'inspection table' },
   { pattern: /\binspect|\bqc\b|\baql\b/i, catalogId: 'a_inspect_table', label: 'inspection' },
@@ -105,7 +105,7 @@ const FIXTURE_PATTERNS: { pattern: RegExp; catalogId: string; label: string }[] 
   { pattern: /\bdnl(s|m|c|ec)?\b|\bdn\b|\bdouble\s*needle/i, catalogId: 'a_dnls', label: 'double needle' },
   { pattern: /\bsn(l|e|k|c|ec)?\w*\b|\bsn\b|\bsingle\s*needle|\block\s*stitch/i, catalogId: 'a_snls', label: 'single needle' },
   // Manual helper / hand
-  { pattern: /\bhd\b|\bhelper\b|\bhand\b|\bmnl\b|\bmanual\b/i, catalogId: 'a_op_desk', label: 'manual / helper' },
+  { pattern: /\bhd\b|\bhelper\b|\bhand\b|\bmnl\b|\bmanual\b/i, catalogId: 'fx_table', label: 'manual / helper' },
 ];
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -278,11 +278,11 @@ function pickNextValue(row: unknown[], from: number): string | undefined {
 
 function resolveCatalogId(raw: string): { catalogId: string; matched: boolean } {
   const cleaned = (raw ?? '').toString().trim();
-  if (!cleaned) return { catalogId: 'a_op_desk', matched: false };
+  if (!cleaned) return { catalogId: 'fx_table', matched: false };
   for (const { pattern, catalogId } of FIXTURE_PATTERNS) {
     if (pattern.test(cleaned)) return { catalogId, matched: true };
   }
-  return { catalogId: 'a_op_desk', matched: false };
+  return { catalogId: 'fx_table', matched: false };
 }
 
 function normaliseHeaderText(v: unknown): string {

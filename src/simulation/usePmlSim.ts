@@ -27,6 +27,7 @@ import { emptyPmlSimState, type PmlTwinView } from './pml-to-sim-state';
 import type { SimState } from './sim-state';
 import { useProject } from '../store/project';
 import { useSimScope } from '../store/simScope';
+import { useGarments } from '../store/garments';
 import { simSpecKey, type SimSpec } from './sim-spec';
 import { useSimSession } from './useSimSession';
 
@@ -85,6 +86,9 @@ export interface UsePmlSimResult extends UseSimResult {
  */
 function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec {
   const scopeWarmup = useSimScope((s) => s.warmupMin);
+  // Effective catalog (built-ins + project edits) — see the note on
+  // `SimSpec.garmentsById`.
+  const garmentsById = useGarments().byId;
   const durationMin = opts?.durationMin ?? DEFAULT_DURATION_MIN;
   const seed = opts?.seed ?? DEFAULT_SEED;
   const garment = opts?.garment;
@@ -101,13 +105,14 @@ function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec
           garment,
         },
       ],
+      garmentsById,
       durationMin,
       seed,
       samplePeriodMin: 1,
       recordFlow,
       warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
     }),
-    [twin, garment, durationMin, seed, recordFlow, warmupMin],
+    [twin, garment, garmentsById, durationMin, seed, recordFlow, warmupMin],
   );
 }
 

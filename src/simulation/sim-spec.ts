@@ -21,7 +21,7 @@
  */
 
 import type { GarmentTemplate } from '../domain';
-import type { Twin } from '../domain/twin';
+import type { Twin, Workstation } from '../domain/twin';
 import { getBlockKind, getBlockParams } from '../domain/pml';
 import { scopedTwinForLine } from './useMultiPmlSim';
 import { scopeToKey, type SimScope } from '../store/simScope';
@@ -38,6 +38,12 @@ export interface SimSpecLine {
 export interface SimSpec {
   /** One entry per line in scope, in stable order. */
   lines: SimSpecLine[];
+  /**
+   * Built-in garments with the project's edits applied. Handed to the engine
+   * so its op-level resolvers (c, N, discipline) see what the user authored
+   * in the Inspector rather than the frozen built-in catalog.
+   */
+  garmentsById: Record<string, GarmentTemplate>;
   durationMin: number;
   seed: number;
   samplePeriodMin: number;
@@ -100,6 +106,7 @@ export function buildSimSpec(input: BuildSimSpecInput): SimSpec {
 
   return {
     lines,
+    garmentsById: input.garmentsById,
     durationMin: input.durationMin,
     seed: input.seed,
     samplePeriodMin: input.samplePeriodMin ?? 1,
@@ -127,7 +134,11 @@ function fnv1a(str: string): string {
 }
 
 /** Everything the engine reads off one workstation. */
-function wsSignature(twin: Twin, wsId: string): string {
+function wsSignature(
+  twin: Twin,
+  wsId: string,
+  garmentsById: Record<string, GarmentTemplate>,
+): string {
   const ws = twin.workstations.find((w) => w.id === wsId);
   if (!ws) return `${wsId}:missing`;
   const p = getBlockParams(ws);
@@ -143,6 +154,7 @@ function wsSignature(twin: Twin, wsId: string): string {
     p.capacity,
     p.batchSize,
     p.piecesPerAgent,
+    ws.block?.params?.queueDiscipline ?? '',
     JSON.stringify(p.cycleDist ?? null),
     JSON.stringify(p.arrivalDist ?? null),
     // Pool membership + op binding: both change what the engine resolves.
@@ -151,6 +163,11 @@ function wsSignature(twin: Twin, wsId: string): string {
     ws.operation?.garmentId ?? '',
     ws.operation?.bundleSize ?? '',
     ws.resources?.workersRequired ?? '',
+    // Op-level queueing parameters. The engine resolves c, N and the queue
+    // discipline off the bound operation when the workstation has no block
+    // override, so an Inspector edit to any of them changes engine output and
+    // must invalidate this key — otherwise the session serves a stale run.
+    opQueueSignature(ws, garmentsById),
     // NOT included, on purpose: position, rotation, name, props, kpiTargets,
     // kpiObserved. None of them reach the engine, and `kpiObserved` in
     // particular is WRITTEN BY a run — including it would make every run
@@ -158,10 +175,32 @@ function wsSignature(twin: Twin, wsId: string): string {
   ].join('|');
 }
 
-function lineSignature(line: SimSpecLine): string {
+/** The queueing fields the engine reads off a workstation's bound operation. */
+function opQueueSignature(
+  ws: Workstation,
+  garmentsById: Record<string, GarmentTemplate>,
+): string {
+  const opId = ws.operation?.opId;
+  const garmentId = ws.operation?.garmentId;
+  if (!opId || !garmentId) return '-';
+  const op = garmentsById[garmentId]?.operations.find((o) => o.id === opId);
+  if (!op) return '-';
+  return [
+    op.smv,
+    op.servers ?? '',
+    op.queueCapacity ?? '',
+    op.queueDiscipline ?? '',
+    JSON.stringify(op.serviceDistribution ?? null),
+  ].join(',');
+}
+
+function lineSignature(
+  line: SimSpecLine,
+  garmentsById: Record<string, GarmentTemplate>,
+): string {
   const { twin } = line;
   const ws = twin.workstations
-    .map((w) => wsSignature(twin, w.id))
+    .map((w) => wsSignature(twin, w.id, garmentsById))
     .sort()
     .join(';');
   const conns = twin.connectors
@@ -197,7 +236,7 @@ export function simSpecKey(spec: SimSpec): string {
     JSON.stringify(
       Object.entries(spec.opEfficiency ?? {}).sort(([a], [b]) => (a < b ? -1 : 1)),
     ),
-    ...spec.lines.map(lineSignature),
+    ...spec.lines.map((line) => lineSignature(line, spec.garmentsById)),
   ].join('~');
   return `${spec.lines.length}-${fnv1a(body)}`;
 }

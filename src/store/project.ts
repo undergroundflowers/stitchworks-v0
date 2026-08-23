@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { GARMENT_TEMPLATES, type GarmentTemplate, type Operation, type ProductionSystem } from '../domain';
+import { GARMENT_TEMPLATES, normalizeStationType, type GarmentTemplate, type Operation, type ProductionSystem, type StationType } from '../domain';
 import { indexedDbStorage } from './storage/indexedDbStorage';
 import type { ModelTimeUnit } from '../simulation/timeUnit';
 import type { Twin } from '../domain/twin';
@@ -32,7 +32,7 @@ const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
  *        The migration deletes those keys outright so IndexedDB payloads
  *        actually shrink rather than carrying dead maps forever.
  */
-export const PROJECT_SCHEMA_VERSION = 3 as const;
+export const PROJECT_SCHEMA_VERSION = 4 as const;
 
 export interface ProjectMeta {
   name: string;
@@ -294,6 +294,14 @@ export interface ProjectState {
   garmentEdits: Record<string, GarmentTemplate>;
 
   /**
+   * Station types the user authored — the palette sections beyond the
+   * built-in sewing machines. Project-scoped on purpose: a type is made for
+   * the floor being modelled, and because the factory library snapshots the
+   * whole project state, a saved factory carries its types with it.
+   */
+  stationTypes: StationType[];
+
+  /**
    * IDs of built-in garments the user has explicitly removed from the
    * library. They stay resolvable in `byId` (so factory workstations that
    * still reference them don't crash), but disappear from the picker list.
@@ -372,6 +380,17 @@ export interface ProjectState {
   updateLine: (id: string, patch: Partial<Omit<Line, 'id' | 'floorId'>>) => void;
   /** Cache a fresh KPI snapshot on a line (called by Twin's Run-line). */
   setLineKpis: (id: string, kpis: ScenarioKpis) => void;
+
+  // ── Station types (user-authored palette) ────────────────────────────────
+  /** Append a new authored station type. */
+  addStationType: (type: StationType) => void;
+  /** Patch an existing type in place. Placed stations keep resolving through
+   *  the same id, so an edit re-draws every station of that type — which
+   *  means the id is fixed here even if the patch carries one. */
+  updateStationType: (id: string, patch: Partial<StationType>) => void;
+  /** Drop a type. Callers are expected to check for placed stations first —
+   *  the store does not know about the twin. */
+  removeStationType: (id: string) => void;
 
   // ── Garment / operation library ──────────────────────────────────────────
   /** Replace (or seed) an entire garment edit. Used when adding a brand-new
@@ -497,6 +516,9 @@ const defaults: Omit<
   | 'removeLine'
   | 'updateLine'
   | 'setLineKpis'
+  | 'addStationType'
+  | 'updateStationType'
+  | 'removeStationType'
   | 'setGarmentEdit'
   | 'patchGarment'
   | 'updateOperation'
@@ -522,6 +544,7 @@ const defaults: Omit<
     scenarios: [],
     factory: defaultFactory(),
     garmentEdits: {},
+    stationTypes: [],
     hiddenGarmentIds: {},
     units: defaultUnits,
     time: defaultTimeSettings(meta.createdAt),
@@ -740,6 +763,20 @@ export const useProject = create<ProjectState>()(
           }),
         ),
 
+      addStationType: (type) =>
+        set((s) => touch({ ...s, stationTypes: [...s.stationTypes, normalizeStationType(type)] })),
+
+      updateStationType: (id, patch) =>
+        set((s) => ({
+          ...touch(s),
+          stationTypes: s.stationTypes.map((t) =>
+            t.id === id ? normalizeStationType({ ...t, ...patch, id }) : t,
+          ),
+        })),
+
+      removeStationType: (id) =>
+        set((s) => touch({ ...s, stationTypes: s.stationTypes.filter((t) => t.id !== id) })),
+
       setGarmentEdit: (id, garment) =>
         set((s) => touch({ ...s, garmentEdits: { ...s.garmentEdits, [id]: recomputeSmv(garment) } })),
 
@@ -906,12 +943,13 @@ export const useProject = create<ProjectState>()(
         // Accept every version we've ever written. v1 imports get default
         // TimeSettings filled in; v1/v2 asset-library slices are simply not
         // read (the spread below names every field explicitly), so an older
-        // file loads cleanly and is re-saved as v3 without them.
+        // file loads cleanly and is re-saved at the current version without
+        // them. v1–v3 files carry no station types and load with none.
         const sv = s.schemaVersion as number | undefined;
-        if (sv !== 1 && sv !== 2 && sv !== 3) {
+        if (sv == null || sv < 1 || sv > PROJECT_SCHEMA_VERSION) {
           return {
             ok: false,
-            reason: `Schema version mismatch: file is v${sv}, app supports v1–v3`,
+            reason: `Schema version mismatch: file is v${sv}, app supports v1–v${PROJECT_SCHEMA_VERSION}`,
           };
         }
         set((cur) => ({
@@ -926,6 +964,7 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios ?? [],
           factory: s.factory ?? defaultFactory(),
           garmentEdits: s.garmentEdits ?? {},
+          stationTypes: (s.stationTypes ?? []).map(normalizeStationType),
           hiddenGarmentIds: s.hiddenGarmentIds ?? {},
           units: { ...defaultUnits, ...s.units },
           // v1 files have no `time` field — fill from defaults anchored on
@@ -951,6 +990,7 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios,
           factory: s.factory,
           garmentEdits: s.garmentEdits,
+          stationTypes: s.stationTypes,
           hiddenGarmentIds: s.hiddenGarmentIds,
           units: s.units,
           time: s.time,
@@ -976,6 +1016,7 @@ export const useProject = create<ProjectState>()(
         scenarios: state.scenarios,
         factory: state.factory,
         garmentEdits: state.garmentEdits,
+        stationTypes: state.stationTypes,
         hiddenGarmentIds: state.hiddenGarmentIds,
         units: state.units,
         time: state.time,
@@ -1004,6 +1045,11 @@ export const useProject = create<ProjectState>()(
           for (const k of dead) delete next[k];
           p = next as Partial<ProjectState>;
         }
+        // v3 → v4: user-authored station types. Nothing to convert — the
+        // slice simply did not exist, and `merge` backfills it.
+        if (fromVersion < 4) {
+          p = { ...p, stationTypes: p.stationTypes ?? [] };
+        }
         return { ...p, schemaVersion: PROJECT_SCHEMA_VERSION } as Partial<ProjectState>;
       },
       // Payloads written before a slice existed hydrate it as undefined, and
@@ -1017,6 +1063,9 @@ export const useProject = create<ProjectState>()(
           units: { ...defaultUnits, ...(p.units ?? {}) },
           hiddenGarmentIds: p.hiddenGarmentIds ?? {},
           orders: p.orders ?? [],
+          // Re-clamped on the way in: a payload hand-edited or written by an
+          // older build can hold a footprint the canvas cannot draw.
+          stationTypes: (p.stationTypes ?? []).map(normalizeStationType),
           time: { ...defaultTimeSettings(p.meta?.createdAt ?? current.meta.createdAt), ...(p.time ?? {}) },
         };
       },

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { Chevron } from './Chevron';
 import { alpha } from '../design/color-utils';
 import { StageOverlay } from './StageOverlay';
 
@@ -70,7 +71,7 @@ export function CanvasLegend({
         <span style={{ color: SW_COLORS.brand }}>▣</span>
         <span>LEGEND · {label}</span>
         <span style={{ flex: 1, minWidth: 12 }} />
-        <span style={{ color: SW_COLORS.muted, fontSize: 10 }}>{open ? '▾' : '▸'}</span>
+        <Chevron open={open} />
       </button>
       {open && (
         <div

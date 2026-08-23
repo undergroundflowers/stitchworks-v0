@@ -6,8 +6,6 @@ import { ErrorBoundary, useToast } from './components';
 import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
 import { useStoresHydrated } from './store/storage/useHydrated';
 
-import { useTwin } from './store/twin';
-import { buildStarterLine } from './domain/starter-line';
 import { useProject } from './store/project';
 import { SimSessionDriver } from './simulation/SimSessionDriver';
 
@@ -19,6 +17,7 @@ import { SettingsPage } from './pages/Settings';
 import { BuilderPage } from './pages/Builder';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { InsightsPage } from './pages/Insights';
+import { QueueLabPage } from './pages/QueueLab';
 
 /**
  * App shell: sidebar + route outlet. On launch the app opens straight to the
@@ -29,22 +28,15 @@ export default function App() {
   const toast = useToast();
   const hydrated = useStoresHydrated();
 
-  // Seed a runnable sewing line the first time the app boots into an empty
-  // workspace. Existing work is never replaced — the guard is "no stations
-  // authored and no scenarios saved", which is the only state where there is
-  // genuinely nothing to lose.
+  // NOTE: there is deliberately no auto-seed here.
   //
-  // The old guard also required `departments.length === 0`, and that is why a
-  // fresh factory sat at 0 stations forever: `emptyTwin()` always seeds one
-  // "Sewing Floor" department for stations to be dropped into, so the
-  // condition could never be true and the seed never fired.
-  useEffect(() => {
-    if (!hydrated) return;
-    const s = useTwin.getState();
-    if (s.canonical.workstations.length === 0 && s.scenarios.length === 0) {
-      s.loadCanonical(buildStarterLine(s.canonical.name));
-    }
-  }, [hydrated]);
+  // This used to re-seed a 27-station T-shirt line whenever the workspace was
+  // empty, which made "empty" an unreachable state: creating a new factory,
+  // or deleting the last station of an existing one, handed control back to
+  // this effect and the starter line reappeared on the next render. A new
+  // factory must open on a blank floor — `buildStarterLine` is still exported
+  // for tests and can be offered as an explicit template, but it must never
+  // fire on its own.
 
   // Boot-time sweep of leftover scratch garments (dvss / asdf / test / etc.).
   // Idempotent — no-op when there's nothing to remove. Logs in dev so it's
@@ -128,6 +120,7 @@ export default function App() {
           <Route path="/line" element={<BuilderPage />} />
           <Route path="/sim" element={<LiveSimPage />} />
           <Route path="/insights" element={<InsightsPage />} />
+          <Route path="/lab" element={<QueueLabPage />} />
           <Route path="/settings" element={<SettingsPage />} />
 
           {/* Secondary surfaces — reachable from BUILD and from deep links, but

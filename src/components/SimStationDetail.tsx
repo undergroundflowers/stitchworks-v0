@@ -14,6 +14,7 @@ import { useState, type CSSProperties } from 'react';
 import { Card } from './Card';
 import { SectionHeader } from './SectionHeader';
 import { ToggleGroup } from './ToggleGroup';
+import { MetricLabel } from './Sym';
 import { QueueAnalysisPanel } from './QueueAnalysisPanel';
 import {
   StationTimeseriesChart,
@@ -100,10 +101,10 @@ export function SimStationDetail({
             <ToggleGroup<StationMetric>
               value={compareMetric}
               options={[
-                { value: 'rho', label: 'Saturation' },
-                { value: 'L', label: 'At station' },
-                { value: 'Wq', label: 'Wait' },
-                { value: 'Lq', label: 'Waiting' },
+                { value: 'rho', label: <MetricLabel name="Saturation" quantity="rho" /> },
+                { value: 'L', label: <MetricLabel name="At station" quantity="L" /> },
+                { value: 'Wq', label: <MetricLabel name="Wait" quantity="Wq" /> },
+                { value: 'Lq', label: <MetricLabel name="Waiting" quantity="Lq" /> },
               ]}
               onChange={setCompareMetric}
             />

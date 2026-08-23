@@ -47,6 +47,7 @@ import type { GarmentTemplate } from '../domain/garments';
 import type { Operation } from '../domain/operations';
 import type { ProductionSystem } from '../domain/routings';
 import { catalogForMachine } from '../domain/reference-twin';
+import { pmlFixtureId } from '../domain/pml';
 
 /**
  * Map the wider `ProductionSystem` set used by the Orders wizard onto the
@@ -353,10 +354,17 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
       kind: 'Service',
       params: {
         cycleS: Math.max(1, Math.round(op.smv * 60)),
-        servers: 1,
+        // Honour the authored c instead of pinning every station to one
+        // server — the analytical layer reads `op.servers`, so hardcoding 1
+        // here made the run disagree with its own classification.
+        servers: Math.max(1, Math.round(op.servers ?? 1)),
         // Bake the authored system capacity so the DES back-pressures on the
         // same finite buffer the analytical model reads. 0 ⇒ unbounded.
         queueCapacity: op.queueCapacity ?? 0,
+        // Bake the authored service-time distribution so the run samples the
+        // shape the Kendall label claims. Missing ⇒ the engine falls back to
+        // the deterministic `cycleS`, which is a D service process.
+        cycleDist: op.serviceDistribution,
       },
     };
     ws.kpiTargets = {
@@ -366,7 +374,7 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
     ws.props = {
       ...ws.props,
       cycle_s: Math.round(op.smv * 60),
-      servers: 1,
+      servers: Math.max(1, Math.round(op.servers ?? 1)),
     };
     return ws;
   });
@@ -452,7 +460,16 @@ function addSimPlumbing(
   });
   wsSource.block = {
     kind: 'Source',
-    params: { sourceRatePerHr, piecesPerAgent: 1 },
+    params: {
+      sourceRatePerHr,
+      piecesPerAgent: 1,
+      // Poisson arrivals — the `a` field of Kendall–Lee. Without this the
+      // engine falls back to a constant 60/rate interval, which is a D
+      // arrival process, so every station downstream was classified M/… while
+      // actually being fed a deterministic stream. Exponential inter-arrival
+      // times ARE the Poisson process the textbook assumes throughout.
+      arrivalDist: { kind: 'exp', mean: 60 / Math.max(1e-6, sourceRatePerHr) },
+    },
   };
   wsSource.operation = {
     ...wsSource.operation,
@@ -465,7 +482,7 @@ function addSimPlumbing(
   wsSource.lineId = args.lineId;
 
   const wsPool = makeWorkstation({
-    catalogId: 'op_sewer',
+    catalogId: pmlFixtureId('ResourcePool'),
     position: { x: first.position.x, y: first.position.y + 6 },
     name: `Operators · ${args.operators} units`,
   });

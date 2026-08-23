@@ -1,11 +1,12 @@
 /**
  * Route registry — the app's real surfaces, declared once.
  *
- * Four of them, deliberately:
+ * Five of them, deliberately:
  *
  *   BUILD     author the line
  *   RUN       watch it run
  *   INSIGHTS  find out what's wrong and fix it
+ *   LAB       build any queueing system and analyse it, factory or not
  *   SETTINGS  project + units
  *
  * The array used to hold twelve entries for six tabs, because every
@@ -34,6 +35,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/line',      id: 'line',      label: 'Build',    icon: '◆', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Run',      icon: '▷', kind: 'main' },
   { path: '/insights',  id: 'insights',  label: 'Insights', icon: '◎', kind: 'main' },
+  { path: '/lab',       id: 'lab',       label: 'Queue Lab', shortLabel: 'Lab', icon: '∑', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings', icon: '⚙', kind: 'main' },
 ];
 

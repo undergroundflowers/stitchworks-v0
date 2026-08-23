@@ -35,6 +35,9 @@ export interface DialogProps {
   /** Pass `null` to hide the cancel button (alert-style, single action). */
   cancelLabel?: string | null;
   variant?: 'default' | 'danger';
+  /** Panel width. Defaults to the confirm-sized 440px; pass a larger value
+   *  for a dialog that holds a form rather than a sentence. */
+  width?: number | string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -47,6 +50,7 @@ export function Dialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   variant = 'default',
+  width = 440,
   onConfirm,
   onCancel,
 }: DialogProps) {
@@ -103,7 +107,9 @@ export function Dialog({
         tabIndex={-1}
         data-sw-overlay=""
         style={{
-          width: 'min(440px, 100%)',
+          width: typeof width === 'number' ? `min(${width}px, 100%)` : width,
+          maxHeight: 'calc(100vh - 48px)',
+          overflowY: 'auto',
           background: SW_COLORS.paper,
           borderRadius: SW_RADIUS.lg,
           boxShadow: SW_SHADOWS.hi,
@@ -157,7 +163,9 @@ export interface ConfirmOptions {
   title?: string;
   message: ReactNode;
   confirmLabel?: string;
-  cancelLabel?: string;
+  /** `null` hides the cancel button — an acknowledgement rather than a
+   *  choice, for telling the user why something can't happen. */
+  cancelLabel?: string | null;
   variant?: 'default' | 'danger';
 }
 
@@ -198,7 +206,9 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
         title={pending?.opts.title ?? 'Are you sure?'}
         message={pending?.opts.message}
         confirmLabel={pending?.opts.confirmLabel ?? 'Confirm'}
-        cancelLabel={pending?.opts.cancelLabel ?? 'Cancel'}
+        cancelLabel={
+          pending?.opts.cancelLabel === null ? null : (pending?.opts.cancelLabel ?? 'Cancel')
+        }
         variant={pending?.opts.variant ?? 'default'}
         onConfirm={() => settle(true)}
         onCancel={() => settle(false)}

@@ -21,11 +21,11 @@ import {
   LineScopePicker,
   LineSimEmpty,
   SectionHeader,
-  SimTransportBar,
   StationTimeseriesChart,
   StationTimeseriesGrid,
   ToggleGroup,
   type StationMetric,
+  MetricLabel,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
@@ -117,7 +117,6 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <SimTransportBar />
           <button
             type="button"
             onClick={() => reset()}
@@ -170,10 +169,10 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
               <ToggleGroup<StationMetric>
                 value={metric}
                 options={[
-                  { value: 'rho', label: 'Saturation' },
-                  { value: 'L', label: 'At station' },
-                  { value: 'Wq', label: 'Wait' },
-                  { value: 'Lq', label: 'Waiting' },
+                  { value: 'rho', label: <MetricLabel name="Saturation" quantity="rho" /> },
+                  { value: 'L', label: <MetricLabel name="At station" quantity="L" /> },
+                  { value: 'Wq', label: <MetricLabel name="Wait" quantity="Wq" /> },
+                  { value: 'Lq', label: <MetricLabel name="Waiting" quantity="Lq" /> },
                 ]}
                 onChange={setMetric}
               />
@@ -395,11 +394,13 @@ function RowHeader({
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────
 
+// Plain strings — these land in chart titles and `title` attributes, which
+// cannot host a React node, so the symbol is spelled out inline here.
 const METRIC_LONG_LABEL: Record<StationMetric, string> = {
-  rho: 'Operator saturation',
-  L: 'Bundles at station',
-  Wq: 'Bundle wait time (min)',
-  Lq: 'Bundles waiting',
+  rho: 'Operator saturation (ρ)',
+  L: 'Bundles at station (L)',
+  Wq: 'Bundle wait time (Wq), min',
+  Lq: 'Bundles waiting (Lq)',
 };
 
 function analyticalRefFor(station: StationView, metric: StationMetric): number {

@@ -147,6 +147,7 @@ function runSlot(line: SimSpecLine, spec: SimSpec): SimRunSlot {
     try {
       result = runPmlSim({
         twin: line.twin,
+        garmentsById: spec.garmentsById,
         durationMin: spec.durationMin,
         seed: spec.seed,
         samplePeriodMin: spec.samplePeriodMin,

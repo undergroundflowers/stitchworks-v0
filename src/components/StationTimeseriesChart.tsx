@@ -16,6 +16,8 @@
 
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { StationHistoryPoint, StationView } from '../simulation';
+import type { QuantityId } from '../simulation/notation';
+import { Sym } from './Sym';
 
 export type StationMetric = 'rho' | 'L' | 'Wq' | 'Lq';
 
@@ -35,6 +37,9 @@ export interface StationTimeseriesChartProps {
 interface MetricSpec {
   field: keyof StationHistoryPoint;
   caption: string;
+  /** The textbook quantity this chart plots. Drives the symbol beside the
+   *  caption; see the note in `simulation/notation.ts` on why it is data. */
+  quantity: QuantityId;
   tooltip: string;
   color: string;
   unit: string;
@@ -46,6 +51,7 @@ const METRICS: Record<StationMetric, MetricSpec> = {
   rho: {
     field: 'utilization',
     caption: 'Operator saturation',
+    quantity: 'rho',
     tooltip:
       'How much of her shift this operator is actually sewing. 85%+ sustained = this is the slowest station; bundles will stack up behind her.',
     color: SW_COLORS.brand,
@@ -55,6 +61,7 @@ const METRICS: Record<StationMetric, MetricSpec> = {
   L: {
     field: 'inSystem',
     caption: 'Bundles at station',
+    quantity: 'L',
     tooltip:
       'All bundles physically here — being sewn plus waiting. Multiply by bundle size to see pieces tied up at this seat.',
     color: SW_COLORS.bobbin,
@@ -64,6 +71,7 @@ const METRICS: Record<StationMetric, MetricSpec> = {
   Wq: {
     field: 'meanWqMin',
     caption: 'Bundle wait time',
+    quantity: 'Wq',
     tooltip:
       'Average minutes a fresh bundle sits on the cart before this operator picks it up. Long wait = upstream is overproducing.',
     color: SW_COLORS.press,
@@ -73,6 +81,7 @@ const METRICS: Record<StationMetric, MetricSpec> = {
   Lq: {
     field: 'queueLen',
     caption: 'Bundles waiting',
+    quantity: 'Lq',
     tooltip:
       'The visible pile on her left — bundles not yet started. This is the WIP a manager sees on a floor walk.',
     color: SW_COLORS.warn,
@@ -98,12 +107,15 @@ export function StationTimeseriesChart({
   const spec = METRICS[metric];
   const seriesColor = color ?? spec.color;
   const headerCaption = caption ?? spec.caption;
+  // A caller-supplied caption is free text, so only the built-in ones name a
+  // quantity we can attach a symbol to.
+  const headerQuantity = caption ? undefined : spec.quantity;
   const hoverText = tooltip ?? spec.tooltip;
 
   if (history.length < 2) {
     return (
       <div title={hoverText}>
-        <ChartHeader caption={headerCaption} />
+        <ChartHeader caption={headerCaption} quantity={headerQuantity} />
         <div
           style={{
             height,
@@ -177,7 +189,7 @@ export function StationTimeseriesChart({
 
   return (
     <div title={hoverText}>
-      <ChartHeader caption={headerCaption} />
+      <ChartHeader caption={headerCaption} quantity={headerQuantity} />
       <div style={{ position: 'relative' }}>
         <svg
           viewBox={`0 0 ${W} ${H}`}
@@ -269,7 +281,7 @@ export function StationTimeseriesChart({
   );
 }
 
-function ChartHeader({ caption }: { caption: string }) {
+function ChartHeader({ caption, quantity }: { caption: string; quantity?: QuantityId }) {
   return (
     <div
       style={{
@@ -283,6 +295,12 @@ function ChartHeader({ caption }: { caption: string }) {
       }}
     >
       {caption}
+      {quantity && (
+        <>
+          {' '}
+          <Sym quantity={quantity} bracketed color={SW_COLORS.brandText} />
+        </>
+      )}
     </div>
   );
 }

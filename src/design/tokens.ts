@@ -69,6 +69,13 @@ export const SW_COLORS = {
   faint: '#E8EDF54F',
   /** Hairline for gridlines and disabled ticks — never text. */
   lineSoft: '#E8EDF52E',
+  /** Canvas grid, cell tier — the dominant ruling on every canvas. Far
+   *  fainter than `lineSoft`: a floor grid is a ruler you consult, not a
+   *  structure you read, and at 40px pitch it covers the whole viewport. */
+  gridLine: '#E8EDF512',
+  /** Canvas grid, sub-cell tier. Drawn under the cell tier so cell
+   *  boundaries stay visually dominant as the grid subdivides on zoom. */
+  gridLineSub: '#E8EDF508',
   /**
    * Modal/dialog backdrop. NOT ink-alpha: on a dark ground `ink` is the light
    * end, so an ink-alpha scrim would paint a white wash over the app instead
@@ -76,6 +83,28 @@ export const SW_COLORS = {
    */
   overlay: '#04070CB8',
 } as const;
+
+/**
+ * Accent + well per PML block category — the colour vocabulary of the PROCESS
+ * canvas, the BLOCKS palette and the Inspector's block chip.
+ *
+ * Lives here rather than in `pages/Builder.tsx` because three surfaces render
+ * it and a fourth (`domain/iso.ts`, the ISO floor's `pml_*` fixtures) used to
+ * carry a hand-copied duplicate that had silently drifted on five of six
+ * categories while its comment still claimed parity. One table, no drift.
+ *
+ * Typed `Record<string, …>` rather than `Record<PmlCategory, …>` on purpose:
+ * `domain` imports from `design`, not the reverse, and a type import back the
+ * other way would invert that. Callers coalesce a miss to a neutral surface.
+ */
+export const PML_CATEGORY_TINT: Record<string, { fill: string; stroke: string }> = {
+  lifecycle: { fill: 'rgba(242,193,46,0.14)', stroke: '#F2C12E' },
+  buffer:    { fill: 'rgba(61,110,229,0.14)', stroke: '#3D6EE5' },
+  service:   { fill: 'rgba(230,57,70,0.14)',  stroke: '#E63946' },
+  routing:   { fill: 'rgba(31,179,107,0.14)', stroke: '#1FB36B' },
+  batch:     { fill: 'rgba(126,91,239,0.14)', stroke: '#7E5BEF' },
+  movement:  { fill: 'rgba(200,145,94,0.14)', stroke: '#C8915E' },
+};
 
 /**
  * Saira is a technical grotesk with a real weight axis, so the display slot
@@ -130,6 +159,24 @@ export const SW_SPACE = {
   xl: 24,
   xxl: 32,
   huge: 48,
+} as const;
+
+/**
+ * Control sizes — the metrics every small chrome control shares so a panel
+ * header row reads as one system instead of three sizes stacked side by side.
+ *
+ * `height` is the row unit: a header chip (STN/BLK), a square icon button and
+ * a segmented pill all measure this tall, so they sit level with each other.
+ * `chevron` is the disclosure box — one size for every triangle in the app,
+ * whether it opens a palette section, an inspector group or a legend.
+ */
+export const SW_CONTROL = {
+  /** Header chip / pill / icon-button height. */
+  height: 28,
+  /** Square side of an icon-only button (« », +, −). Same as `height`. */
+  icon: 28,
+  /** Disclosure / caret glyph box — square, so rotation never nudges layout. */
+  chevron: 16,
 } as const;
 
 /**
