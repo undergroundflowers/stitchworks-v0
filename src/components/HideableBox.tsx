@@ -1,5 +1,6 @@
 import { useState, type ReactNode, type CSSProperties } from 'react';
-import { SW_COLORS } from '../design/tokens';
+import { SW_COLORS, SW_CONTROL, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { Icon } from './Icon';
 
 interface HideableBoxProps {
   children: ReactNode;
@@ -11,16 +12,23 @@ interface HideableBoxProps {
 
 /** Wraps any report tile/card with an eye toggle in the top-right corner.
  *  Clicking the toggle blurs the wrapped content and disables pointer
- *  events on it, while the toggle itself stays sharp and clickable. */
+ *  events on it, while the toggle itself stays sharp and clickable.
+ *
+ *  The toggle is a standard square icon button: `SW_CONTROL.icon` on a
+ *  raised surface step above the card it floats on. It used to paint a
+ *  near-white `rgba(255,255,255,0.92)` pill carrying `SW_COLORS.muted`
+ *  glyphs — a light-theme leftover that, once `muted` became ink-alpha on a
+ *  dark ground, drew a near-white eye on a near-white chip. */
 export function HideableBox({
   children,
   defaultHidden = false,
   style,
   toggleOffset = 10,
-  toggleSize = 26,
+  toggleSize = SW_CONTROL.icon,
 }: HideableBoxProps) {
   const [hidden, setHidden] = useState(defaultHidden);
-  const iconSize = Math.max(12, toggleSize - 12);
+  const [hover, setHover] = useState(false);
+  const iconSize = Math.max(12, toggleSize - 14);
   return (
     <div style={{ position: 'relative', ...style }}>
       <button
@@ -32,6 +40,8 @@ export function HideableBox({
         title={hidden ? 'Show section' : 'Hide section'}
         aria-label={hidden ? 'Show section' : 'Hide section'}
         aria-pressed={hidden}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         style={{
           position: 'absolute',
           top: toggleOffset,
@@ -42,31 +52,21 @@ export function HideableBox({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: hidden ? SW_COLORS.brand : 'rgba(255,255,255,0.92)',
-          color: hidden ? '#fff' : SW_COLORS.muted,
-          border: `1px solid ${hidden ? SW_COLORS.brand : SW_COLORS.line}`,
-          borderRadius: 6,
+          background: hidden
+            ? SW_COLORS.brand
+            : hover
+              ? SW_COLORS.steelLite
+              : SW_COLORS.steel,
+          color: hidden ? SW_COLORS.paper : hover ? SW_COLORS.ink : SW_COLORS.muted,
+          border: `1px solid ${hidden ? SW_COLORS.brand : hover ? SW_COLORS.faint : SW_COLORS.line}`,
+          borderRadius: SW_RADIUS.sm,
           padding: 0,
           cursor: 'pointer',
-          boxShadow: hidden ? '0 2px 6px rgba(255,91,38,0.35)' : '0 1px 2px rgba(0,0,0,0.06)',
-          backdropFilter: 'blur(4px)',
-          WebkitBackdropFilter: 'blur(4px)',
-          transition: 'background 140ms, color 140ms, border-color 140ms, box-shadow 140ms',
-        }}
-        onMouseEnter={(e) => {
-          if (!hidden) {
-            e.currentTarget.style.color = SW_COLORS.ink;
-            e.currentTarget.style.borderColor = SW_COLORS.ink;
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!hidden) {
-            e.currentTarget.style.color = SW_COLORS.muted;
-            e.currentTarget.style.borderColor = SW_COLORS.line;
-          }
+          boxShadow: SW_SHADOWS.pop,
+          transition: 'background 140ms, color 140ms, border-color 140ms',
         }}
       >
-        {hidden ? <EyeOffIcon size={iconSize} /> : <EyeIcon size={iconSize} />}
+        <Icon name={hidden ? 'eyeOff' : 'eye'} size={iconSize} />
       </button>
       <div
         aria-hidden={hidden}
@@ -80,41 +80,5 @@ export function HideableBox({
         {children}
       </div>
     </div>
-  );
-}
-
-function EyeIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
-function EyeOffIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-      <line x1="1" y1="1" x2="23" y2="23" />
-    </svg>
   );
 }

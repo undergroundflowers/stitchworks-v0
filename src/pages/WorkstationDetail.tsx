@@ -1,19 +1,30 @@
 /**
- * Workstation Detail — third-level drill-down from Department Interior.
+ * Workstation Detail — one station, read as a queueing system.
  *
- * The page is built around the **Queue Analysis Panel**: one workstation as
- * a queueing-theory object (M/M/c, M/D/1, M/Ek/1, M/M/c/N, …), with the
- * sim engine running a short warm-up so the analytical and observed KPIs
- * have meaningful values to compare.
+ * WHAT IT IS FOR. INSIGHTS ranks the whole line; this page answers the next
+ * question about a single station on it: *is the model of this station sound,
+ * and what happens if I change it?* It is built around the **Queue Analysis
+ * Panel** — the station as a queueing-theory object (M/M/c, M/D/1, M/Ek/1,
+ * M/M/c/N, …) with editable servers, buffer, service distribution and
+ * discipline — and then spends the rest of its height putting the simulator's
+ * measurements next to the closed-form steady state for that class. A gap that
+ * refuses to close is the finding.
  *
- * Drill-down route: /workstation/:deptId/:wsId
- *   `wsId` is the operation id within the active garment bulletin
- *   (e.g. "OP-04"). Fallback: if the id doesn't match, we treat wsId as
- *   a positional index into the operations array.
+ * HOW YOU GET HERE. It is not a rail destination. The only way in is to click
+ * a station from INSIGHTS: the *Per-station queues* table (or its queue
+ * diagrams), or a strip/compare chart under *Over time*. Both drills tag the
+ * URL with `?from=<tab>` so the back link can return to the exact table the
+ * user left, rather than dropping them on Diagnosis.
+ *
+ * Route: /workstation/:deptId/:wsId
+ *   `wsId` is a WORKSTATION id; the operation id is accepted as a fallback so
+ *   older saved links still land. `deptId` is legacy — every caller passes
+ *   'sewing' and nothing resolves through it — so it is no longer printed as
+ *   though it were a real department.
  */
 
 import { useMemo } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Card,
   LineSimEmpty,
@@ -30,9 +41,22 @@ import { useSimSession } from '../simulation/useSimSession';
 import { useTwin } from '../store/twin';
 import { getBlockKind } from '../domain/pml';
 
+/** INSIGHTS tabs that drill in here, and how to name them going back. */
+const BACK_TABS: Record<string, string> = {
+  queues: 'Per-station queues',
+  timeline: 'Over time',
+};
+
 export function WorkstationDetailPage() {
-  const { deptId, wsId } = useParams();
+  const { wsId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  // Where the drill started. Unknown or absent ⇒ the station table, which is
+  // the entry point for all but one of the links into this page.
+  const from = searchParams.get('from') ?? 'queues';
+  const backTab = from in BACK_TABS ? from : 'queues';
+  const back = () => navigate(`/insights?tab=${backTab}`);
 
   const { state, twin, emptyReason, unassignedStationCount } = useLineSim();
   const reset = useSimSession((s) => s.reset);
@@ -90,33 +114,35 @@ export function WorkstationDetailPage() {
 
   if (emptyReason) {
     return (
-      <div style={{ padding: '20px 24px' }}>
+      <PageShell backTab={backTab} onBack={back}>
         <LineSimEmpty
           reason={emptyReason}
           unassignedStationCount={unassignedStationCount}
           what="Station analysis"
         />
-      </div>
+      </PageShell>
     );
   }
 
   if (!station) {
     return (
-      <Card>
-        <SectionHeader title="Station not found" />
-        <p style={{ fontSize: 13, color: SW_COLORS.muted }}>
-          No station <code>{wsId}</code> on the line currently in scope. It may belong to a
-          different line — switch scope on the Queue Analysis page and try again.
-        </p>
-        <button type="button" onClick={() => navigate('/insights')} style={navBtn()}>
-          Back to queue analysis
-        </button>
-      </Card>
+      <PageShell backTab={backTab} onBack={back}>
+        <Card>
+          <SectionHeader title="Station not found" />
+          <p style={{ fontSize: 13, color: SW_COLORS.muted }}>
+            No station <code>{wsId}</code> on the line currently in scope. It may belong to a
+            different line — change the line scope on INSIGHTS and pick the station again.
+          </p>
+          <button type="button" onClick={back} style={navBtn()}>
+            Back to {BACK_TABS[backTab]}
+          </button>
+        </Card>
+      </PageShell>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <PageShell backTab={backTab} onBack={back}>
       <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <div
@@ -128,7 +154,7 @@ export function WorkstationDetailPage() {
               textTransform: 'uppercase',
             }}
           >
-            Workstation · {deptId ?? '—'} / {station.opCode ?? station.opId}
+            Workstation · {station.opCode ?? station.opId}
           </div>
           <h1
             style={{
@@ -197,16 +223,39 @@ export function WorkstationDetailPage() {
             sub="Solid = measured from the run. Dashed = the closed-form steady state for this station's Kendall–Lee class. They should converge as the shift plays."
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <ConvergenceChart
-              station={station}
-              history={state.stationHistory[stationIdx] ?? []}
-              metric="rho"
-            />
-            <ConvergenceChart
-              station={station}
-              history={state.stationHistory[stationIdx] ?? []}
-              metric="Lq"
-            />
+            {/* The two curves are one reading, not two: ρ̂ says how hard the
+                operator is working and L̄q says what that does to the queue, and
+                the interesting case is when only one of them has settled. Stacked
+                full-width they could not be compared without moving your eyes a
+                chart-height apart, and the SVG (600 units wide, drawn with
+                `preserveAspectRatio: none`) was stretched ~2.5× horizontally at
+                that width — squashed-looking axis labels on a chart nobody could
+                read side by side anyway. Two columns puts them level with each
+                other and lands the plot near its intended scale.
+
+                `alignItems: start` because a chart that has not converged grows a
+                divergence note underneath it; without this the shorter column
+                would stretch to match and the two plots would stop being level,
+                which is the whole point. */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                alignItems: 'start',
+                gap: 16,
+              }}
+            >
+              <ConvergenceChart
+                station={station}
+                history={state.stationHistory[stationIdx] ?? []}
+                metric="rho"
+              />
+              <ConvergenceChart
+                station={station}
+                history={state.stationHistory[stationIdx] ?? []}
+                metric="Lq"
+              />
+            </div>
             <div style={{ borderTop: `1px solid ${SW_COLORS.line}`, paddingTop: 12 }}>
               <LittlesLawCheck station={station} />
             </div>
@@ -239,6 +288,83 @@ export function WorkstationDetailPage() {
       {/* The reference is generated from the same symbol vocabulary the
           Inspector fields use, so the sheet cannot drift from the labels. */}
       <QueueingReference />
+    </PageShell>
+  );
+}
+
+/**
+ * The page's own scroll box.
+ *
+ * Every surface in this app owns its scrolling: the shell's route outlet is
+ * `overflow: hidden` at `100vh`, so a page that lays itself out as a bare
+ * column just grows past the viewport and everything below the fold becomes
+ * unreachable. This page did exactly that — around 4,000px of charts inside a
+ * clipped 100vh box, flush against the sidebar with no padding, because it was
+ * the one surface that never got the container the others have.
+ */
+/**
+ * The page's scroll box, and the way out of it.
+ *
+ * SCROLLING. Every surface in this app owns its own scrolling: the shell's
+ * route outlet is `overflow: hidden` at `100vh`, so a page that lays itself
+ * out as a bare column just grows past the viewport and everything below the
+ * fold becomes unreachable. This page did exactly that — some 4,000px of
+ * charts inside a clipped 100vh box, flush against the sidebar with no
+ * padding, because it was the one surface that never got the container the
+ * others have. The scroll box is a plain block and the column lives inside it,
+ * so the cards keep their natural heights instead of being flex-shrunk into
+ * each other on a short viewport.
+ *
+ * BACK. The page is only ever arrived at by drilling, and it had no back
+ * affordance of any kind — no breadcrumb, no button, and a sidebar that
+ * highlighted MENU while you stood on it. The browser back button worked,
+ * which is not the same as the app admitting there is anywhere to go.
+ */
+function PageShell({
+  backTab,
+  onBack,
+  children,
+}: {
+  backTab: string;
+  onBack: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        height: '100%',
+        overflow: 'auto',
+        padding: '20px 24px',
+        background: SW_COLORS.paperDeep,
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <button
+          type="button"
+          onClick={onBack}
+          style={{
+            alignSelf: 'flex-start',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            background: 'transparent',
+            border: 'none',
+            padding: 0,
+            cursor: 'pointer',
+            fontFamily: SW_FONTS.mono,
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: '0.6px',
+            textTransform: 'uppercase',
+            color: SW_COLORS.muted,
+          }}
+          title={`Back to Insights · ${BACK_TABS[backTab]}`}
+        >
+          <span aria-hidden style={{ fontSize: 13 }}>←</span>
+          Insights · {BACK_TABS[backTab]}
+        </button>
+        {children}
+      </div>
     </div>
   );
 }

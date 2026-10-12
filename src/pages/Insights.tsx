@@ -12,8 +12,8 @@
  * re-selecting the parent.
  */
 
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Button,
   Card,
@@ -55,12 +55,34 @@ const SEVERITY_STYLE: Record<FindingSeverity, { color: string; label: string }> 
  */
 type InsightTab = 'diagnosis' | 'stations' | 'queues' | 'timeline' | 'reports';
 
+const INSIGHT_TABS: InsightTab[] = ['diagnosis', 'stations', 'queues', 'timeline', 'reports'];
+
+/** Default tab, and the one that carries no `?tab=` so the plain URL stays clean. */
+const DEFAULT_TAB: InsightTab = 'diagnosis';
+
 export function InsightsPage() {
-  const navigate = useNavigate();
   const toast = useToast();
   const { state, lines, allLines, twin, emptyReason, unassignedStationCount } = useLineSim();
   const createScenarioFromTwin = useTwin((s) => s.createScenarioFromTwin);
-  const [tab, setTab] = useState<InsightTab>('diagnosis');
+  /**
+   * The open tab lives in the URL, not in component state.
+   *
+   * Two of these tabs drill into `/workstation/:…`, and coming back from there
+   * used to remount this page at Diagnosis — the user landed two tabs away
+   * from the table they had clicked out of, with no sign of where they had
+   * been. An addressable tab makes "back" mean something, and makes the view
+   * linkable besides. `replace` so flipping tabs doesn't stack history entries
+   * the browser back button then has to chew through.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requested = searchParams.get('tab') as InsightTab | null;
+  const tab: InsightTab = requested && INSIGHT_TABS.includes(requested) ? requested : DEFAULT_TAB;
+  const setTab = (v: InsightTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (v === DEFAULT_TAB) next.delete('tab');
+    else next.set('tab', v);
+    setSearchParams(next, { replace: true });
+  };
 
   const findings = useMemo(
     () =>
@@ -76,10 +98,15 @@ export function InsightsPage() {
   const apply = (finding: QueueFinding) => {
     if (!finding.patch) return;
     if (finding.patch.kind === 'rebalance') {
-      // Reassigning operations across stations is a topology change, and the
-      // Yamazumi chart already owns drag-to-reassign — sending the user there
-      // beats a second, worse implementation of it here.
-      navigate('/balance?tab=balance');
+      // Rebalancing is a change to the twin's own stations, and the Line
+      // Balance tab is where that is done — with the bottleneck named, the
+      // pitch line drawn, and a channel control on each station.
+      //
+      // This used to navigate to `/balance?tab=balance`. `/balance` is a
+      // redirect to `/insights` and `<Navigate>` drops the query string, so
+      // the button landed the user back on this very tab with nothing
+      // changed. Insights owns `?tab=`; the Reports sub-tab is `?report=`.
+      setSearchParams({ tab: 'reports', report: 'balance' }, { replace: true });
       return;
     }
     const label = describePatch(finding.patch, state.stations);
@@ -113,17 +140,22 @@ export function InsightsPage() {
 
   return (
     <div style={{ width: '100%', height: '100%', overflow: 'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
-      <SectionHeader
-        kicker="Insights"
-        title="What to fix on this line"
-        sub={
-          `Read from the run, ranked by what an hour of your attention buys. `
-          + `${state.stations.length} stations · ${state.producedPieces.toLocaleString()} pcs produced.`
-        }
-        right={<LineScopePicker lines={allLines} />}
-      />
-
-      <div style={{ marginTop: 12, marginBottom: 16 }}>
+      {/* A toolbar, not a page header. The kicker / title / sub that used to
+          sit here ("Insights — What to fix on this line") named the surface
+          the nav had already named and spent three lines doing it, so the
+          controls now start at the top of the page: the tabs at the left
+          edge, aligned with the cards they switch, and the scope picker at
+          the far right. Wraps at narrow widths instead of crushing either. */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 10,
+          marginBottom: 16,
+        }}
+      >
         <ToggleGroup
           value={tab}
           onChange={(v) => setTab(v as InsightTab)}
@@ -135,6 +167,7 @@ export function InsightsPage() {
             { value: 'reports', label: '⌬ Reports' },
           ]}
         />
+        <LineScopePicker lines={allLines} />
       </div>
 
       {tab === 'diagnosis' && (
@@ -150,8 +183,22 @@ export function InsightsPage() {
       {tab === 'timeline' && <QueueAnalyticsPage embedded />}
       {tab === 'reports' && <ReportsPage embedded />}
 
+      {/* Side by side, not stacked. Both charts draw through a 600-unit
+          viewBox at `width: 100%`, so a full-width card blew them up ~2.5×:
+          giant bars, giant labels, and each panel taller than the viewport.
+          At half width they land near their intended scale, and the two
+          readings of the same run — who is saturated, where WIP piles up —
+          can be compared without scrolling between them. `alignItems:
+          start` so the shorter chart doesn't stretch to match the taller. */}
       {tab === 'stations' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+            alignItems: 'start',
+            gap: 16,
+          }}
+        >
           <Card>
             <SectionHeader
               title="Operator saturation by station"

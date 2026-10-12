@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { visibleCellRange, type Cam } from '../domain/camera';
 import type { Projection } from '../domain/iso';
-import { SW_COLORS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS } from '../design/tokens';
 
 /**
  * The ruling on every canvas in the Builder — 2D, ISO and PROCESS.
@@ -19,8 +19,17 @@ import { SW_COLORS } from '../design/tokens';
  * closes. If a canvas needs a different pitch, it needs a different
  * projection.
  *
- * Renders a bare fragment of `<line>` in the caller's user space; the caller
- * places it inside its own pan/zoom `<g>`.
+ * ORIGIN AND AXES ARE PART OF THE RULING. The lattice on its own is a
+ * texture — every cell looks like every other cell, so a coordinate readout
+ * like the Inspector's "Position (cells)" has nothing to be read against and
+ * the numbers are unfalsifiable. The `x = 0` and `y = 0` rules are therefore
+ * drawn several alpha steps above the cell tier, the origin is marked, and
+ * both axes carry numeric ticks at a zoom-chosen interval. That makes the
+ * ruling a coordinate system rather than wallpaper, on all three canvases at
+ * once.
+ *
+ * Renders a bare fragment of `<line>` / `<text>` in the caller's user space;
+ * the caller places it inside its own pan/zoom `<g>`.
  */
 export function CanvasGrid({
   projection,
@@ -85,6 +94,107 @@ export function CanvasGrid({
     lines.push(
       <line key={`h-${y}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy}
             stroke={SW_COLORS.gridLine} strokeWidth={0.6} />,
+    );
+  }
+
+  // ── Axes ────────────────────────────────────────────────────────────────
+  // Only drawn when the axis is actually in frame. `visibleCellRange` already
+  // pads the range, so the test is just "does the visible span straddle 0".
+  const yAxisVisible = minX <= 0 && maxX >= 0;   // the x = 0 rule
+  const xAxisVisible = minY <= 0 && maxY >= 0;   // the y = 0 rule
+
+  if (yAxisVisible) {
+    const a = P(0, minY);
+    const b = P(0, maxY);
+    lines.push(
+      <line key="axis-x0" x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy}
+            stroke={SW_COLORS.gridAxis} strokeWidth={1.2 / cam.z} />,
+    );
+  }
+  if (xAxisVisible) {
+    const a = P(minX, 0);
+    const b = P(maxX, 0);
+    lines.push(
+      <line key="axis-y0" x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy}
+            stroke={SW_COLORS.gridAxis} strokeWidth={1.2 / cam.z} />,
+    );
+  }
+
+  // ── Ticks ───────────────────────────────────────────────────────────────
+  // Label every `tickStep` cells, chosen so consecutive labels stay at least
+  // MIN_TICK_PX apart on screen however far the user has zoomed out. Pitch is
+  // measured through the projection rather than assumed, so the ISO lattice —
+  // whose cells are wider than they are tall — gets a step that suits the
+  // diamond instead of the square.
+  const MIN_TICK_PX = 72;
+  const o = P(0, 0);
+  const px = P(1, 0);
+  const py = P(0, 1);
+  const pitchX = Math.hypot(px.sx - o.sx, px.sy - o.sy) * cam.z;
+  const pitchY = Math.hypot(py.sx - o.sx, py.sy - o.sy) * cam.z;
+  const stepFor = (pitchPx: number) => {
+    // 1, 2, 5, 10, 20, 50, … — the standard ruler progression.
+    const LADDER = [1, 2, 5];
+    for (let decade = 1; decade <= 1e4; decade *= 10) {
+      for (const m of LADDER) {
+        if (m * decade * pitchPx >= MIN_TICK_PX) return m * decade;
+      }
+    }
+    return 1e5;
+  };
+  const stepX = stepFor(Math.max(pitchX, 0.001));
+  const stepY = stepFor(Math.max(pitchY, 0.001));
+
+  // Counter-scaled so a label is the same physical size at every zoom — a
+  // label that scales with the canvas is unreadable at 0.2x and absurd at 6x.
+  const fontSize = 10 / cam.z;
+  const labelOffset = 5 / cam.z;
+
+  if (xAxisVisible) {
+    const from = Math.ceil(minX / stepX) * stepX;
+    for (let x = from; x <= maxX; x += stepX) {
+      if (x === 0) continue;
+      const t = P(x, 0);
+      lines.push(
+        <text key={`tx-${x}`} x={t.sx} y={t.sy + labelOffset}
+              fill={SW_COLORS.gridAxisText} fontSize={fontSize}
+              fontFamily={SW_FONTS.mono} textAnchor="middle"
+              dominantBaseline="hanging" style={{ pointerEvents: 'none' }}>
+          {x}
+        </text>,
+      );
+    }
+  }
+  if (yAxisVisible) {
+    const from = Math.ceil(minY / stepY) * stepY;
+    for (let y = from; y <= maxY; y += stepY) {
+      if (y === 0) continue;
+      const t = P(0, y);
+      lines.push(
+        <text key={`ty-${y}`} x={t.sx - labelOffset} y={t.sy}
+              fill={SW_COLORS.gridAxisText} fontSize={fontSize}
+              fontFamily={SW_FONTS.mono} textAnchor="end"
+              dominantBaseline="middle" style={{ pointerEvents: 'none' }}>
+          {y}
+        </text>,
+      );
+    }
+  }
+
+  // ── Origin ──────────────────────────────────────────────────────────────
+  // Marked even when only one axis is on screen: the corner of the viewport
+  // still tells the user which way 0 lies.
+  if (xAxisVisible && yAxisVisible) {
+    const r = 3 / cam.z;
+    lines.push(
+      <circle key="origin-dot" cx={o.sx} cy={o.sy} r={r}
+              fill={SW_COLORS.gridAxisText} style={{ pointerEvents: 'none' }} />,
+      <text key="origin-label" x={o.sx - labelOffset - r} y={o.sy + labelOffset}
+            fill={SW_COLORS.gridAxisText} fontSize={fontSize}
+            fontFamily={SW_FONTS.mono} textAnchor="end"
+            dominantBaseline="hanging" style={{ pointerEvents: 'none' }}>
+        0,0
+      </text>,
     );
   }
 

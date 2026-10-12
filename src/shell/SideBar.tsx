@@ -1,7 +1,7 @@
 import { useLocation, useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { ROUTES, type RouteDef } from '../lib/routes';
+import { DRILL_PARENTS, ROUTES, type RouteDef } from '../lib/routes';
 
 /** Fixed pixel width of the rail. Tuned so the icon + small label below it
  *  read cleanly without crowding the active-state left bar. */
@@ -21,7 +21,7 @@ export const SIDEBAR_WIDTH = 76;
  *
  * Each tab used to carry hide and lock toggles, plus an overflow popover for
  * whatever had been hidden — roughly 320 lines of affordance. That made sense
- * against twelve nav entries. Against four surfaces, hiding one is not a
+ * against twelve nav entries. Against five surfaces, hiding one is not a
  * feature, it is a way to lose part of the app.
  */
 export function SideBar() {
@@ -46,7 +46,15 @@ export function SideBar() {
           .find(
             (r) =>
               location.pathname === r.path || location.pathname.startsWith(`${r.path}/`),
-          )?.id ?? 'menu';
+          )?.id
+        // Paths that are real surfaces but not rail entries — a station
+        // drill-down — still belong to a tab. Falling through to 'menu' told
+        // the user they had left the app's surfaces when they had only gone
+        // one level down inside one.
+        ?? [...DRILL_PARENTS]
+          .sort((a, b) => b[0].length - a[0].length)
+          .find(([prefix]) => location.pathname.startsWith(prefix))?.[1]
+        ?? 'menu';
 
   // Settings is rendered separately, pinned to the bottom.
   const mainRoutes = ROUTES.filter((r) => r.kind === 'main' && r.id !== 'settings');

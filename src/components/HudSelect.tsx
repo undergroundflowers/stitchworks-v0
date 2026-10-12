@@ -6,10 +6,21 @@
  * button that expands a panel of options below it. The panel uses a height
  * transition so it eases open like an accordion fold, and each row is
  * keyboard- and click-navigable.
+ *
+ * The panel is rendered into `document.body` and positioned against the
+ * trigger's viewport rect rather than laid out beside it. It used to be an
+ * absolutely-positioned sibling, which any scrolling ancestor was free to clip
+ * — and the Builder Inspector is exactly that: a 260px `overflow: auto`
+ * column. A panel sized to its content (`width: max-content`, up to 560px)
+ * opened wider than the column, got cut off at the pane edge, and gave the
+ * whole Inspector a horizontal scrollbar. Anchoring to the viewport means the
+ * menu is never clipped by whatever it happens to sit inside, and matching the
+ * trigger's width means it lands where the control is.
  */
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_Z } from '../design/tokens';
 import { Caret } from './Chevron';
 import { alpha } from '../design/color-utils';
 
@@ -26,6 +37,16 @@ export interface HudSelectOption<T extends string> {
   tag?: string;
   /** Disable selection of this option. */
   disabled?: boolean;
+  /**
+   * Optional illustration for this option, shown in a strip pinned to the
+   * bottom of the open panel while the row is hovered or keyboard-highlighted.
+   *
+   * It lives in one shared strip rather than inside each row because the
+   * point is comparison: the graphic stays in the same place while the
+   * pointer runs down the list, so only the drawing changes and the eye can
+   * see one shape become another.
+   */
+  preview?: ReactNode;
 }
 
 export interface HudSelectProps<T extends string> {
@@ -53,6 +74,31 @@ export interface HudSelectProps<T extends string> {
   variant?: 'dark' | 'light';
   /** Compact density for inline cells (tables, toolbars). */
   size?: 'sm' | 'md';
+  /**
+   * Draw the trigger's contents yourself, in place of the default
+   * leading / tag / label row. The caret and every behaviour around it —
+   * the portalled panel, the anchoring, the keyboard handling — are still
+   * the control's.
+   *
+   * This exists so a surface that already draws an identity chip for the
+   * current value can make that chip BE the picker, rather than printing the
+   * value twice: once as a read-only badge and once inside a select beneath
+   * it. See the Builder inspector's process-block header.
+   */
+  triggerRender?: (current: HudSelectOption<T> | undefined, open: boolean) => ReactNode;
+  /** Style overrides merged into the trigger button — padding, border and
+   *  background, for a caller drawing its own chip via `triggerRender`. */
+  triggerStyle?: CSSProperties;
+}
+
+/** Viewport-space box the panel is pinned to. `bottom` instead of `top` when
+ *  the menu has to open upward, so it grows away from the trigger rather than
+ *  over it. */
+interface PanelAnchor {
+  left: number;
+  width: number;
+  top?: number;
+  bottom?: number;
 }
 
 export function HudSelect<T extends string>({
@@ -68,6 +114,8 @@ export function HudSelect<T extends string>({
   title,
   variant = 'dark',
   size = 'md',
+  triggerRender,
+  triggerStyle,
 }: HudSelectProps<T>) {
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState<number>(-1);
@@ -75,16 +123,26 @@ export function HudSelect<T extends string>({
   const panelRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const [panelHeight, setPanelHeight] = useState(0);
+  const [anchor, setAnchor] = useState<PanelAnchor>({ left: 0, width: 0, top: -9999 });
   const listboxId = useId();
 
   const current = options.find((o) => o.value === value);
   const headerLabel = current?.label ?? placeholder;
+  // `highlight` tracks both the pointer (onMouseEnter) and the arrow keys, so
+  // one lookup serves hovering and keyboard browsing alike.
+  const preview = open ? options[highlight]?.preview : undefined;
 
   // Close on outside click / Esc, and reset highlight when opening.
   useEffect(() => {
     if (!open) return;
     const onClick = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      // The panel is portalled, so it is NOT inside rootRef — testing only the
+      // root would close the menu on mousedown and unmount the row before its
+      // click could land.
+      if (!rootRef.current?.contains(t) && !panelRef.current?.contains(t)) {
+        setOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
@@ -101,11 +159,70 @@ export function HudSelect<T extends string>({
   // Measure the panel's natural height so we can animate max-height from 0
   // to the real value — needed for a smooth accordion fold without
   // hard-coding pixel heights.
+  // `highlight` is a dependency because the preview strip is part of the
+  // measured content: without it the panel keeps the height it had before
+  // the first preview appeared and clips the graphic. `anchor.width` is one
+  // because the panel is only as wide as the trigger it has been pinned to,
+  // and how much a label wraps decides how tall the list is — measuring
+  // before the first pin measures a column of width 0.
   useLayoutEffect(() => {
     if (!innerRef.current) return;
     const measured = innerRef.current.scrollHeight;
     setPanelHeight(Math.min(measured, maxPanelHeight));
-  }, [options, open, maxPanelHeight]);
+  }, [options, open, maxPanelHeight, highlight, anchor.width]);
+
+  /** Pin the panel to the trigger, flipping above it when the space below
+   *  cannot hold the list. */
+  const measure = useCallback(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const GAP = 4;
+    const EDGE = 8;
+    // Never narrower than legible: a `size="sm"` trigger in a table cell is
+    // too tight for its own option labels.
+    const width = Math.min(
+      Math.max(r.width, 180),
+      Math.max(120, window.innerWidth - 2 * EDGE),
+    );
+    const wanted = panelHeight || maxPanelHeight;
+    const below = window.innerHeight - r.bottom - GAP;
+    const above = r.top - GAP;
+    const flip = below < wanted && above > below;
+    const next: PanelAnchor = {
+      left: Math.max(EDGE, Math.min(r.left, window.innerWidth - width - EDGE)),
+      width,
+      ...(flip
+        ? { bottom: window.innerHeight - r.top + GAP }
+        : { top: r.bottom + GAP }),
+    };
+    // Bail on an unchanged box. This runs on every scroll frame, and
+    // `panelHeight` feeds back into it via the height measurement — a fresh
+    // object each time would re-render the panel for no reason.
+    setAnchor((prev) =>
+      prev.left === next.left &&
+      prev.width === next.width &&
+      prev.top === next.top &&
+      prev.bottom === next.bottom
+        ? prev
+        : next,
+    );
+  }, [panelHeight, maxPanelHeight]);
+
+  // Re-pin while open. `capture: true` because the scroll that moves the
+  // trigger is usually a nested pane's, not the window's, and those do not
+  // bubble.
+  useLayoutEffect(() => {
+    if (!open) return;
+    measure();
+    const onAny = () => measure();
+    window.addEventListener('scroll', onAny, true);
+    window.addEventListener('resize', onAny);
+    return () => {
+      window.removeEventListener('scroll', onAny, true);
+      window.removeEventListener('resize', onAny);
+    };
+  }, [open, measure]);
 
   const choose = (opt: HudSelectOption<T>) => {
     if (opt.disabled) return;
@@ -212,6 +329,15 @@ export function HudSelect<T extends string>({
   // absolutely-positioned panel balloon — see the Builder SCENARIO picker
   // with names like "Kid's Pant — Arunima Sportswear · Proposed".
   const rootWidth = width ?? minWidth;
+  // A caller that states its own width has already decided how much room the
+  // control gets — usually `width="100%"` inside a grid column or a narrow
+  // rail. Keeping the 200px floor there would win over `maxWidth: 100%`
+  // (min-width beats max-width in CSS) and push the trigger straight out of
+  // its section, which is what the Queue Lab parameter rail did to its
+  // distribution and discipline pickers. The floor is only a default for
+  // callers that say nothing about width; the portalled panel keeps its own
+  // 180px legibility floor, so a squeezed trigger still opens a readable menu.
+  const rootMinWidth = width === undefined ? minWidth : 0;
 
   return (
     <div
@@ -219,7 +345,7 @@ export function HudSelect<T extends string>({
       style={{
         position: 'relative',
         display: 'inline-block',
-        minWidth,
+        minWidth: rootMinWidth,
         width: rootWidth,
         maxWidth: '100%',
       }}
@@ -255,8 +381,12 @@ export function HudSelect<T extends string>({
           boxShadow: variant === 'light' && open
             ? `0 0 0 3px ${SW_COLORS.brand}22`
             : 'none',
+          ...triggerStyle,
         }}
       >
+        {triggerRender ? (
+          triggerRender(current, open)
+        ) : (
         <span
           style={{
             overflow: 'hidden',
@@ -296,11 +426,15 @@ export function HudSelect<T extends string>({
             {headerLabel}
           </span>
         </span>
+        )}
         <Caret open={open} color={palette.chevron} />
       </button>
 
       {/* Accordion panel — wrapper animates max-height for the fold effect,
-          inner div is measured for the natural height. */}
+          inner div is measured for the natural height. Portalled to the body
+          so no scrolling ancestor can clip it, and kept mounted while closed
+          so there is content to measure and a height to animate from. */}
+      {createPortal(
       <div
         ref={panelRef}
         id={listboxId}
@@ -308,12 +442,11 @@ export function HudSelect<T extends string>({
         tabIndex={-1}
         onKeyDown={onListKeyDown}
         style={{
-          position: 'absolute',
-          top: 'calc(100% + 4px)',
-          left: 0,
-          minWidth: '100%',
-          width: 'max-content',
-          maxWidth: 'min(560px, 96vw)',
+          position: 'fixed',
+          left: anchor.left,
+          top: anchor.top,
+          bottom: anchor.bottom,
+          width: anchor.width,
           maxHeight: open ? panelHeight : 0,
           overflowY: open ? 'auto' : 'hidden',
           background: palette.panelBg,
@@ -323,9 +456,10 @@ export function HudSelect<T extends string>({
           borderRadius: SW_RADIUS.sm,
           boxShadow: open ? palette.panelShadow : 'none',
           transition: 'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), border-color 160ms ease, box-shadow 160ms ease',
-          zIndex: 50,
+          zIndex: SW_Z.popover,
           opacity: open ? 1 : 0,
           pointerEvents: open ? 'auto' : 'none',
+          visibility: open ? 'visible' : 'hidden',
         }}
       >
         <div ref={innerRef} style={{ padding: 4 }}>
@@ -444,8 +578,21 @@ export function HudSelect<T extends string>({
               No options.
             </div>
           )}
+          {preview && (
+            <div
+              style={{
+                marginTop: 4,
+                paddingTop: 8,
+                borderTop: `1px solid ${palette.panelBorder}`,
+              }}
+            >
+              {preview}
+            </div>
+          )}
         </div>
-      </div>
+      </div>,
+      document.body,
+      )}
     </div>
   );
 }

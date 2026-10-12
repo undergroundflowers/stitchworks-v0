@@ -16,9 +16,10 @@
  * so the dialog cannot show something the canvas would then draw differently.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Dialog } from './Dialog';
 import { HudSelect } from './HudSelect';
+import { NumberInput } from './NumberInput';
 import { StationGlyph } from './StationGlyph';
 import { BlockParamRow } from './queueParamFields';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
@@ -34,6 +35,8 @@ import {
   type StationType,
 } from '../domain/stationTypes';
 import { apparelLabelForKind } from '../domain/apparelPresets';
+import type { StationArt } from '../domain/station-art';
+import { readStationArtFile } from '../lib/import-station-svg';
 import {
   PARAM_FIELDS_BY_KIND,
   SELECTABLE_BLOCK_KINDS,
@@ -48,8 +51,6 @@ export interface StationTypeDialogProps {
   open: boolean;
   /** The type being edited, or null to author a new one. */
   editing: StationType | null;
-  /** Group names already in use, offered as suggestions. */
-  groups: string[];
   onSave: (type: StationType) => void;
   onCancel: () => void;
 }
@@ -94,6 +95,127 @@ const input: React.CSSProperties = {
   color: SW_COLORS.ink,
 };
 
+/**
+ * One artwork slot: pick an `.svg`, or clear the one already there.
+ *
+ * The two slots are independent on purpose — the plan view and the isometric
+ * view are looked at for different reasons, and a drawing that reads well
+ * top-down rarely reads well in three-quarter. An empty slot is not a gap:
+ * it falls back to the authored Form / Mark, which is what most types want.
+ */
+function ArtSlot({
+  title,
+  hint,
+  art,
+  onSet,
+}: {
+  title: string;
+  hint: string;
+  art: StationArt | undefined;
+  onSet: (art: StationArt | undefined) => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    const res = await readStationArtFile(file);
+    setBusy(false);
+    if (res.ok) {
+      setError(null);
+      onSet(res.art);
+    } else {
+      setError(res.error);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        border: `1px dashed ${art ? SW_COLORS.brand : SW_COLORS.line}`,
+        borderRadius: SW_RADIUS.sm,
+        padding: 8,
+        background: art ? SW_COLORS.brandLite : 'transparent',
+      }}
+    >
+      <div style={{ ...label, marginBottom: 2 }}>{title}</div>
+      <div style={{ fontSize: 10, color: SW_COLORS.muted, marginBottom: 6 }}>{hint}</div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".svg,image/svg+xml"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          void pick(e.target.files?.[0]);
+          // Cleared so re-picking the same file after an edit still fires.
+          e.target.value = '';
+        }}
+      />
+
+      {art ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span
+            title={art.name}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              color: SW_COLORS.ink,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {art.name}
+          </span>
+          <button type="button" style={artBtn} onClick={() => fileRef.current?.click()}>
+            Replace
+          </button>
+          <button
+            type="button"
+            style={artBtn}
+            onClick={() => {
+              setError(null);
+              onSet(undefined);
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          style={{ ...artBtn, width: '100%', height: 28 }}
+          disabled={busy}
+          onClick={() => fileRef.current?.click()}
+        >
+          {busy ? 'Reading…' : 'Upload SVG'}
+        </button>
+      )}
+
+      {error && (
+        <div style={{ marginTop: 6, fontSize: 10, color: SW_COLORS.alarm, lineHeight: 1.4 }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
+const artBtn: React.CSSProperties = {
+  height: 24,
+  padding: '0 8px',
+  fontFamily: SW_FONTS.body,
+  fontSize: 11,
+  cursor: 'pointer',
+  color: SW_COLORS.ink,
+  background: SW_COLORS.paper,
+  border: `1px solid ${SW_COLORS.line}`,
+  borderRadius: SW_RADIUS.sm,
+};
+
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 14 }}>
@@ -108,7 +230,6 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 export function StationTypeDialog({
   open,
   editing,
-  groups,
   onSave,
   onCancel,
 }: StationTypeDialogProps) {
@@ -158,36 +279,15 @@ export function StationTypeDialog({
         {/* ── Left: the authoring form ─────────────────────────────────── */}
         <div>
           <Group title="IDENTITY">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <div>
-                <label style={label} htmlFor="stype-name">Name</label>
-                <input
-                  id="stype-name"
-                  value={draft.label}
-                  autoFocus
-                  placeholder="Inline iron"
-                  onChange={(e) => patch({ label: e.target.value })}
-                  style={input}
-                />
-              </div>
-              <div>
-                <label style={label} htmlFor="stype-group">Palette section</label>
-                <input
-                  id="stype-group"
-                  value={draft.group}
-                  list="stype-groups"
-                  placeholder={DEFAULT_STATION_GROUP}
-                  onChange={(e) => patch({ group: e.target.value })}
-                  style={input}
-                />
-                <datalist id="stype-groups">
-                  {groups.map((g) => <option key={g} value={g} />)}
-                </datalist>
-              </div>
-            </div>
-            <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted }}>
-              Types sharing a section name are grouped together in the palette.
-            </div>
+            <label style={label} htmlFor="stype-name">Name</label>
+            <input
+              id="stype-name"
+              value={draft.label}
+              autoFocus
+              placeholder="Inline iron"
+              onChange={(e) => patch({ label: e.target.value })}
+              style={input}
+            />
           </Group>
 
           <Group title="PROCESS BLOCK">
@@ -222,8 +322,15 @@ export function StationTypeDialog({
             </div>
 
             {/* A `block` form draws its PML icon instead of a stroke mark, so
-                the mark controls have nothing to drive. */}
-            {!isBlock && (
+                the mark controls have nothing to drive — and uploaded plan
+                artwork replaces the mark outright. */}
+            {!isBlock && draft.planArt && (
+              <div style={{ marginTop: 10, fontSize: 10, color: SW_COLORS.muted }}>
+                Mark is replaced by the uploaded 2D artwork below. Remove it to
+                go back to a stroke mark.
+              </div>
+            )}
+            {!isBlock && !draft.planArt && (
               <div style={{ marginTop: 10 }}>
                 <label style={label}>Mark</label>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
@@ -273,16 +380,12 @@ export function StationTypeDialog({
                   <label style={label} htmlFor={`stype-${axis}`}>
                     {axis === 'w' ? 'Width' : axis === 'd' ? 'Depth' : 'Height'}
                   </label>
-                  <input
-                    id={`stype-${axis}`}
-                    type="number"
+                  <NumberInput
+                    aria-label={axis === 'w' ? 'Width' : axis === 'd' ? 'Depth' : 'Height'}
                     min={axis === 'h' ? 0.1 : 0.5}
                     step={axis === 'h' ? 0.1 : 0.5}
                     value={draft[axis]}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (isFinite(v)) patch({ [axis]: v } as Partial<StationType>);
-                    }}
+                    onChange={(v) => { if (v !== undefined) patch({ [axis]: v } as Partial<StationType>); }}
                     style={{ ...input, fontFamily: SW_FONTS.mono, fontWeight: 700 }}
                   />
                 </div>
@@ -291,6 +394,30 @@ export function StationTypeDialog({
             <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted }}>
               Width and depth are floor cells; height is altitude, where a
               sewing machine is 1.4.
+            </div>
+          </Group>
+
+          <Group title="ARTWORK">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <ArtSlot
+                title="2D plan"
+                hint="Drawn top-down inside the footprint, in place of the mark."
+                art={draft.planArt}
+                onSet={(planArt) => patch({ planArt })}
+              />
+              <ArtSlot
+                title="ISO body"
+                hint="Drawn in place of the cuboid, standing on the footprint."
+                art={draft.isoArt}
+                onSet={(isoArt) => patch({ isoArt })}
+              />
+            </div>
+            <div style={{ marginTop: 6, fontSize: 10, color: SW_COLORS.muted, lineHeight: 1.45 }}>
+              SVG only — it has to scale with the camera and morph between the
+              two views. The file needs a viewBox; scripts, external images and
+              links are stripped on upload. Draw with{' '}
+              <code style={{ fontFamily: SW_FONTS.mono }}>currentColor</code> to
+              follow the floor's ink instead of shipping a fixed one.
             </div>
           </Group>
 
@@ -306,7 +433,6 @@ export function StationTypeDialog({
                     key={f.id}
                     field={f}
                     value={f.resolveDefault(resolved)}
-                    isAuthored={draft.params[f.id] !== undefined}
                     onSet={(v) => setParam(f.id, v)}
                   />
                 ))}
@@ -343,7 +469,8 @@ export function StationTypeDialog({
           >
             <svg width={planW} height={planH} style={{ display: 'block' }}>
               <StationGlyph
-                family={isBlock ? undefined : draft.glyph}
+                family={isBlock || draft.planArt ? undefined : draft.glyph}
+                art={draft.planArt}
                 markCode={isBlock ? undefined : draft.code}
                 label={isBlock ? draft.label || 'Block' : undefined}
                 width={planW}

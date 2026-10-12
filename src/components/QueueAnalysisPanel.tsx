@@ -18,11 +18,11 @@
 
 import { useState } from 'react';
 import { Card } from './Card';
-import { ToggleGroup } from './ToggleGroup';
 import { FieldLabel, Sym } from './Sym';
 import { QueueDisciplineGraphic } from './QueueDisciplineGraphic';
+import { DistPicker } from './DistPicker';
+import { NumberInput } from './NumberInput';
 import {
-  DIST_OPTIONS,
   DISCIPLINE_OPTIONS,
   DistParamInputs,
   NumberField,
@@ -55,7 +55,6 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
   const editable = !!onChange;
 
   // ── Derived values ─────────────────────────────────────────────────────
-  const distKind: DistKind = serviceDist.kind;
   const capacity = station.capacity;
   const capacityFinite = Number.isFinite(capacity);
 
@@ -126,9 +125,10 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
       {/* Configuration block */}
       <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <SubHeader>Service-time distribution</SubHeader>
-        <ToggleGroup<DistKind>
-          value={distKind}
-          options={DIST_OPTIONS}
+        <DistPicker
+          dist={serviceDist}
+          fallbackMean={smv}
+          editable={editable}
           onChange={(v) => changeDistKind(v)}
         />
         <DistParamInputs
@@ -477,14 +477,11 @@ function ProbRowView({ row, alt }: { row: ProbRow; alt: boolean }) {
           </span>
         ) : (
           <>
-            <input
-              type="number"
+            <NumberInput
               value={row.control.value}
               min={row.control.min}
               step={row.control.step}
-              onChange={(e) =>
-                row.control.onChange(Math.max(row.control.min, Number(e.target.value)))
-              }
+              onChange={(v) => { if (v !== undefined) row.control.onChange(v); }}
               style={{ ...inputStyle(true), width: 62, padding: '4px 6px', fontSize: 12 }}
             />
             <span style={{ fontSize: 10, color: SW_COLORS.muted }}>{row.control.suffix}</span>

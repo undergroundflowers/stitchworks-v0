@@ -137,9 +137,6 @@ describe('simSpecKey — reacts to every engine-visible parameter', () => {
     ['a rewired connector', (t) => { t.connectors[1].toWsId = t.workstations[0].id; }],
     ['an assignment shareFrac', (t) => { t.assignments![0].shareFrac = 0.5; }],
     ['a removed assignment', (t) => { t.assignments!.splice(0, 1); }],
-    ['order quantity', (t) => { t.orders![0].quantity = 7; }],
-    ['the order sequence', (t) => { t.lines[0].orderSequence = []; }],
-    ['production system', (t) => { t.lines[0].productionSystem = 'modular'; }],
     ['line policy', (t) => {
       t.lines[0].policy = { ...t.lines[0].policy, bundleSize: 3 };
     }],
@@ -213,7 +210,6 @@ describe('buildSimSpec — scoping', () => {
     t.lines.push({
       id: 'line-empty',
       name: 'Empty line',
-      productionSystem: 'PBS',
       color: 'red',
     });
     const spec = baseSpec(t);

@@ -331,9 +331,10 @@ export function describePatch(patch: FindingPatch, stations: StationView[]): str
  * to fork it into a scenario or write it back, so nothing is committed by
  * merely previewing a fix.
  *
- * `rebalance` is intentionally not handled here: reassigning operations across
- * stations changes the line's topology, not one field, and it belongs with the
- * Yamazumi surface that already owns drag-to-reassign.
+ * `rebalance` is intentionally not handled here: levelling a line is a change
+ * to several stations at once, not one field, and it belongs on the Line
+ * Balance tab, which draws the pitch line and carries a channel control on
+ * every station.
  */
 export function applyPatch(twin: Twin, patch: FindingPatch): Twin {
   switch (patch.kind) {

@@ -56,17 +56,31 @@ export function Dialog({
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
+  // A dialog holding a form gets fresh onConfirm/onCancel closures on every
+  // keystroke, because they close over the caller's draft state. Mirroring
+  // them in refs keeps the focus effect keyed on `open` alone — otherwise it
+  // tore down and re-ran per character, and its cleanup (restore previous
+  // focus) pulled the caret out of whatever field was being typed into.
+  const onConfirmRef = useRef(onConfirm);
+  const onCancelRef = useRef(onCancel);
+  useEffect(() => {
+    onConfirmRef.current = onConfirm;
+    onCancelRef.current = onCancel;
+  });
+
   useEffect(() => {
     if (!open) return;
     const prevActive = document.activeElement as HTMLElement | null;
-    panelRef.current?.focus();
+    // A field inside the panel may have claimed focus already (autoFocus runs
+    // at commit, before this effect); don't take it back off it.
+    if (!panelRef.current?.contains(document.activeElement)) panelRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onCancel();
+        onCancelRef.current();
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        onConfirm();
+        onConfirmRef.current();
       }
     };
     document.addEventListener('keydown', onKey);
@@ -75,7 +89,7 @@ export function Dialog({
       // Restore focus to whatever was focused before the dialog opened.
       prevActive?.focus?.();
     };
-  }, [open, onCancel, onConfirm]);
+  }, [open]);
 
   if (!open) return null;
 

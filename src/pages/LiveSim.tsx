@@ -1,17 +1,25 @@
 /**
- * Live Simulation — drives the discrete-event engine in real time, with three
- * synchronised views over the same engine state:
+ * Live Simulation — drives the discrete-event engine in real time, with four
+ * views over the same engine state:
  *
- *   • ISO 3D — isometric line with cuboid sewing-machine sprites, walking
- *     operators, queue stacks, conveyor + WIP dots, bottleneck flag.
- *   • TOP 2D — flat blueprint with the operation flow + per-station card.
- *   • HEAT  — radial-gradient heat blobs sized by queue + utilisation.
+ *   • ISO 3D — the Build floor's isometric projection, with walking
+ *     operators, queue stacks, conveyor + WIP bundles, bottleneck flag.
+ *   • TOP 2D — the same floor in plan, live state hung off each machine's
+ *     footprint.
+ *   • HEAT  — the same floor again, with pressure blobs over the machines.
+ *   • LOGIC — the routing as a schema. The one view that is NOT the floor.
+ *
+ * ISO, TOP and HEAT draw ONE layout, computed once (`floor`) and handed to
+ * all three, at the workstations' authored `ws.position` cells. A machine is
+ * therefore at the same coordinates in RUN as in BUILD, at the same size, on
+ * the same ruled grid — see the LAYOUT note above `layoutStations` for what
+ * this replaced and why.
  *
  * The engine is unchanged: SimEngine ticks against (garment, operators,
  * efficiency); the views are pure visualisations of `SimState.stations`.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
@@ -24,16 +32,16 @@ import {
 import {
   Chevron,
   SimTransportDock,
-  ToggleGroup,
   HudSelect,
-  TimeDisplay,
+  CanvasGrid,
   CanvasLegend,
+  LegendRow,
   ViewSwitch,
   ViewTitle,
-  EmptyState,
+  Icon,
+  NumberInput,
   ZoomHud,
   useCanvasCamera,
-  type HudSelectOption,
 } from '../components';
 import { SimStationDetail } from '../components/SimStationDetail';
 import {
@@ -45,7 +53,6 @@ import {
   mergePmlSimStates,
   mergePmlTwinMetas,
   scopedTwinForLine,
-  EMPTY_TWIN,
   buildFlowPlayback,
   type BuildFromTwinMeta,
   type SimState,
@@ -55,32 +62,24 @@ import {
   type BundleFrame,
 } from '../simulation';
 import {
-  fmtModelTime,
-  fmtModelCompact,
+  fmtElapsed,
   fmtCalendar,
-  fmtCalendarCompact,
-  fmtWallClock,
   simDayNumber,
   shiftProgressPct,
   unitToSeconds,
   fmtMinutesAsHHMM,
   parseHHMM,
 } from '../simulation/timeUnit';
-import { useProject, useGarments, type OrderDraft } from '../store';
-import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, PRODUCTION_SYSTEMS, MACHINE_CATALOG, lookupFixture, CAM_IDENTITY, type Cam, type MachineCode, type ProductionSystem } from '../domain';
+import { useProject, useGarments } from '../store';
+import { isoProj, flatProj, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, MACHINE_CATALOG, lookupFixture, stationMark, CAM_IDENTITY, fitBounds, ISO_PROJECTION, FLAT_PROJECTION, FLAT_CELL, type Cam, type CamBounds, type MachineCode, type Projection } from '../domain';
+import { StationGlyph } from '../components/StationGlyph';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { getBlockKind, getBlockParams } from '../domain/pml';
 import {
+  wsBaseFootprint,
   type EntityColorKey,
-  type ProductionSystemKey,
-  type Twin,
 } from '../domain/twin';
-import {
-  buildSeededDraftTwin,
-  buildSimReadyOrderTwin,
-  mapToLineSystem,
-} from '../lib/build-draft-twin';
-import type { GarmentTemplate } from '../domain/garments';
+import { buildSeededDraftTwin } from '../lib/build-draft-twin';
 
 /**
  * Resolve a station's canonical visual asset from `MACHINE_CATALOG`. This
@@ -93,6 +92,11 @@ function stationAsset(machineCode: string | undefined): {
   glyph: string;
   label: string;
   isManual: boolean;
+  /** False when `machineCode` names no machine in the catalog. Callers use
+   *  this to leave the equipment slot EMPTY rather than printing a shrug:
+   *  a logic block authored as a Service has no machine, and "? GENERIC"
+   *  stamped on it claims otherwise. */
+  known: boolean;
 } {
   const spec = machineCode
     ? MACHINE_CATALOG[machineCode as MachineCode]
@@ -100,13 +104,34 @@ function stationAsset(machineCode: string | undefined): {
   if (!spec) {
     // Unknown machine type — neutral steel placeholder. Keeps the
     // workstation visually distinguishable from typed peers.
-    return { glyph: '?', label: machineCode ?? 'UNKNOWN', isManual: false };
+    return { glyph: '?', label: machineCode ?? 'UNKNOWN', isManual: false, known: false };
   }
   return {
     glyph: spec.icon,
     label: spec.shortName,
     isManual: !!spec.isManual,
+    known: true,
   };
+}
+
+/**
+ * What to call a station on the floor.
+ *
+ * `opCode` is the bulletin's industry code (`OP-04`) and is the right label
+ * the moment a station is bound to an operation. When it is not bound, the
+ * station still has a name — the one the block carries in Builder — and that
+ * is the honest thing to show.
+ *
+ * This used to fall back to `OP-${index + 1}`, which invented a code the
+ * factory does not have and numbered it by position in the render list, so
+ * the same machine answered to a different name depending on what else was
+ * on the floor. A station is never labelled by its index now.
+ */
+function stationLabel(s: Pick<StationView, 'opCode' | 'opName'>, maxChars = 14): string {
+  if (s.opCode) return s.opCode;
+  const name = s.opName?.trim();
+  if (!name) return '—';
+  return name.length > maxChars ? `${name.slice(0, maxChars - 1)}…` : name;
 }
 
 /** Total operator pool count for a (paper, variant/scenario) selection.
@@ -125,42 +150,6 @@ type SimScope =
 function scopeToParam(s: SimScope): string {
   if (s.kind === 'factory') return 'factory';
   return `${s.kind}:${s.id}`;
-}
-
-/**
- * Mutate every Source block in a twin to use `bundleSize` as its
- * `piecesPerAgent`, rescaling `sourceRatePerHr` so the *piece* throughput
- * stays constant — what the legacy engine did when the user picked a
- * non-default BUNDLE in the HUD.
- *
- * Returns a shallow-cloned Twin (and shallow-cloned Source workstations)
- * so we don't mutate the store's authoritative twin. Non-Source blocks
- * are reused by reference.
- */
-function overrideBundleSize(twin: import('./../domain/twin').Twin, bundleSize: number): import('./../domain/twin').Twin {
-  if (bundleSize <= 0) return twin;
-  let touched = false;
-  const workstations = twin.workstations.map((ws) => {
-    if (ws.block?.kind !== 'Source') return ws;
-    const existingPieces = (ws.block.params?.piecesPerAgent as number | undefined) ?? 1;
-    const existingRate = (ws.block.params?.sourceRatePerHr as number | undefined) ?? 60;
-    if (existingPieces === bundleSize) return ws;
-    touched = true;
-    // Keep pieces/hour constant: rate' = rate · (oldPieces / newPieces).
-    const newRate = (existingRate * existingPieces) / bundleSize;
-    return {
-      ...ws,
-      block: {
-        ...ws.block,
-        params: {
-          ...(ws.block.params ?? {}),
-          piecesPerAgent: bundleSize,
-          sourceRatePerHr: newRate,
-        },
-      },
-    };
-  });
-  return touched ? { ...twin, workstations } : twin;
 }
 
 interface SimHudStatProps {
@@ -182,8 +171,6 @@ export function LiveSimPage() {
   const [operators, setOperators] = useState<number>(
     () => activeTwin.lines.find((l) => l.operatorTarget)?.operatorTarget ?? 4,
   );
-  // User-edited bundle override; null means "follow the seed (twin or system)".
-  const [bundleOverride, setBundleOverride] = useState<number | null>(null);
   const [view, setView] = useState<SimView>('iso');
   /**
    * One camera per view, preserved across switches.
@@ -216,28 +203,15 @@ export function LiveSimPage() {
   // ISO/TOP/HEAT/LOGIC views also reflect the loaded reference. Sim doesn't
   // author refs anymore (the picker bar moved out), so we only need the
   // read + clear selectors here.
-  // Source select — twin path (default when no reference is loaded) draws the
-  // simulation from the user's Factory Builder twin; `source=reference` keeps
-  // the legacy garment-template flow for paper comparisons; `source=order:<id>`
-  // means the user came from the Orders wizard (or picked an order from the
-  // SOURCE dropdown) and wants the run driven by that order's garment / crew /
-  // production system rather than whatever the canonical twin pins.
-  const sourceParam = searchParams.get('source');
-  // Accept legacy `source=order` (no id) by falling through to the latest
-  // saved order — keeps deep-links from older sessions working.
-  const orderIdFromParam = sourceParam?.startsWith('order:')
-    ? sourceParam.slice('order:'.length)
-    : sourceParam === 'order'
-      ? project.orders[0]?.id ?? null
-      : null;
-  const activeOrder = useMemo(
-    () => (orderIdFromParam ? project.orders.find((o) => o.id === orderIdFromParam) ?? null : null),
-    [orderIdFromParam, project.orders],
-  );
-  const isOrderSource = !!activeOrder;
-  const useTwinSource =
-    sourceParam === 'twin' ||
-    (sourceParam !== 'reference' && !isOrderSource && !sourceParam?.startsWith('order'));
+  // The simulation has exactly one source: the user's Factory Builder twin.
+  //
+  // There used to be three — the twin, an order committed from the Orders
+  // wizard, and a published reference paper — behind a SOURCE dropdown. The
+  // reference branch had already been dead for a while (`isRefSource` was a
+  // hardcoded `false`, so the option could never render), and the order
+  // branch went with the wizard. What remained was a one-item picker in front
+  // of a `useTwinSource` flag that was always true, so both are gone and the
+  // twin is read unconditionally below.
 
   // Engine scope — three levels: a single sewing line, an entire department
   // (every wired line whose deptId matches), or the whole factory (every
@@ -265,7 +239,7 @@ export function LiveSimPage() {
   // time the twin or garment library changes so the cards stay live with the
   // Builder. Empty list when the twin has no lines.
   const lineBuilds: LineBuild[] = useMemo(() => {
-    if (!useTwinSource || linesInTwin.length === 0) return [];
+    if (linesInTwin.length === 0) return [];
     return buildLinesFromTwin({
       twin: activeTwin,
       garmentsById: garments.byId,
@@ -276,13 +250,12 @@ export function LiveSimPage() {
       ),
       modelTimeUnit: project.time.modelTimeUnit,
     });
-  }, [useTwinSource, activeTwin, linesInTwin.length, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
+  }, [activeTwin, linesInTwin.length, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
 
   // Twin-driven config + meta. Wrapped in a try because the user can land
   // on /sim with an empty twin — we fall back to the reference / garment
   // path in that case instead of blowing up the page.
   const twinBuild = useMemo(() => {
-    if (!useTwinSource) return null;
     try {
       return buildSimConfigFromTwin({
         twin: activeTwin,
@@ -298,31 +271,12 @@ export function LiveSimPage() {
     } catch {
       return null;
     }
-  }, [useTwinSource, activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all, selectedLineId]);
+  }, [activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all, selectedLineId]);
 
-  // When the user picks an order from the SOURCE dropdown (or arrives from
-  // the Orders wizard), the engine should reflect that order's garment and
-  // crew instead of the global `selectedGarmentId` / slider state.
-  const orderGarment = activeOrder ? garments.byId[activeOrder.garmentTemplateId] ?? null : null;
-
-  const garment = twinBuild?.meta.garment
-    ?? orderGarment
-    ?? (garments.byId[garmentId] ?? garments.all[0]);
-  // Effective operator count for display + reference path. Twin path always
-  // shows the slider's current value (re-seeded by the effect below when the
-  // twin changes). Reference path uses the variant's authored count.
-  const effectiveOperators = twinBuild
-    ? operators
-    : activeOrder
-      ? operators
-      : operators;
-
-  // Production-system bundle size — picked up from the Orders wizard. PBS
-  // batches 30, modular/UPS/make-through run piece-by-piece (size 1), etc.
-  const productionSystemId = activeOrder?.productionSystem ?? project.selectedProductionSystem;
-  const productionSystemDef = PRODUCTION_SYSTEMS[productionSystemId];
-  const systemBundleSize =
-    bundleOverride ?? twinBuild?.meta.seedBundleSize ?? productionSystemDef.typicalBatchSize;
+  const garment = twinBuild?.meta.garment ?? (garments.byId[garmentId] ?? garments.all[0]);
+  // Operator count for display. The slider owns it, re-seeded by the effect
+  // below whenever the twin changes.
+  const effectiveOperators = operators;
 
   const opEfficiency = useMemo(
     () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
@@ -344,37 +298,14 @@ export function LiveSimPage() {
   //
   // Empty-twin fallback keeps the hook call unconditional when no garment
   // is available either.
-  const simSourceTwin = useMemo(() => {
-    let base: Twin;
-    if (useTwinSource) {
-      base = selectedLineId
-        ? scopedTwinForLine(activeTwin, selectedLineId)
-        : activeTwin;
-    } else if (garment) {
-      // Order / garment fallback — route through the same per-system seed
-      // helper the Build-in-Builder button uses so picking modular gives
-      // the user a U-cell in the sim, not a snaking grid. The helper
-      // tacks Source / ResourcePool / Sink onto the seeded line so the
-      // PML engine still has a closed graph to run.
-      base =
-        buildSimReadyOrderTwin({
-          draftName: garment.name,
-          productionSystem: mapToLineSystem(productionSystemId),
-          garment,
-          operators: effectiveOperators,
-        }) ?? EMPTY_TWIN;
-    } else {
-      base = EMPTY_TWIN;
-    }
-    if (!bundleOverride || bundleOverride <= 0) return base;
-    return overrideBundleSize(base, bundleOverride);
-  }, [useTwinSource, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride, productionSystemId]);
-  // Captured for future PML wiring — neither flows into the engine today
-  // because the twin already encodes both. `systemBundleSize` is read by the
-  // HUD's BUNDLE chip; opEfficiency is mirrored back into the skill matrix
-  // store by the operator slider effect above.
+  const simSourceTwin = useMemo(
+    () => (selectedLineId ? scopedTwinForLine(activeTwin, selectedLineId) : activeTwin),
+    [selectedLineId, activeTwin],
+  );
+  // Captured for future PML wiring — it does not flow into the engine today
+  // because the twin already encodes it. `opEfficiency` is mirrored back into
+  // the skill matrix store by the operator slider effect above.
   void opEfficiency;
-  void systemBundleSize;
 
   // Re-seed the operator slider whenever the twin meta says the default has
   // changed (e.g. user edits Builder, returns to /sim). Skip when the user
@@ -388,24 +319,6 @@ export function LiveSimPage() {
       lastSeedRef.current = twinBuild.meta.seedOperators;
     }
   }, [twinBuild]);
-
-  // Snap slider state to the active order whenever the user switches between
-  // orders in the SOURCE dropdown (or arrives via /sim?source=order:<id>).
-  // Tracked separately from the twin seed so toggling Order → Twin → Order
-  // restores the order's values instead of leaving the prior twin state.
-  const lastOrderIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeOrder) {
-      lastOrderIdRef.current = null;
-      return;
-    }
-    if (lastOrderIdRef.current !== activeOrder.id) {
-      setGarmentId(activeOrder.garmentTemplateId);
-      setOperators(activeOrder.operators);
-      setBundleOverride(null);
-      lastOrderIdRef.current = activeOrder.id;
-    }
-  }, [activeOrder]);
 
   const baseSim = usePmlSim(simSourceTwin, { garment, recordFlow: true });
 
@@ -425,7 +338,7 @@ export function LiveSimPage() {
     return ok; // factory
   }, [lineBuilds, scope]);
   const inMultiLineScope =
-    useTwinSource && scope.kind !== 'line' && wiredLineBuilds.length > 1;
+    scope.kind !== 'line' && wiredLineBuilds.length > 1;
   const multiInputs = useMemo<PmlLineInput[]>(
     () =>
       inMultiLineScope
@@ -482,16 +395,29 @@ export function LiveSimPage() {
     [flowPlayback, state.time],
   );
 
-  // Effective twin meta passed to the view components — merged across lines
-  // in multi-line scope so iso/top/heat/logic see every authored Builder
-  // coord, not just the dominant garment's stations.
+  // Effective twin meta passed to the view components — the floor plan for
+  // whatever is about to be drawn.
+  //
+  // It comes from the PML view, i.e. from the thing that actually RAN, and
+  // not from `buildSimConfigFromTwin`. The two build different sets: PML
+  // makes a station of every Service block, the legacy builder keeps only
+  // the blocks whose `operation.opId` resolves in a garment bulletin and
+  // THROWS when that leaves nothing. So on a floor where no station is bound
+  // to an operation yet — every hand-built line, before the bulletin is
+  // wired — the meta was null, `layoutStations` fell through to its synthetic
+  // row, and the run's stations were drawn as evenly-spaced placeholder slabs
+  // at the grid origin while the user's actual blocks were drawn a second
+  // time, as ambient scenery, where they really stood. Three ghosts of a
+  // four-block floor, labelled OP-1 / OP-2 / OP-3.
+  //
+  // Reading the PML meta makes the floor and the run the same list by
+  // construction: one cell per simulated block, at `ws.position`, with the
+  // block's own footprint and catalog id. Multi-line scope already merged
+  // PML metas (`mergePmlTwinMetas`) — this is the single-line path catching
+  // up, not a new idea.
   const effectiveTwinMeta: BuildFromTwinMeta | null = inMultiLineScope
     ? mergedMultiMeta
-    : (twinBuild?.meta ?? null);
-  const effectiveSourceLabel = inMultiLineScope
-    ? 'All lines'
-    : garment.name;
-
+    : baseSim.view.meta;
   // Ambient workstations — everything the user placed in Factory Builder that
   // *isn't* a sewing-op-bearing engine station. Spreaders, cutters, QC tables,
   // inline irons, packing benches, fabric racks, bundle trolleys, supervisors,
@@ -500,7 +426,7 @@ export function LiveSimPage() {
   // Without this, only the sewing line shows up in the simulation and the
   // rest of the factory user authored seems to disappear.
   const ambientWorkstations = useMemo<AmbientWorkstationInput[]>(() => {
-    if (!useTwinSource || !activeTwin?.workstations) return [];
+    if (!activeTwin?.workstations) return [];
     const simulatedSet = new Set(effectiveTwinMeta?.simulatedWsIds ?? []);
     const lineById = new Map(
       (activeTwin.lines ?? []).map((l) => [l.id, l] as const),
@@ -511,60 +437,71 @@ export function LiveSimPage() {
         const fix = lookupFixture(ws.catalogId);
         const line = ws.lineId ? lineById.get(ws.lineId) : undefined;
         const deptColor = line ? (DEPT_LINE_COLORS[line.color] ?? '#888') : '#888';
+        // `wsBaseFootprint`, not the raw catalogue dims: a station carrying a
+        // per-ws `size` override covers those cells on the Build floor, so it
+        // has to cover them here too.
+        const fp = wsBaseFootprint(ws);
         return {
           wsId: ws.id,
           catalogId: ws.catalogId,
           name: ws.name,
           gx: ws.position.x,
           gy: ws.position.y,
-          w: fix?.w ?? 1,
-          d: fix?.d ?? 1,
-          h: fix?.h ?? 1,
+          w: fp.w,
+          d: fp.d,
+          h: fp.h,
           rotation: ws.rotation ?? 0,
           deptColor,
           cat: fix?.cat ?? 'fix',
           lineId: ws.lineId,
         };
       });
-  }, [useTwinSource, activeTwin, effectiveTwinMeta]);
+  }, [activeTwin, effectiveTwinMeta]);
 
-  // Time displays — see `lib/timeUnit`. Three labelled kinds replace the
-  // old `hr = 8 + floor(t/60)` fake clock that conflated model time with
-  // calendar HH:MM. DAY N is derived from model time (not wall clock) so
-  // it stays correct across paused sessions.
+  /**
+   * The floor — one layout, shared by ISO, TOP and HEAT.
+   *
+   * Laid out here rather than inside each view so there is exactly one answer
+   * to "where is this machine", and so the coordinate marker below can read
+   * the same cells the views draw. See the LAYOUT note further down for what
+   * happened when there were four answers.
+   */
+  const floor = useMemo(
+    () => layoutStations(state.stations, effectiveTwinMeta, ambientWorkstations),
+    [state.stations, effectiveTwinMeta, ambientWorkstations],
+  );
+
+  // Time displays — see `lib/timeUnit`. Everything here is derived from model
+  // time, never the device clock, so a paused session resumes reading the
+  // same day and the same elapsed total.
+  //
+  // The device clock used to be pinned in the dock beside these, ticking a
+  // `setInterval` that re-rendered this whole page once a second to show the
+  // user something their menu bar already shows. Both the readout and its
+  // timer are gone.
   const unit = project.time.modelTimeUnit;
   const dayN = simDayNumber(state.time, unit, project.time.shiftDurationMin);
   const shiftPct = shiftProgressPct(state.time, unit, project.time.shiftDurationMin);
-  const modelStr = fmtModelTime(state.time, unit);
+  const elapsedStr = fmtElapsed(state.time, unit);
   const calStr = fmtCalendar(state.time, unit, project.time.startDate, project.units.dateFormat);
 
-  // Wall clock ticks every second for the corner pin. Recompute via a
-  // local interval — does NOT affect the engine, which is wall-clock-free.
-  const [wallNow, setWallNow] = useState(() => new Date());
-  useEffect(() => {
-    const id = window.setInterval(() => setWallNow(new Date()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-  const wallStr = fmtWallClock(wallNow);
-
-  // Event log can display model time ("t = 83 min", compact) or its
-  // calendar projection ("09:23 Mon 18 May"). User-toggleable so power users
-  // can pick whichever helps them reason about the rolling event feed.
-  const [eventTimeKind, setEventTimeKind] = useState<'model' | 'cal'>('model');
-
-  // Collapse state for the two floating overlays. Useful in LOGIC view where
-  // the operation grid spans the canvas — the user can fold these away to
-  // see the cards underneath without losing them entirely.
+  // Collapse state for the floating STATS overlay. Useful in LOGIC view where
+  // the operation grid spans the canvas — the user can fold it away to see the
+  // cards underneath without losing it entirely.
   const [hudOpen, setHudOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
 
-  // TIME SETUP drawer — model-time semantics + calendar anchoring for the
-  // run. Relocated here from the old Settings page so the controls that
-  // define what the header clocks mean live next to those clocks. Execution
-  // mode + playback speed stay in the transport bar (they already lived
-  // there). Dark-surface styling below mirrors the Sim view's overlays;
-  // colours go through alpha()/tokens so no raw literals hit the ratchet.
-  const [setupOpen, setSetupOpen] = useState(false);
+  // TIME SETUP — model-time semantics + calendar anchoring for the run.
+  //
+  // These four fields have moved twice. They came off the old Settings page
+  // to be near the clocks they define, landing as a drawer under the page
+  // header; then the clocks themselves moved into the transport dock, which
+  // left the drawer defining readouts a full screen height below it and
+  // holding 106px of floor open to do it. They render inside the dock now
+  // (see SimTransportDock's `setup` prop) — same fields, no reserved strip,
+  // and the settings sit on the instrument they configure.
+  //
+  // Dark-surface styling below mirrors the Sim view's overlays; colours go
+  // through alpha()/tokens so no raw literals hit the ratchet.
   const setupLabel: CSSProperties = {
     display: 'block',
     fontFamily: SW_FONTS.mono,
@@ -586,6 +523,144 @@ export function LiveSimPage() {
     fontWeight: 700,
     colorScheme: 'dark',
   };
+
+  // The panel itself, handed to the dock. Two columns rather than the
+  // drawer's four: a popover is sized by its contents, so the fields can sit
+  // at a readable width instead of being stretched to whatever a full-bleed
+  // strip happened to be.
+  const timeSetupPanel = (
+    <>
+      <div style={{ marginBottom: 12 }}>
+        <div
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.18em',
+            color: SW_COLORS.ink,
+          }}
+        >
+          TIME SETUP
+        </div>
+        {/* One sentence. The drawer's caption also explained where playback
+            speed lived, which was only worth saying while the two were a
+            screen apart — the speed well is now four pixels to the left. */}
+        <div
+          style={{
+            marginTop: 4,
+            fontFamily: SW_FONTS.body,
+            fontSize: 11,
+            lineHeight: 1.45,
+            color: alpha(SW_COLORS.ink, 0.55),
+          }}
+        >
+          What one tick of the clock is worth, and where the run starts on the calendar.
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+          gap: 14,
+          alignItems: 'start',
+        }}
+      >
+        {/* Model time unit — dark inline toggle (ToggleGroup is light-only).
+            Full width: four segments need the room, and it is the field the
+            other three are measured in. */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <span style={setupLabel}>MODEL TIME UNIT</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {(['second', 'minute', 'hour', 'day'] as const).map((u) => {
+              const active = project.time.modelTimeUnit === u;
+              return (
+                <button
+                  key={u}
+                  onClick={() => project.setTime('modelTimeUnit', u)}
+                  style={{
+                    flex: 1,
+                    padding: '7px 4px',
+                    textTransform: 'capitalize',
+                    background: active ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.06),
+                    color: active ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.7),
+                    border: 'none',
+                    borderRadius: SW_RADIUS.sm,
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {u}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Shift duration (minutes). */}
+        <div>
+          <span style={setupLabel}>SHIFT DURATION</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <NumberInput
+              aria-label="Shift duration in minutes"
+              min={30}
+              max={1440}
+              step={30}
+              value={project.time.shiftDurationMin}
+              onChange={(v) => {
+                if (v !== undefined) project.setTime('shiftDurationMin', v);
+              }}
+              style={{ ...setupInput, width: 76 }}
+            />
+            <span
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                color: alpha(SW_COLORS.ink, 0.55),
+                whiteSpace: 'nowrap',
+              }}
+            >
+              min · {(project.time.shiftDurationMin / 60).toFixed(1)} h
+            </span>
+          </div>
+        </div>
+
+        {/* Shift start time-of-day. */}
+        <div>
+          <span style={setupLabel}>SHIFT START</span>
+          <input
+            type="time"
+            value={fmtMinutesAsHHMM(project.time.shiftStartMinuteOfDay)}
+            onChange={(e) => project.setTime('shiftStartMinuteOfDay', parseHHMM(e.target.value))}
+            style={setupInput}
+          />
+        </div>
+
+        {/* Simulation start date — calendar anchor for t = 0. */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <span style={setupLabel}>START DATE · t = 0</span>
+          <input
+            type="date"
+            value={project.time.startDate.slice(0, 10)}
+            onChange={(e) => {
+              const day = e.target.value;
+              if (!day) return;
+              // Preserve the existing time-of-day portion of startDate.
+              const existing = new Date(project.time.startDate);
+              const next = new Date(day);
+              if (!Number.isNaN(existing.getTime())) {
+                next.setHours(existing.getHours(), existing.getMinutes(), 0, 0);
+              }
+              project.setTime('startDate', next.toISOString());
+            }}
+            style={setupInput}
+          />
+        </div>
+      </div>
+    </>
+  );
 
   // Throughput in pieces/hour, read straight off the history.
   //
@@ -617,13 +692,14 @@ export function LiveSimPage() {
       style={{
         width: '100%',
         height: '100%',
-        display: 'grid',
-        // 4 row tracks for the 4 top-level children: HUD, sewing-lines
-        // strip, simulation floor (fills remaining height), playback bar.
-        // Keeping a fifth track here is what caused the canvas to collapse
-        // after the reference-picker row was lifted to Reference Models —
-        // the floor div landed in an `auto` track and zeroed its height.
-        gridTemplateRows: 'auto auto 1fr auto',
+        // A flex column, not a row-track grid. The grid's track list had to
+        // match the child count exactly, so the conditionally-rendered TIME
+        // SETUP drawer shifted the floor into the wrong track and zeroed its
+        // height whenever the drawer was open. A column has nothing to keep
+        // in sync: the header (plus drawer) size to content and the floor
+        // takes every pixel that is left.
+        display: 'flex',
+        flexDirection: 'column',
         // Dark ground. This read `background: ink / color: paper` from before
         // the Control Room flip made `ink` the near-white and `paper` the
         // near-black — which painted the whole HUD white-on-white. The
@@ -633,85 +709,73 @@ export function LiveSimPage() {
         color: SW_COLORS.ink,
       }}
     >
-      {/* HUD */}
+      {/* HUD — page identity, run setup, line scope and the Builder escape
+          hatch on one line. The sewing-line picker used to be its own 78px
+          strip under this bar, which cost the canvas a full row to say what
+          fits in a rail of pills. */}
       <div
         style={{
-          padding: '12px 24px',
+          padding: '10px 24px',
           display: 'flex',
           alignItems: 'center',
-          gap: 18,
+          gap: 14,
           borderBottom: '1px solid #ffffff15',
-          flexWrap: 'wrap',
+          flexWrap: 'nowrap',
+          minWidth: 0,
         }}
       >
-        <ViewTitle title="Live Sim" surface="dark" />
-        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
-
-        {/* SOURCE picker — clicking opens a dropdown of every source the
-            engine can run: the Builder-authored twin (the user's factory),
-            any orders they've committed from the Orders wizard, and the
-            loaded reference paper (when active). Switching is instant —
-            the slider/garment/system snap to the picked source. */}
-        <SimSourceMenu
-          activeOrderId={activeOrder?.id ?? null}
-          orders={project.orders}
-          garmentsById={garments.byId}
-          twinBuild={inMultiLineScope && effectiveTwinMeta ? { meta: effectiveTwinMeta } : twinBuild}
-          totalWorkstations={activeTwin.workstations.length}
-          factoryName={project.meta.name}
-          onPickTwin={() => setSearchParams({ source: 'twin' })}
-          onPickOrder={(id) => setSearchParams({ source: `order:${id}` })}
-          onNewOrder={() => navigate('/orders')}
-        />
-
-        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
-        {/* Three labelled clocks — model (sim t), calendar (projection), wall (device). */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <TimeDisplay
-            kind="MODEL"
-            surface="dark"
-            primarySize={18}
-            primary={modelStr}
-            secondary={`day ${dayN} · ${Math.round(shiftPct)}% of shift`}
-            compact
-          />
-          <TimeDisplay
-            kind="CAL"
-            surface="dark"
-            primarySize={12}
-            primary={calStr}
-            compact
-          />
-        </div>
-        <TimeDisplay kind="WALL" surface="dark" primarySize={12} primary={wallStr} compact />
-
-        {/* TIME SETUP toggle — sits with the clocks because it defines what
-            they mean. Opens the model-time / calendar drawer below the bar. */}
+        {/* Back to menu — same affordance, same spot as the Builder's, so
+            leaving a surface is the same gesture on every tab. */}
         <button
-          onClick={() => setSetupOpen((o) => !o)}
-          title="Model time unit, shift length & calendar anchor for the run"
+          onClick={() => navigate('/')}
+          title="Back to menu"
+          aria-label="Back to menu"
           style={{
+            flex: 'none',
+            width: 30,
+            height: 30,
             display: 'inline-flex',
             alignItems: 'center',
-            gap: 6,
-            padding: '5px 10px',
-            background: setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.08),
-            border: `1px solid ${setupOpen ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.2)}`,
+            justifyContent: 'center',
+            padding: 0,
+            background: alpha(SW_COLORS.ink, 0.08),
+            border: `1px solid ${alpha(SW_COLORS.ink, 0.2)}`,
             borderRadius: SW_RADIUS.sm,
-            color: setupOpen ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.8),
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 900,
-            letterSpacing: '0.14em',
+            color: alpha(SW_COLORS.ink, 0.8),
             cursor: 'pointer',
           }}
         >
-          <span aria-hidden>⚙</span>
-          <span>TIME SETUP</span>
-          <Chevron open={setupOpen} color="currentColor" style={{ opacity: 0.7 }} />
+          <Icon name="back" />
         </button>
+        <ViewTitle title="Live Sim" surface="dark" />
+        <div style={{ width: 1, height: 20, flex: 'none', background: '#ffffff20' }} />
 
-        <div style={{ flex: 1 }} />
+        {/* The run's clock used to sit here, and a TIME SETUP button next to
+            it opened the drawer that defined what the clock counted. Both are
+            in the transport dock now — see SimTransportDock — beside the
+            controls that move the run. This bar is left saying only what the
+            run IS. */}
+
+        {/* SEWING LINES — scope picker, in the top bar with the other
+            controls that say what the run IS. Was a full-width strip of
+            three-line cards below this bar; the detail those cards carried
+            lives in each pill's tooltip now. */}
+        {lineBuilds.length > 0 ? (
+          <SewingLinesScope
+            lineBuilds={lineBuilds}
+            scope={scope}
+            activeTwin={activeTwin}
+            onPickScope={(next) => {
+              const params = new URLSearchParams(searchParams);
+              params.delete('line');
+              if (next.kind === 'factory') params.delete('scope');
+              else params.set('scope', scopeToParam(next));
+              setSearchParams(params);
+            }}
+          />
+        ) : (
+          <div style={{ flex: 1 }} />
+        )}
 
         {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
             browser tab. We DO NOT touch the active twin: instead we build a
@@ -747,7 +811,6 @@ export function LiveSimPage() {
                   : `Line · ${seedGarment?.name ?? seedGarmentId ?? 'New line'}`;
                 const blank = buildSeededDraftTwin({
                   draftName,
-                  productionSystem: (scopedLine?.productionSystem ?? 'PBS') as ProductionSystemKey,
                   garment: seedGarment,
                   operatorTarget: operators,
                   color: (scopedLine?.color ?? 'brand') as EntityColorKey,
@@ -785,6 +848,7 @@ export function LiveSimPage() {
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
+                flex: 'none',
                 padding: '6px 12px',
                 fontFamily: SW_FONTS.display,
                 fontSize: 10,
@@ -804,172 +868,24 @@ export function LiveSimPage() {
         })()}
       </div>
 
-      {/* TIME SETUP DRAWER ─────────────────────────────────────────────────
-          Model-time semantics + calendar anchoring for the run, relocated
-          from the old Settings page. Full-width dark strip under the header;
-          collapses to nothing when closed so it never steals canvas height.
-          Execution mode + speed are intentionally NOT duplicated here — they
-          live in the transport bar at the bottom. */}
-      {setupOpen && (
-        <div
-          style={{
-            padding: '12px 24px 14px',
-            background: alpha(SW_COLORS.ink, 0.03),
-            borderBottom: `1px solid ${alpha(SW_COLORS.ink, 0.12)}`,
-          }}
-        >
-          <div
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 10,
-              color: alpha(SW_COLORS.ink, 0.5),
-              letterSpacing: '0.04em',
-              marginBottom: 10,
-              lineHeight: 1.5,
-            }}
-          >
-            MODEL &amp; TIME — what one tick of{' '}
-            <b style={{ color: alpha(SW_COLORS.ink, 0.85) }}>t</b> means, and how it maps to
-            the calendar. Execution mode &amp; playback speed are in the transport bar below.
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
-              gap: 18,
-              alignItems: 'start',
-            }}
-          >
-            {/* Model time unit — dark inline toggle (ToggleGroup is light-only). */}
-            <div>
-              <span style={setupLabel}>MODEL TIME UNIT</span>
-              <div style={{ display: 'flex', gap: 4 }}>
-                {(['second', 'minute', 'hour', 'day'] as const).map((u) => {
-                  const active = project.time.modelTimeUnit === u;
-                  return (
-                    <button
-                      key={u}
-                      onClick={() => project.setTime('modelTimeUnit', u)}
-                      style={{
-                        flex: 1,
-                        padding: '7px 4px',
-                        textTransform: 'capitalize',
-                        background: active ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.06),
-                        color: active ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.7),
-                        border: 'none',
-                        borderRadius: SW_RADIUS.sm,
-                        fontFamily: SW_FONTS.mono,
-                        fontSize: 11,
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {u}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Shift duration (minutes). */}
-            <div>
-              <span style={setupLabel}>SHIFT DURATION</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="number"
-                  min={30}
-                  max={1440}
-                  step={30}
-                  value={project.time.shiftDurationMin}
-                  onChange={(e) =>
-                    project.setTime(
-                      'shiftDurationMin',
-                      Math.max(30, Math.min(1440, parseInt(e.target.value) || 480)),
-                    )
-                  }
-                  style={{ ...setupInput, width: 84 }}
-                />
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: alpha(SW_COLORS.ink, 0.55) }}>
-                  min · {(project.time.shiftDurationMin / 60).toFixed(1)} h
-                </span>
-              </div>
-            </div>
-
-            {/* Simulation start date — calendar anchor for t = 0. */}
-            <div>
-              <span style={setupLabel}>START DATE · t = 0</span>
-              <input
-                type="date"
-                value={project.time.startDate.slice(0, 10)}
-                onChange={(e) => {
-                  const day = e.target.value;
-                  if (!day) return;
-                  // Preserve the existing time-of-day portion of startDate.
-                  const existing = new Date(project.time.startDate);
-                  const next = new Date(day);
-                  if (!Number.isNaN(existing.getTime())) {
-                    next.setHours(existing.getHours(), existing.getMinutes(), 0, 0);
-                  }
-                  project.setTime('startDate', next.toISOString());
-                }}
-                style={setupInput}
-              />
-            </div>
-
-            {/* Shift start time-of-day. */}
-            <div>
-              <span style={setupLabel}>SHIFT START</span>
-              <input
-                type="time"
-                value={fmtMinutesAsHHMM(project.time.shiftStartMinuteOfDay)}
-                onChange={(e) => project.setTime('shiftStartMinuteOfDay', parseHHMM(e.target.value))}
-                style={setupInput}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* SEWING LINES STRIP ────────────────────────────────────────────────
-          One card per sewing line in the active twin. Click a card to scope
-          the engine + visuals to just that line; click ALL LINES to widen the
-          run back to every workstation in the factory. Hidden when the twin
-          has no lines (single-line factories keep the legacy chrome). */}
-      {useTwinSource && lineBuilds.length > 0 ? (
-        <SewingLinesStrip
-          lineBuilds={lineBuilds}
-          scope={scope}
-          activeTwin={activeTwin}
-          onPickScope={(next) => {
-            const params = new URLSearchParams(searchParams);
-            params.delete('line');
-            if (next.kind === 'factory') params.delete('scope');
-            else params.set('scope', scopeToParam(next));
-            setSearchParams(params);
-          }}
-        />
-      ) : (
-        <div />
-      )}
-
-      {/* SIMULATION FLOOR */}
+      {/* SIMULATION FLOOR — every remaining pixel. The transport dock rides
+          on top of it as an overlay rather than claiming a row of its own. */}
       <div
         style={{
           position: 'relative',
+          flex: 1,
+          minHeight: 0,
           overflow: 'hidden',
           background: 'radial-gradient(ellipse at 50% 30%, #182231 0%, #0a0d12 100%)',
         }}
       >
         {view === 'iso' && (
-          <PanZoomViewport {...camFor('iso')}>
+          <PanZoomViewport {...camFor('iso')} projection={ISO_PROJECTION}>
             <SimIsoView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={effectiveSourceLabel}
               simTime={state.time}
-              system={productionSystemId}
-              twinMeta={effectiveTwinMeta}
-              ambientWorkstations={ambientWorkstations}
+              floor={floor}
               selectedOpId={selectedOpId}
               onSelectStation={setSelectedOpId}
               bundles={liveBundles}
@@ -977,43 +893,34 @@ export function LiveSimPage() {
           </PanZoomViewport>
         )}
         {view === 'top' && (
-          <PanZoomViewport {...camFor('top')}>
+          <PanZoomViewport {...camFor('top')} projection={FLAT_PROJECTION}>
             <SimTopView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={effectiveSourceLabel}
               simTime={state.time}
-              system={productionSystemId}
-              twinMeta={effectiveTwinMeta}
-              ambientWorkstations={ambientWorkstations}
+              floor={floor}
               selectedOpId={selectedOpId}
               onSelectStation={setSelectedOpId}
             />
           </PanZoomViewport>
         )}
         {view === 'heat' && (
-          <PanZoomViewport {...camFor('heat')}>
+          <PanZoomViewport {...camFor('heat')} projection={FLAT_PROJECTION}>
             <SimHeatView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={effectiveSourceLabel}
               simTime={state.time}
-              system={productionSystemId}
-              twinMeta={effectiveTwinMeta}
-              ambientWorkstations={ambientWorkstations}
+              floor={floor}
             />
           </PanZoomViewport>
         )}
         {view === 'logic' && (
-          <PanZoomViewport {...camFor('logic')}>
+          <PanZoomViewport {...camFor('logic')} projection={FLAT_PROJECTION}>
             <SimLogicView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={effectiveSourceLabel}
               simTime={state.time}
-              system={productionSystemId}
-              twinMeta={effectiveTwinMeta}
-              ambientWorkstations={ambientWorkstations}
+              floor={floor}
             />
           </PanZoomViewport>
         )}
@@ -1053,7 +960,7 @@ export function LiveSimPage() {
               // taller than the viewport, and without a cap it ran underneath
               // the floor legend. The reserve leaves that bottom-left corner
               // free rather than relying on z-order to hide the collision.
-              maxHeight: 'calc(100% - 108px)',
+              maxHeight: 'calc(100% - 128px)',
               overflowY: 'auto',
               overflowX: 'hidden',
               paddingRight: 4,
@@ -1192,17 +1099,6 @@ export function LiveSimPage() {
                     </div>
                   )}
 
-                  <div
-                      title={`${productionSystemDef.label}\n${productionSystemDef.description}`}
-                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, cursor: 'help' }}
-                    >
-                      <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
-                        SYSTEM
-                      </span>
-                      <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
-                        {productionSystemDef.short}
-                      </span>
-                  </div>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 12, order: 1 }}>
@@ -1242,158 +1138,6 @@ export function LiveSimPage() {
             )}
           </div>
 
-        {/* Right inspector — Bottleneck + Event feed. Collapsible so it
-            doesn't permanently clobber the rightmost column of operation
-            cards in LOGIC view (or the floor edge in ISO/TOP/HEAT). */}
-        <div
-          style={{
-            position: 'absolute',
-            right: 24,
-            top: 24,
-            width: inspectorOpen ? 280 : 'auto',
-            maxHeight: 'calc(100% - 48px)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'flex-end',
-            gap: 6,
-            zIndex: 5,
-          }}
-        >
-          <button
-            onClick={() => setInspectorOpen((o) => !o)}
-            title={inspectorOpen ? 'Collapse inspector' : 'Expand inspector'}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '4px 10px',
-              background: '#0a0d12cc',
-              border: '1px solid #ffffff20',
-              borderRadius: SW_RADIUS.sm,
-              color: '#fff',
-              fontFamily: SW_FONTS.mono,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.2em',
-              cursor: 'pointer',
-              backdropFilter: 'blur(6px)',
-              alignSelf: 'flex-end',
-            }}
-          >
-            <span style={{ color: SW_COLORS.brand }}>▣</span>
-            <span>INSPECTOR</span>
-            <Chevron open={inspectorOpen} color="#ffffff80" />
-          </button>
-          {inspectorOpen && (
-          <>
-          <div
-            style={{
-              background: '#ffffff08',
-              border: '1px solid #ffffff15',
-              borderRadius: SW_RADIUS.sm,
-              padding: 12,
-              width: '100%',
-            }}
-          >
-            <div
-              style={{
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                fontWeight: 700,
-                color: '#ffffff80',
-                letterSpacing: '1.5px',
-                marginBottom: 8,
-              }}
-            >
-              BOTTLENECK
-            </div>
-            <div style={{ fontSize: 12, color: SW_COLORS.alarm, fontWeight: 700, marginBottom: 4 }}>
-              {state.stations[state.bottleneckOpIndex]?.opCode ?? '—'} ·{' '}
-              {state.stations[state.bottleneckOpIndex]?.opName ?? '—'}
-            </div>
-            <div style={{ fontSize: 11, color: '#ffffffaa', fontFamily: SW_FONTS.mono }}>
-              Q={state.stations[state.bottleneckOpIndex]?.queueLen ?? 0} · BUSY=
-              {state.stations[state.bottleneckOpIndex]?.busy ?? 0}/
-              {state.stations[state.bottleneckOpIndex]?.serversTotal ?? 0}
-            </div>
-          </div>
-
-          <div
-            style={{
-              background: '#ffffff08',
-              border: '1px solid #ffffff15',
-              borderRadius: SW_RADIUS.sm,
-              padding: 12,
-              overflow: 'hidden',
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              minHeight: 120,
-              width: '100%',
-            }}
-          >
-            <div
-              style={{
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                fontWeight: 700,
-                color: '#ffffff80',
-                letterSpacing: '1.5px',
-                marginBottom: 8,
-                flexShrink: 0,
-              }}
-            >
-              EVENT FEED
-            </div>
-            {/* Toggle between model time (default) and the calendar projection. */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: '#ffffff60', letterSpacing: '1px' }}>SHOW</span>
-              <ToggleGroup
-                value={eventTimeKind}
-                onChange={(v) => setEventTimeKind(v as 'model' | 'cal')}
-                options={[
-                  { value: 'model', label: 't =' },
-                  { value: 'cal',   label: 'CAL' },
-                ]}
-              />
-            </div>
-            <div style={{ fontSize: 11, fontFamily: SW_FONTS.mono, lineHeight: 1.6, overflow: 'auto', flex: 1 }}>
-              {state.events.length === 0 && (
-                <EmptyState
-                  size="sm"
-                  surface="dark"
-                  icon="▶"
-                  title="No events yet"
-                  body="Press PLAY to start the run."
-                  action={{ label: '▶ Play', onClick: () => setPlaying(true) }}
-                />
-              )}
-              {state.events.map((e, i) => {
-                const col =
-                  e.tag === 'OUT'
-                    ? SW_COLORS.ok
-                    : e.tag === 'STARVE'
-                      ? SW_COLORS.warn
-                      : SW_COLORS.alarm;
-                const label =
-                  eventTimeKind === 'cal'
-                    ? fmtCalendarCompact(e.time, unit, project.time.startDate)
-                    : fmtModelCompact(e.time, unit);
-                return (
-                  <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
-                    <span style={{ color: '#ffffff60', width: eventTimeKind === 'cal' ? 130 : 50, fontFamily: SW_FONTS.mono }}>
-                      {label}
-                    </span>
-                    <span style={{ color: col, flex: 1 }}>{e.msg}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          </>
-          )}
-        </div>
-
         {/* Per-station sim-vs-theory drawer — fed by the REAL run on this page. */}
         {(() => {
           const idx = selectedOpId ? state.stations.findIndex((s) => s.opId === selectedOpId) : -1;
@@ -1406,242 +1150,86 @@ export function LiveSimPage() {
             />
           );
         })()}
-      </div>
 
-      {/* TRANSPORT DOCK */}
-      {(() => {
-        // Speed and execution mode were two controls on one axis: picking a
-        // tier while Virtual was on changed a number the pacer then ignored.
-        // They are one selector now — a numeric tier means real-time pacing,
-        // VIRT means "run as fast as compute allows".
-        const virtual = project.time.executionMode === 'virtual';
-        const speedValue = virtual ? 'virtual' : String(speed);
-        // Line pace — the bottleneck station's cycle time, which is the
-        // interval the floor actually delivers a piece at. Not demand takt:
-        // this comes from the run, not from an order.
-        const bn =
-          state.stations[state.bottleneckOpIndex] ??
-          state.stations.reduce<(typeof state.stations)[number] | undefined>(
-            (slowest, st) =>
-              !slowest || st.smv / Math.max(1, st.serversTotal) > slowest.smv / Math.max(1, slowest.serversTotal)
-                ? st
-                : slowest,
-            undefined,
-          );
-        const paceMin = bn && bn.serversTotal > 0 ? bn.smv / bn.serversTotal : null;
-        return (
-          <SimTransportDock
-            playing={playing}
-            onToggle={() => setPlaying(!playing)}
-            onReset={reset}
-            onStep={() => step(3600 / unitToSeconds(unit))}
-            stepLabel="1h"
-            speed={speedValue}
-            speedOptions={[
-              { value: '1', label: '1×', title: `Real-time · 1 model-${unit} per real-sec` },
-              { value: '10', label: '10×', title: `10 model-${unit} per real-sec` },
-              { value: '60', label: '60×', title: '1 model-hour per real-sec' },
-              { value: '480', label: '480×', title: 'Full 8-hr shift in 1 real-sec' },
-              { value: 'virtual', label: 'VIRT', title: 'Virtual — engine runs as fast as compute allows, no real-time pacing' },
-            ]}
-            onSpeed={(v) => {
-              if (v === 'virtual') {
-                project.setTime('executionMode', 'virtual');
-                return;
+        {/* TRANSPORT DOCK — an overlay pinned to the bottom of the floor,
+            not a row beneath it. The controls that move the run now sit on
+            the thing they move, and the canvas keeps the ~90px the docked
+            bar used to take off the bottom of every view. */}
+        {(() => {
+          // Speed and execution mode were two controls on one axis: picking a
+          // tier while Virtual was on changed a number the pacer then ignored.
+          // They are one selector now — a numeric tier means real-time pacing,
+          // VIRT means "run as fast as compute allows".
+          const virtual = project.time.executionMode === 'virtual';
+          const speedValue = virtual ? 'virtual' : String(speed);
+          // Line pace — the bottleneck station's cycle time, which is the
+          // interval the floor actually delivers a piece at. Not demand takt:
+          // this comes from the run, not from an order.
+          const bn =
+            state.stations[state.bottleneckOpIndex] ??
+            state.stations.reduce<(typeof state.stations)[number] | undefined>(
+              (slowest, st) =>
+                !slowest || st.smv / Math.max(1, st.serversTotal) > slowest.smv / Math.max(1, slowest.serversTotal)
+                  ? st
+                  : slowest,
+              undefined,
+            );
+          const paceMin = bn && bn.serversTotal > 0 ? bn.smv / bn.serversTotal : null;
+          // Reported as pieces per hour rather than minutes per piece. Same
+          // fact, but "0.417 min/pc" has to be inverted in the reader's head
+          // before it means anything, and a floor is planned in pieces.
+          const pcsPerHour = paceMin != null && paceMin > 0 ? Math.round(60 / paceMin) : null;
+          return (
+            <SimTransportDock
+              playing={playing}
+              onToggle={() => setPlaying(!playing)}
+              onReset={reset}
+              onStep={() => step(3600 / unitToSeconds(unit))}
+              stepLabel="1h"
+              speed={speedValue}
+              speedOptions={[
+                { value: '1', label: '1×', title: `Real-time · 1 model-${unit} per real-sec` },
+                { value: '10', label: '10×', title: `10 model-${unit} per real-sec` },
+                { value: '60', label: '60×', title: '1 model-hour per real-sec' },
+                { value: '480', label: '480×', title: 'Full 8-hr shift in 1 real-sec' },
+                { value: 'virtual', label: 'VIRT', title: 'Virtual — engine runs as fast as compute allows, no real-time pacing' },
+              ]}
+              onSpeed={(v) => {
+                if (v === 'virtual') {
+                  project.setTime('executionMode', 'virtual');
+                  return;
+                }
+                if (virtual) project.setTime('executionMode', 'realtime');
+                setSpeed(Number(v));
+              }}
+              accent={
+                pcsPerHour != null
+                  ? {
+                      label: 'RATE',
+                      value: String(pcsPerHour),
+                      unit: 'pcs/hr',
+                      title: `The slowest step on the line is ${bn?.opName}, which passes a piece every ${Math.round(paceMin! * 60)} s. That caps the whole line at about ${pcsPerHour} pieces an hour.`,
+                    }
+                  : null
               }
-              if (virtual) project.setTime('executionMode', 'realtime');
-              setSpeed(Number(v));
-            }}
-            accent={
-              paceMin != null
-                ? {
-                    label: 'PACE',
-                    value: paceMin.toFixed(3),
-                    unit: 'min/pc',
-                    title: `Bottleneck cycle time — ${bn.opName} sets the line's pace at ${paceMin.toFixed(3)} min per piece`,
-                  }
-                : null
-            }
-            progressPct={shiftPct}
-            progressLabel={`DAY ${dayN} · ${Math.round(shiftPct)}% · ${modelStr}`}
-            end={{ label: 'End shift →', onClick: () => navigate('/kpi') }}
-          />
-        );
-      })()}
+              progressPct={shiftPct}
+              clock={{
+                elapsed: elapsedStr,
+                day: dayN,
+                date: calStr,
+              }}
+              setup={timeSetupPanel}
+              end={{ label: 'End shift →', onClick: () => navigate('/kpi') }}
+            />
+          );
+        })()}
+      </div>
 
       <style>{`
         @keyframes sim-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
         @keyframes sim-march { to { stroke-dashoffset: -16; } }
         @keyframes sim-ping { 0% { opacity: 0.55; transform: scale(1); } 100% { opacity: 0; transform: scale(2.1); } }
       `}</style>
-    </div>
-  );
-}
-
-interface SimSourceMenuProps {
-  activeOrderId: string | null;
-  orders: OrderDraft[];
-  garmentsById: Record<string, GarmentTemplate>;
-  twinBuild: { meta: BuildFromTwinMeta } | null;
-  totalWorkstations: number;
-  factoryName: string;
-  onPickTwin: () => void;
-  onPickOrder: (id: string) => void;
-  onNewOrder: () => void;
-}
-
-/**
- * SOURCE picker — a HudSelect-styled dropdown showing every source the engine
- * can run: the canonical twin (always), each saved order from the Orders
- * wizard, and the loaded reference paper (when active). Selecting an option
- * switches the engine; the slider/garment snap to the picked source via the
- * order-seed effect in LiveSimPage.
- */
-function SimSourceMenu({
-  activeOrderId,
-  orders,
-  garmentsById,
-  twinBuild,
-  totalWorkstations,
-  factoryName,
-  onPickTwin,
-  onPickOrder,
-  onNewOrder,
-}: SimSourceMenuProps) {
-  const factoryLabel = (factoryName?.trim() || 'Untitled factory').toUpperCase();
-  const isOrderSource = !!activeOrderId;
-  const isRefSource = false;
-  const isTwinSource = !isOrderSource && !isRefSource;
-  const simCount = twinBuild?.meta.simulatedWsIds.length ?? 0;
-  const infraCount = twinBuild?.meta.infrastructure.length ?? 0;
-  const wiredCount = simCount + infraCount;
-  const tone = isRefSource
-    ? SW_COLORS.fabric
-    : isOrderSource
-      ? SW_COLORS.thread
-      : SW_COLORS.brand;
-
-  type SourceValue = `twin` | `order:${string}` | `ref`;
-
-  // The FACTORY row's meta has to be sensible in every mode — twinBuild is
-  // null when an order/reference is active, so fall back to the raw station
-  // count from activeTwin (which the parent already gives us via
-  // `totalWorkstations`). Only print "build a factory first" when the twin
-  // is genuinely empty.
-  const twinMeta = twinBuild
-    ? `${wiredCount} of ${totalWorkstations} wired · ${simCount} station${simCount === 1 ? '' : 's'}`
-    : totalWorkstations > 0
-      ? `${totalWorkstations} workstation${totalWorkstations === 1 ? '' : 's'}`
-      : 'build a factory first';
-
-  const orderOptions: HudSelectOption<SourceValue>[] = orders.map((o) => {
-    const g = garmentsById[o.garmentTemplateId];
-    const sys = PRODUCTION_SYSTEMS[o.productionSystem];
-    return {
-      value: `order:${o.id}`,
-      label: `${o.po} · ${g?.name ?? o.style}`,
-      tag: 'ORDER',
-      meta: `${o.operators} OPR · ${sys.short} · ${o.qty}/${o.deadlineDays}d`,
-    };
-  });
-
-  const refOption: HudSelectOption<SourceValue>[] = isRefSource
-    ? [{
-        value: 'ref',
-        label: '—',
-        tag: 'REF',
-        meta: '',
-        disabled: true,
-      }]
-    : [];
-
-  const options: HudSelectOption<SourceValue>[] = [
-    {
-      value: 'twin',
-      label: factoryLabel,
-      tag: 'FACTORY',
-      meta: twinMeta,
-    },
-    ...orderOptions,
-    ...refOption,
-  ];
-
-  const currentValue: SourceValue = isRefSource
-    ? 'ref'
-    : isOrderSource
-      ? (`order:${activeOrderId}` as SourceValue)
-      : 'twin';
-
-  const title = isTwinSource
-    ? `Reading workstations + connectors from Factory Builder.\nTopology: ${twinBuild?.meta.topologySource === 'connectors' ? 'flow connectors' : 'operation precedence'}.`
-    : isRefSource
-      ? `Reading a published case-study line. Pick Factory to return to ${factoryName?.trim() || 'your factory'}.`
-      : `Running an order from the Orders wizard. Pick Factory or another order from the menu to switch.`;
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span
-        style={{
-          color: tone,
-          fontFamily: SW_FONTS.mono,
-          fontSize: 11,
-          fontWeight: 800,
-          letterSpacing: '0.1em',
-        }}
-      >
-        SOURCE
-      </span>
-      <HudSelect<SourceValue>
-        value={currentValue}
-        options={options}
-        onChange={(v) => {
-          if (v === 'twin') onPickTwin();
-          else if (v.startsWith('order:')) onPickOrder(v.slice('order:'.length));
-        }}
-        mono
-        minWidth={300}
-        title={title}
-        variant="dark"
-        size="sm"
-      />
-      {orders.length === 0 ? (
-        <button
-          onClick={onNewOrder}
-          title="Create a new production order"
-          style={{
-            background: 'transparent',
-            border: `1px dashed ${SW_COLORS.thread}99`,
-            color: SW_COLORS.thread,
-            padding: '4px 8px',
-            borderRadius: SW_RADIUS.sm,
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 800,
-            letterSpacing: '0.08em',
-            cursor: 'pointer',
-          }}
-        >
-          + NEW ORDER
-        </button>
-      ) : (
-        <button
-          onClick={onNewOrder}
-          title="Open the Orders wizard"
-          style={{
-            background: 'transparent',
-            border: 'none',
-            color: SW_COLORS.thread,
-            padding: '0 2px',
-            fontFamily: SW_FONTS.mono,
-            fontSize: 14,
-            fontWeight: 900,
-            lineHeight: 1,
-            cursor: 'pointer',
-          }}
-        >
-          +
-        </button>
-      )}
     </div>
   );
 }
@@ -1800,47 +1388,10 @@ function SimLegend({ view }: { view: SimView }) {
           : 'LOGIC';
 
   return (
-    <CanvasLegend label={viewLabel} width={320}>
-    {entries.map((e, i) => (
-      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-        <div
-          style={{
-            width: 36,
-            height: 28,
-            flexShrink: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          {e.glyph}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 800,
-              color: SW_COLORS.ink,
-              letterSpacing: '0.04em',
-            }}
-          >
-            {e.label}
-          </div>
-          <div
-            style={{
-              fontFamily: SW_FONTS.body,
-              fontSize: 10.5,
-              color: SW_COLORS.muted,
-              lineHeight: 1.35,
-              marginTop: 2,
-            }}
-          >
-            {e.hint}
-          </div>
-        </div>
-      </div>
-    ))}
+    <CanvasLegend label={viewLabel} width={268}>
+      {entries.map((e, i) => (
+        <LegendRow key={i} glyph={e.glyph} label={e.label} hint={e.hint} />
+      ))}
     </CanvasLegend>
   );
 }
@@ -1889,18 +1440,18 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
       return [
         {
           glyph: <CardGlyph color={SW_COLORS.brand} />,
-          label: 'Operation card',
-          hint: 'One sewing operation in the routing — labelled by operation code + SMV.',
+          label: 'Machine footprint',
+          hint: 'The cells the machine occupies — the same box, at the same coordinates, as on the Build floor.',
         },
         {
-          glyph: <OperatorGlyph working />,
-          label: 'Operator (working)',
-          hint: 'Filled circle on the card = currently processing a bundle.',
+          glyph: <UtilBarGlyph />,
+          label: 'Utilisation fill',
+          hint: 'Level rising inside the footprint = busy share · red when the station bottlenecks.',
         },
         {
-          glyph: <OperatorGlyph working={false} />,
-          label: 'Operator (idle)',
-          hint: 'Faded ring = unmanned seat or no work to pull.',
+          glyph: <WipStackGlyph />,
+          label: 'Queue at station',
+          hint: 'Stacked thread-coloured bars on the inbound side = bundles waiting.',
         },
         {
           glyph: <ConveyorDotGlyph />,
@@ -1908,14 +1459,9 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
           hint: 'Yellow dots travelling along dashed lines = WIP moving between operations.',
         },
         {
-          glyph: <WipStackGlyph />,
-          label: 'Queue at station',
-          hint: 'Stacked thread-coloured bars under each card = bundles waiting.',
-        },
-        {
-          glyph: <UtilBarGlyph />,
-          label: 'Utilisation bar',
-          hint: 'Green fill = busy share · turns red when the station bottlenecks.',
+          glyph: <CardGlyph color={SW_COLORS.muted} />,
+          label: 'Service block',
+          hint: 'Dimmed footprint = a workstation that carries no sewing operation — racks, tables, buffers.',
         },
         {
           glyph: <BottleneckGlyph />,
@@ -1975,41 +1521,139 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
 /**
  * Wraps a simulation view in a pan/zoom viewport.
  *
- * Gestures, zoom range, step size, keys and the HUD all come from the shared
- * camera layer, so a pinch, a space-drag or ⌘0 does exactly what it does on
- * the Build floor. Only the *mechanism* differs: this viewport sizes a
- * wrapper div by percentage rather than transforming an inner SVG group,
- * because the sim views are whole SVGs of their own and a CSS `scale` would
- * rasterise them at 1x and stretch the bitmap.
+ * This is the same canvas the Build floor is: one stage-filling `<svg>` with
+ * a **centred, 1:1 viewBox**, a single pan/zoom `<g>` inside it, and
+ * `<CanvasGrid>` ruling the plane through the view's own projection. Sim
+ * views render as bare `<g>` fragments in world coordinates — no view sizes
+ * a `viewBox` to its own content any more.
+ *
+ * That last point is the whole change. A content-sized viewBox is a
+ * *container*: it letterboxes the diagram into a fixed box in the middle of
+ * the canvas, scales it to fit rather than to the camera, and gives the view
+ * a bottom edge to hang titles and legends off. Everything the user drew
+ * lived inside that box instead of on the floor. Now the floor is the only
+ * surface: elements sit at world coordinates, the grid runs past them in
+ * every direction, and zoom is the camera rather than a fit factor.
+ *
+ * The grid comes from the projection, so ISO rules the same diamond lattice
+ * as Builder's ISO 3D floor and the plan views rule the same square one as
+ * Builder's 2D — no canvas paints its own private ruling.
  *
  * The camera is owned by the page and keyed by view, so switching ISO → TOP
  * → ISO returns you to the framing you left — the same rule the Build floor
- * and PROCESS canvas follow. It used to reset on every switch.
+ * and PROCESS canvas follow.
  */
 function PanZoomViewport({
   cam,
   onCam,
+  projection,
   children,
 }: {
   cam: Cam;
   onCam: (update: (c: Cam) => Cam) => void;
+  /** Rules the grid and fixes the world units. ISO for the 3D floor, FLAT
+   *  for the plan-space views. */
+  projection: Projection;
   children: React.ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<SVGGElement | null>(null);
   const camRef = useRef(cam);
   camRef.current = cam;
 
+  /** Live stage size in CSS px. The viewBox is `[-w/2, -h/2, w, h]`, so one
+   *  user-space unit is one stage pixel and (0,0) is the element centre —
+   *  the geometry `useCanvasCamera`'s `origin: 'center'` and
+   *  `visibleCellRange` both assume. */
+  const [stageSize, setStageSize] = useState({ w: 1200, h: 700 });
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const sync = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) setStageSize({ w: r.width, h: r.height });
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /**
+   * World-space extent of whatever the active view actually drew, or null
+   * while it has drawn nothing.
+   *
+   * Measured off the DOM rather than derived per view: each view lays itself
+   * out differently (iso cells, plan pixels, card grids), and asking the
+   * group what it rendered is both exact and immune to a view changing its
+   * layout later. `getBBox` throws in some engines on a detached node, hence
+   * the guard.
+   */
+  const measureContent = useCallback((): CamBounds | null => {
+    const g = contentRef.current;
+    if (!g) return null;
+    let box: DOMRect;
+    try {
+      box = g.getBBox();
+    } catch {
+      return null;
+    }
+    if (box.width <= 0 || box.height <= 0) return null;
+    return { minX: box.x, minY: box.y, maxX: box.x + box.width, maxY: box.y + box.height };
+  }, []);
+
+  /** ⛶ / ⌘0 — frame everything. Measured at click time, so it always
+   *  reflects the live station count. */
+  const fit = useCallback(() => {
+    const bounds = measureContent();
+    const el = containerRef.current;
+    if (!bounds || !el) {
+      onCam(() => CAM_IDENTITY);
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    onCam(() => fitBounds(bounds, { w: r.width, h: r.height }));
+  }, [measureContent, onCam]);
+
   const api = useCanvasCamera({
     ref: containerRef,
-    // The wrapper grows from its top-left corner, so that is the camera's
-    // zero — unlike the SVG canvases, which render through a centred viewBox.
-    origin: 'topLeft',
+    // Centred viewBox — the camera's zero is the middle of the stage, same
+    // as every SVG canvas in Build.
+    origin: 'center',
     read: () => camRef.current,
     write: onCam,
-    // Every sim view sizes its own viewBox to its content, so at 1x
-    // everything is already on screen. "Frame everything" is the identity
-    // camera here — the same promise, a cheaper implementation.
-    fit: () => onCam(() => CAM_IDENTITY),
+    fit,
+  });
+
+  /**
+   * Frame the content the first time there is any.
+   *
+   * Views used to arrive pre-fitted for free, because a content-sized
+   * viewBox scaled the diagram to the element. On a free canvas nothing
+   * scales it, so a 60-station line would open with the camera parked in
+   * the middle of it. This runs the same ⛶ the user would have pressed —
+   * once, and only while the camera is still untouched. A camera that has
+   * been moved (including one restored from another view switch) is the
+   * user's framing and is never overridden.
+   *
+   * No dependency list on purpose: the sim can mount with zero stations and
+   * fill in a tick later, so this re-checks each render until there is
+   * something to frame, then latches.
+   */
+  const didAutoFit = useRef(false);
+  useEffect(() => {
+    if (didAutoFit.current) return;
+    const c = camRef.current;
+    if (c.x !== 0 || c.y !== 0 || c.z !== 1) {
+      didAutoFit.current = true;
+      return;
+    }
+    // An empty measurement means the engine hasn't produced stations yet —
+    // stay unlatched and try again next render rather than burning the one
+    // auto-fit on a blank canvas.
+    if (!measureContent()) return;
+    didAutoFit.current = true;
+    fit();
   });
 
   const startPan = (e: React.MouseEvent) => {
@@ -2019,6 +1663,9 @@ function PanZoomViewport({
     if (target && target.closest('button, input, select, textarea, a, [role="button"]')) return;
     api.beginPan(e.clientX, e.clientY);
   };
+
+  const W = Math.max(1, stageSize.w);
+  const H = Math.max(1, stageSize.h);
 
   return (
     <div
@@ -2031,25 +1678,29 @@ function PanZoomViewport({
         cursor: api.panning ? 'grabbing' : 'grab',
       }}
     >
-      {/* Sizing-based zoom (vs CSS `transform: scale`) so SVG children
-          re-render at the zoomed pixel resolution and stay vector-sharp.
-          CSS scale would rasterize the layer at 1x and stretch the bitmap,
-          which is what was causing the blur at higher zoom levels. */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: `${cam.z * 100}%`,
-          height: `${cam.z * 100}%`,
-          transform: `translate(${cam.x}px, ${cam.y}px)`,
-          transformOrigin: '0 0',
-        }}
+      <svg
+        width="100%"
+        height="100%"
+        viewBox={`${-W / 2} ${-H / 2} ${W} ${H}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ display: 'block', userSelect: 'none' }}
       >
-        {children}
-      </div>
+        {/* Pan/zoom in SVG space, not CSS `transform: scale` on a wrapper —
+            the children re-render at the zoomed resolution and stay
+            vector-sharp instead of being rasterised at 1x and stretched. */}
+        <g transform={`translate(${cam.x} ${cam.y}) scale(${cam.z})`}>
+          {/* The same ruling the Build floor draws, through the same
+              component. Pitch and lattice shape come from `projection`, so
+              ISO gets Builder's diamond grid with no branch here. */}
+          <CanvasGrid projection={projection} cam={cam} stageSize={stageSize} />
+          {/* Content lives directly on the plane. No backing rect, no
+              content-sized frame — `getBBox()` on this group is what ⛶
+              frames. */}
+          <g ref={contentRef}>{children}</g>
+        </g>
+      </svg>
 
-      <ZoomHud zoom={cam.z} onZoomStep={api.zoomStep} onFit={() => onCam(() => CAM_IDENTITY)} />
+      <ZoomHud zoom={cam.z} onZoomStep={api.zoomStep} onFit={fit} />
     </div>
   );
 }
@@ -2246,17 +1897,65 @@ function DiamondGlyph() {
 }
 
 // ============================================================================
-// LAYOUT — map sim stations onto a synthetic grid
+// LAYOUT — where every element on the Run floor sits
 // ============================================================================
+//
+// ONE COORDINATE SYSTEM, EVERY VIEW.
+//
+// A station's position is `ws.position`, in world cells, authored on the
+// Build floor. That is the only position it has, and every canvas in the app
+// now draws it there — Build 2D, Build ISO, Run ISO, Run TOP, Run HEAT — with
+// nothing between the authored number and the projection but
+// `projection.project(x, y)`.
+//
+// It did not use to be. Each Run view re-mapped the same coordinates its own
+// way:
+//
+//   ISO   rebased every cell to `2 + (gx - minX)` and then translated the
+//         whole floor by half its own bounding box, so a machine authored at
+//         cell 40 drew at cell 2.
+//   TOP   normalised the floor into a 1200 x 600 box — a *non-uniform* scale
+//         that stretched x and y by different factors, so the plan was not
+//         even the same shape as the ISO floor beside it.
+//   HEAT  did the same with a different padding, so it was not the same shape
+//         as TOP either.
+//   LOGIC did it a third time, into a box whose size depended on the station
+//         count.
+//
+// Four views, four mappings, none of them Builder's — and all four drawn on
+// top of `<CanvasGrid>`, which rules numbered axes. The ruler said one thing
+// and the content another, in four different ways.
+//
+// Footprints had the same problem. Builder sizes a sprite from the fixture
+// catalogue (`wsBaseFootprint`), so an SNLS covers 1 x 2 cells and a spread
+// table covers 6 x 2. The Run floor hard-coded 0.9 x 1.4 for every station
+// and ignored rotation, so machines that abutted in BUILD floated apart in
+// RUN and a 6-cell table shrank to one. Cells now carry the workstation's
+// real extent, straight off the same helper Builder draws from.
+//
+// The camera is what frames content — `PanZoomViewport` auto-fits on first
+// paint and ⛶ / ⌘0 re-frames on demand. That is why no view needs to move
+// content to the middle of the stage any more, and why none of them may:
+// re-centring is precisely what made the coordinates a lie.
 
 interface StationLayout {
   s: StationView;
-  /** Cell coordinates in world space (1 unit = isoProj cell). */
+  /** Top-left of the footprint, in world cells — `ws.position`, verbatim. */
   gx: number;
   gy: number;
-  /** Footprint width / depth in cells. */
+  /** EFFECTIVE (post-rotation) footprint in cells. Anything that centres on,
+   *  outlines or hit-tests the station uses this. */
   w: number;
   d: number;
+  /** UNROTATED catalogue extent + the rotation itself. A fixture's `draw()`
+   *  wants these, because it turns its own geometry on the build plane via
+   *  `isoProjR` rather than spinning in screen space — same call Builder's
+   *  `WorkstationSprite` makes. */
+  base: { w: number; d: number; h: number };
+  rotation: number;
+  /** Catalogue id, so the Run floor can draw the very sprite Builder drew.
+   *  Absent on synthetic cells, which have no authored workstation. */
+  catalogId?: string;
   /** Stable per-cell React key. Falls back to opId when one cell per op; in
    *  workstation mode multiple cells share an opId so we key by wsId. */
   cellKey?: string;
@@ -2276,9 +1975,10 @@ interface AmbientLayout {
   name: string;
   gx: number;
   gy: number;
+  /** Effective (post-rotation) footprint; `base` is what `draw()` takes. */
   w: number;
   d: number;
-  h: number;
+  base: { w: number; d: number; h: number };
   rotation: number;
   /** Department accent colour (from DEPT_COLOR_HEX), used as a faint tint so
    *  the dept zones read at a glance. */
@@ -2289,13 +1989,14 @@ interface AmbientLayout {
 }
 
 /** Caller-side shape for ambient workstations passed into layoutStations.
- *  Same fields as `AmbientLayout` but in world-grid coords (pre-rebase). */
+ *  Straight off the twin: authored cell, catalogue extent, rotation. */
 interface AmbientWorkstationInput {
   wsId: string;
   catalogId: string;
   name: string;
   gx: number;
   gy: number;
+  /** Unrotated catalogue extent, `size` override included. */
   w: number;
   d: number;
   h: number;
@@ -2305,62 +2006,70 @@ interface AmbientWorkstationInput {
   lineId?: string;
 }
 
+/** Swap w/d for a station stood at 90° or 270°, exactly as `wsFootprint`
+ *  does for the Build floor. */
+function turnedFootprint(
+  base: { w: number; d: number },
+  rotation: number,
+): { w: number; d: number } {
+  return rotation === 90 || rotation === 270
+    ? { w: base.d, d: base.w }
+    : { w: base.w, d: base.d };
+}
+
 /**
- * Map Builder workstation coordinates into a viewBox of the given size. Used
- * by TOP / HEAT / LOGIC to honour the user-painted layout when the twin
- * source is active. Returns `null` when no twin meta is available, signalling
- * the caller to fall back to its canonical row-wrapped layout.
+ * Cells for a run with no authored floor behind it — an empty placeholder, a
+ * demo twin, an older save. A wrapping row of generic 1 x 2 machines on whole
+ * cells starting at the origin, so it lands on the same lattice an authored
+ * floor does and every view agrees on it.
+ *
+ * There used to be one of these per view, in three different unit systems
+ * (cells here, plan pixels in TOP and HEAT), which is why an unauthored run
+ * looked like a different factory in every tab.
  */
-function twinPositionsForView(
-  stations: StationView[],
-  twinMeta: BuildFromTwinMeta | null | undefined,
-  viewW: number,
-  viewH: number,
-  paddingX: number,
-  paddingY: number,
-): { x: number; y: number }[] | null {
-  if (!twinMeta || stations.length === 0) return null;
-  const byOpId = new Map<string, { gx: number; gy: number }>();
-  for (const ts of twinMeta.stations) {
-    byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
-  }
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const s of stations) {
-    const p = byOpId.get(s.opId);
-    if (!p) continue;
-    if (p.gx < minX) minX = p.gx;
-    if (p.gy < minY) minY = p.gy;
-    if (p.gx > maxX) maxX = p.gx;
-    if (p.gy > maxY) maxY = p.gy;
-  }
-  if (!isFinite(minX)) return null;
-  const usableW = viewW - paddingX * 2;
-  const usableH = viewH - paddingY * 2;
-  const spanX = Math.max(1, maxX - minX);
-  const spanY = Math.max(1, maxY - minY);
-  return stations.map((s) => {
-    const p = byOpId.get(s.opId) ?? { gx: minX, gy: minY };
-    return {
-      x: paddingX + ((p.gx - minX) / spanX) * usableW,
-      y: paddingY + ((p.gy - minY) / spanY) * usableH,
-    };
-  });
+const FALLBACK_COL_STEP = 3; // cells between machines along a row
+const FALLBACK_ROW_STEP = 5; // cells between rows
+const FALLBACK_PER_ROW = 8;
+const FALLBACK_FOOTPRINT = { w: 1, d: 2, h: 1.4 };
+
+function fallbackCell(i: number): { gx: number; gy: number } {
+  return {
+    gx: (i % FALLBACK_PER_ROW) * FALLBACK_COL_STEP,
+    gy: Math.floor(i / FALLBACK_PER_ROW) * FALLBACK_ROW_STEP,
+  };
+}
+
+/**
+ * The floor, in world cells. Shared by ISO, TOP and HEAT so all three draw
+ * the same factory — one geometry, three projections of it, which is the
+ * same relationship Builder's 2D and ISO floors already have.
+ */
+interface FloorLayout {
+  cells: StationLayout[];
+  ambientCells: AmbientLayout[];
 }
 
 function layoutStations(
   stations: StationView[],
-  system: ProductionSystem,
   twinMeta?: BuildFromTwinMeta | null,
   ambientWorkstations?: AmbientWorkstationInput[],
-): {
-  cells: StationLayout[];
-  ambientCells: AmbientLayout[];
-  gridW: number;
-  gridH: number;
-  perRow: number;
-} {
+): FloorLayout {
+  const ambientCells: AmbientLayout[] = (ambientWorkstations ?? []).map((aw) => ({
+    wsId: aw.wsId,
+    catalogId: aw.catalogId,
+    name: aw.name,
+    gx: aw.gx,
+    gy: aw.gy,
+    ...turnedFootprint(aw, aw.rotation),
+    base: { w: aw.w, d: aw.d, h: aw.h },
+    rotation: aw.rotation,
+    deptColor: aw.deptColor,
+    cat: aw.cat,
+    lineId: aw.lineId,
+  }));
+
   const n = stations.length;
-  if (n === 0) return { cells: [], ambientCells: [], gridW: 1, gridH: 1, perRow: 1 };
+  if (n === 0) return { cells: [], ambientCells };
 
   // Twin workstation path — honour every physical machine the user placed in
   // Factory Builder. One cell per workstation; cells that share an opId all
@@ -2373,50 +2082,18 @@ function layoutStations(
     for (const s of stations) stationByOpId.set(s.opId, s);
     const placed = twinMeta.workstations.filter((wc) => stationByOpId.has(wc.opId));
     if (placed.length > 0) {
-      // Compute the world-grid extent across BOTH simulated cells and ambient
-      // service blocks so the iso floor fits everything the user authored.
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const wc of placed) {
-        if (wc.gx < minX) minX = wc.gx;
-        if (wc.gy < minY) minY = wc.gy;
-        if (wc.gx > maxX) maxX = wc.gx;
-        if (wc.gy > maxY) maxY = wc.gy;
-      }
-      for (const aw of ambientWorkstations ?? []) {
-        if (aw.gx < minX) minX = aw.gx;
-        if (aw.gy < minY) minY = aw.gy;
-        if (aw.gx + aw.w > maxX) maxX = aw.gx + aw.w;
-        if (aw.gy + aw.d > maxY) maxY = aw.gy + aw.d;
-      }
       const cells: StationLayout[] = placed.map((wc) => ({
         s: stationByOpId.get(wc.opId)!,
-        gx: 2 + (wc.gx - minX),
-        gy: 2 + (wc.gy - minY),
-        // Tighter footprint than the op-level path — workstations in Builder
-        // sit at ~1-cell spacing, so the box must fit inside one cell with a
-        // small gutter or adjacent machines visually collide.
-        w: 0.9,
-        d: 1.4,
+        gx: wc.gx,
+        gy: wc.gy,
+        ...turnedFootprint(wc, wc.rotation),
+        base: { w: wc.w, d: wc.d, h: wc.h },
+        rotation: wc.rotation,
+        catalogId: wc.catalogId,
         cellKey: wc.wsId,
         lineId: wc.lineId,
       }));
-      const ambientCells: AmbientLayout[] = (ambientWorkstations ?? []).map((aw) => ({
-        wsId: aw.wsId,
-        catalogId: aw.catalogId,
-        name: aw.name,
-        gx: 2 + (aw.gx - minX),
-        gy: 2 + (aw.gy - minY),
-        w: aw.w,
-        d: aw.d,
-        h: aw.h,
-        rotation: aw.rotation,
-        deptColor: aw.deptColor,
-        cat: aw.cat,
-        lineId: aw.lineId,
-      }));
-      const gridW = Math.max(8, 2 + (maxX - minX) + 4);
-      const gridH = Math.max(6, 2 + (maxY - minY) + 4);
-      return { cells, ambientCells, gridW, gridH, perRow: cells.length };
+      return { cells, ambientCells };
     }
   }
 
@@ -2426,134 +2103,41 @@ function layoutStations(
   // top-down of the floor, just with one box per op instead of per machine.
   if (twinMeta) {
     const byOpId = new Map<string, { gx: number; gy: number }>();
-    for (const ts of twinMeta.stations) {
-      byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
-    }
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const s of stations) {
-      const p = byOpId.get(s.opId);
-      if (!p) continue;
-      if (p.gx < minX) minX = p.gx;
-      if (p.gy < minY) minY = p.gy;
-      if (p.gx > maxX) maxX = p.gx;
-      if (p.gy > maxY) maxY = p.gy;
-    }
-    if (!isFinite(minX)) {
-      // Fall through to synthetic layout below.
-    } else {
-      const cells: StationLayout[] = stations.map((s) => {
-        const p = byOpId.get(s.opId) ?? { gx: minX, gy: minY };
+    for (const ts of twinMeta.stations) byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
+    if (stations.some((s) => byOpId.has(s.opId))) {
+      const cells: StationLayout[] = stations.map((s, i) => {
+        const p = byOpId.get(s.opId) ?? fallbackCell(i);
         return {
           s,
-          gx: 2 + (p.gx - minX),
-          gy: 2 + (p.gy - minY),
-          w: 1.4,
-          d: 2,
+          gx: p.gx,
+          gy: p.gy,
+          w: FALLBACK_FOOTPRINT.w,
+          d: FALLBACK_FOOTPRINT.d,
+          base: FALLBACK_FOOTPRINT,
+          rotation: 0,
         };
       });
-      const gridW = Math.max(8, 2 + (maxX - minX) + 4);
-      const gridH = Math.max(6, 2 + (maxY - minY) + 4);
-      return { cells, ambientCells: [], gridW, gridH, perRow: stations.length };
+      return { cells, ambientCells };
     }
   }
 
-  // Modular (TSS) — U-shape. Operators face each other across the U so they
-  // can rotate between adjacent stations. Pieces flow top-row L→R, turn at
-  // the right end, then return along the bottom row R→L.
-  if (system === 'modular') {
-    const stride = 3;
-    const topCount = Math.ceil(n / 2);
-    const bottomCount = n - topCount;
-    const topY = 2;
-    const bottomY = 7;
-    const cells: StationLayout[] = stations.map((s, i) => {
-      if (i < topCount) {
-        return { s, gx: 2 + i * stride, gy: topY, w: 1.4, d: 2 };
-      }
-      const j = i - topCount;
-      const col = topCount - 1 - j; // reverse so flow returns along the bottom
-      return { s, gx: 2 + col * stride, gy: bottomY, w: 1.4, d: 2 };
-    });
-    void bottomCount;
-    return {
-      cells,
-      ambientCells: [],
-      gridW: 2 + topCount * stride + 2,
-      gridH: bottomY + 4,
-      perRow: topCount,
-    };
-  }
-
-  // Make-through — one highly-skilled operator owns the whole garment. All
-  // "operations" cluster tightly at the same workbench so the scene reads as
-  // a single workstation rather than a multi-station line.
-  if (system === 'make_through') {
-    const cols = Math.min(2, n);
-    const rows = Math.ceil(n / cols);
-    const stride = 2;
-    const cells: StationLayout[] = stations.map((s, i) => {
-      const row = Math.floor(i / cols);
-      const col = i % cols;
-      return { s, gx: 4 + col * stride, gy: 2 + row * stride, w: 1.4, d: 2 };
-    });
-    return {
-      cells,
-      ambientCells: [],
-      gridW: 4 + cols * stride + 4,
-      gridH: 2 + rows * stride + 2,
-      perRow: cols,
-    };
-  }
-
-  // Clump — senior op + helpers grouped around critical operations. Stations
-  // split into 2–3 small clusters spaced apart so the topology reads as
-  // "clusters" rather than "a single line."
-  if (system === 'clump') {
-    const clumps = Math.min(3, Math.max(2, Math.ceil(n / 3)));
-    const inner = 2;
-    const between = 5;
-    const cells: StationLayout[] = stations.map((s, i) => {
-      const g = i % clumps;
-      const within = Math.floor(i / clumps);
-      return {
-        s,
-        gx: 2 + g * between + (within % 2) * inner,
-        gy: 2 + Math.floor(within / 2) * (inner + 1),
-        w: 1.4,
-        d: 2,
-      };
-    });
-    const perGroupRows = Math.ceil(Math.ceil(n / clumps) / 2);
-    return {
-      cells,
-      ambientCells: [],
-      gridW: 2 + clumps * between + 2,
-      gridH: 2 + perGroupRows * (inner + 1) + 2,
-      perRow: clumps * 2,
-    };
-  }
-
-  // Linear default — PBS / straight / synchro / UPS / bundle / unit_handle.
-  // PBS-family systems leave wide gaps between stations to suggest bundle
-  // buffers; piece-flow systems (straight, synchro, UPS) sit closer.
-  const stride =
-    system === 'PBS' || system === 'bundle' || system === 'unit_handle' ? 4 : 3;
-  const perRow = Math.min(n, 8);
-  const rows = Math.ceil(n / perRow);
-  const cells: StationLayout[] = stations.map((s, i) => {
-    const row = Math.floor(i / perRow);
-    const col = i % perRow;
-    return {
-      s,
-      gx: 2 + col * stride,
-      gy: 2 + row * (stride + 1),
-      w: 1.4,
-      d: 2,
-    };
-  });
-  const gridW = 2 + perRow * stride + 2;
-  const gridH = 2 + rows * (stride + 1) + 2;
-  return { cells, ambientCells: [], gridW, gridH, perRow };
+  // Nothing authored at all — the synthetic row.
+  //
+  // There used to be four layouts here, chosen by the line's production
+  // system: a U-shaped cell for `modular` so operators faced each other, a
+  // tight 2-column cluster for `make_through` so the scene read as one
+  // workbench, spaced clusters for `clump`, and a grid for everything else.
+  // Production systems are out of scope, so the one layout that served the
+  // majority is the one that stays.
+  const cells: StationLayout[] = stations.map((s, i) => ({
+    s,
+    ...fallbackCell(i),
+    w: FALLBACK_FOOTPRINT.w,
+    d: FALLBACK_FOOTPRINT.d,
+    base: FALLBACK_FOOTPRINT,
+    rotation: 0,
+  }));
+  return { cells, ambientCells };
 }
 
 // ============================================================================
@@ -2563,16 +2147,17 @@ function layoutStations(
 interface SimViewProps {
   stations: StationView[];
   bottleneckOpIndex: number;
-  garmentName: string;
   simTime: number;
-  system: ProductionSystem;
-  /** When present, the view uses Builder-authored workstation positions
-   *  instead of the canonical system-based line layout. */
-  twinMeta?: BuildFromTwinMeta | null;
-  /** Authored workstations that aren't tied to a sewing operation — spreaders,
-   *  cutters, QC tables, presses, fabric racks, buffers, operators. Rendered
-   *  as static floor context so the simulation reads as the full factory. */
-  ambientWorkstations?: AmbientWorkstationInput[];
+  /**
+   * The floor, laid out ONCE at page level and handed to every view.
+   *
+   * Each view used to call its own layout — which is how four views ended up
+   * with four different mappings of the same authored coordinates. Passing
+   * the finished cells in makes "the same machine is in the same place in
+   * every view" a structural fact rather than a convention four functions
+   * have to keep agreeing on.
+   */
+  floor: FloorLayout;
   /** opId of the station whose detail drawer is open (highlights it). */
   selectedOpId?: string | null;
   /** Click a station to open its sim-vs-theory drawer. Omit for read-only views. */
@@ -2582,10 +2167,10 @@ interface SimViewProps {
   bundles?: BundleFrame[];
 }
 
-function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations, selectedOpId, onSelectStation, bundles = [] }: SimViewProps) {
-  if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
+function SimIsoView({ stations, bottleneckOpIndex, simTime, floor, selectedOpId, onSelectStation, bundles = [] }: SimViewProps) {
+  if (stations.length === 0) return <g />;
 
-  const { cells, ambientCells, gridW, gridH } = layoutStations(stations, system, twinMeta, ambientWorkstations);
+  const { cells, ambientCells } = floor;
   // Workstation mode = more cells than engine stations. The synthetic conveyor
   // and travelling-WIP markers chain consecutive cells, which is meaningful
   // when cells are placed in op order along a row but degenerates into noise
@@ -2596,53 +2181,12 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
   // the wrong row.
   const bottleneckOpId = stations[bottleneckOpIndex]?.opId ?? null;
 
-  const cTL = isoProj(0, 0);
-  const cTR = isoProj(gridW, 0);
-  const cBR = isoProj(gridW, gridH);
-  const cBL = isoProj(0, gridH);
-  const minX = Math.min(cTL.sx, cBL.sx) - 80;
-  const maxX = Math.max(cTR.sx, cBR.sx) + 80;
-  const minY = Math.min(cTL.sy, cTR.sy) - 80;
-  const maxY = Math.max(cBL.sy, cBR.sy) + 80;
-
+  // No group transform. Cells are already at their authored world cells, and
+  // `PanZoomViewport` frames them with the camera — see the LAYOUT note. The
+  // floor used to be shifted by half its own bounding box to park it under
+  // the identity camera, which is what made cell 40 draw at cell 2.
   return (
-    <svg
-      width="100%"
-      height="100%"
-      viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`}
-      preserveAspectRatio="xMidYMid meet"
-      style={{ display: 'block' }}
-    >
-      <defs>
-        <pattern id="sim-grid-iso" width={32} height={32} patternUnits="userSpaceOnUse">
-          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
-        </pattern>
-        <radialGradient id="sim-vig" cx="50%" cy="40%" r="60%">
-          <stop offset="0%" stopColor="#000" stopOpacity={0} />
-          <stop offset="100%" stopColor="#000" stopOpacity={0.55} />
-        </radialGradient>
-      </defs>
-      <rect x={minX} y={minY} width={maxX - minX} height={maxY - minY} fill="url(#sim-grid-iso)" />
-
-      {/* Floor */}
-      <polygon points={ptsToStr([cTL, cTR, cBR, cBL])} fill="#ffffff05" stroke="#ffffff15" strokeWidth={1} />
-
-      {/* Iso grid lines */}
-      {Array.from({ length: gridW + 1 }, (_, i) => {
-        const a = isoProj(i, 0);
-        const b = isoProj(i, gridH);
-        return (
-          <line key={`v-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />
-        );
-      })}
-      {Array.from({ length: gridH + 1 }, (_, i) => {
-        const a = isoProj(0, i);
-        const b = isoProj(gridW, i);
-        return (
-          <line key={`h-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />
-        );
-      })}
-
+    <g>
       {/* Ambient service blocks — non-sewing workstations (spreaders, cutters,
           QC tables, presses, fabric racks, buffers, operators) authored in
           Builder. Drawn behind the engine stations as muted iso cuboids so
@@ -2705,7 +2249,7 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
                 constraint should catch the eye from across the floor while
                 the run is playing, without moving the marker itself. */}
             {c.s.blocked > 0 && (() => {
-              const bp = isoProj(c.gx + c.w / 2, c.gy + c.d / 2, 1.6);
+              const bp = isoProj(c.gx + c.w / 2, c.gy + c.d / 2, c.base.h + 0.2);
               return (
                 <g pointerEvents="none">
                   <circle
@@ -2824,8 +2368,7 @@ function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, am
           });
         })}
 
-      <rect x={minX} y={minY} width={maxX - minX} height={maxY - minY} fill="url(#sim-vig)" pointerEvents="none" />
-    </svg>
+    </g>
   );
 }
 
@@ -2842,8 +2385,13 @@ function IsoSewingStation({
   isSelected?: boolean;
   simTime: number;
 }) {
-  const { s, gx, gy, w, d } = layout;
+  const { s, gx, gy, w, d, base, rotation, catalogId } = layout;
   const origin = isoProj(gx, gy);
+  // Altitudes for the decorations that float above the machine. Derived from
+  // the fixture's own height rather than the old hard-coded 1.4 / 1.45 / 1.7
+  // / 2.6, so a 4.5-cell-tall fabric rack doesn't wear its badge inside its
+  // own geometry.
+  const topZ = base.h;
   const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
   // Workstation visual identity is sourced from the global asset library
   // (MACHINE_CATALOG) keyed off the operation's machineCode. SNL → brand,
@@ -2903,15 +2451,28 @@ function IsoSewingStation({
           matches the old hand-rolled table + head (0.8 + 0.6 = 1.4), so
           nothing above it relayouts. */}
       <g>
-        {isoFixtureForMachineCode(s.machineCode ?? '')?.draw({ w, d, h: 1.4 }) ?? (
-          CuboidFaces({ w, d, h: 0.8, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream })
-        )}
+        {(() => {
+          // The workstation's OWN fixture first — same `lookupFixture` +
+          // `draw({ base, r })` call Builder's `WorkstationSprite` makes, so
+          // the machine on the Run floor is the machine on the Build floor,
+          // at the same size and standing the same way round. Machine-code
+          // lookup is the fallback for synthetic cells, which have no
+          // authored workstation behind them.
+          const fixture =
+            (catalogId ? lookupFixture(catalogId) : undefined) ??
+            isoFixtureForMachineCode(s.machineCode ?? '') ??
+            undefined;
+          return (
+            fixture?.draw({ w: base.w, d: base.d, h: base.h, r: rotation }) ??
+            CuboidFaces({ w, d, h: 0.8, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream })
+          );
+        })()}
       </g>
       {/* Utilization pip on the machine head — small status light, doesn't
           recolour the equipment. Reads green / yellow / red against an
           otherwise-static silhouette. */}
       {(() => {
-        const a = isoProj(w * 0.78, d * 0.35, 1.45);
+        const a = isoProj(w * 0.78, d * 0.35, topZ + 0.05);
         const o = isoProj(0, 0, 0);
         const pipCol = isHot
           ? SW_COLORS.alarm
@@ -2929,14 +2490,28 @@ function IsoSewingStation({
           />
         );
       })()}
-      {/* Op label badge floating above */}
+      {/* Op label badge floating above.
+          The box is sized to its contents rather than fixed at 84px. It used
+          to hold a 4-character op code, which always fit; a station with no
+          code carries its NAME here instead, and a fixed box either clipped
+          it or ran it straight through the machine tag on its right. */}
       {(() => {
-        const p = isoProj(w / 2, d / 2, 1.7);
+        const p = isoProj(w / 2, d / 2, topZ + 0.3);
+        const nameText = stationLabel(s, 18);
+        const machineText = asset.known ? `${asset.glyph} ${asset.label}` : '';
+        // IBM Plex Mono advances 0.6em per glyph; the +0.05em letter-spacing
+        // on both runs is folded in. The pictographic machine glyph is the
+        // one non-monospaced character, so it is budgeted as two.
+        const runW = (text: string, px: number) => text.length * px * 0.65;
+        const inner =
+          runW(nameText, 10)
+          + (machineText ? runW(machineText, 9) + 9 + 12 : 0);
+        const bw = Math.max(84, Math.ceil(inner) + 20);
         return (
           <g transform={`translate(${p.sx}, ${p.sy})`} pointerEvents="none">
-            <rect x={-42} y={-32} width={84} height={30} rx={4} fill="#0a0d12" stroke="#ffffff20" strokeWidth={1} />
+            <rect x={-bw / 2} y={-32} width={bw} height={30} rx={4} fill="#0a0d12" stroke="#ffffff20" strokeWidth={1} />
             <text
-              x={-32}
+              x={-bw / 2 + 10}
               y={-21}
               fontFamily={SW_FONTS.mono}
               fontSize={10}
@@ -2944,20 +2519,22 @@ function IsoSewingStation({
               fill="#fff"
               letterSpacing="0.05em"
             >
-              {s.opCode ?? `OP-${index + 1}`}
+              {nameText}
             </text>
-            <text
-              x={36}
-              y={-21}
-              textAnchor="end"
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={800}
-              fill={SW_COLORS.muted}
-              letterSpacing="0.05em"
-            >
-              {asset.glyph} {asset.label}
-            </text>
+            {machineText && (
+              <text
+                x={bw / 2 - 10}
+                y={-21}
+                textAnchor="end"
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={800}
+                fill={SW_COLORS.muted}
+                letterSpacing="0.05em"
+              >
+                {machineText}
+              </text>
+            )}
             <text
               x={0}
               y={-7}
@@ -3087,7 +2664,7 @@ function IsoSewingStation({
 
       {/* Bottleneck flag */}
       {isHot && (() => {
-        const p = isoProj(w / 2, d / 2, 2.6);
+        const p = isoProj(w / 2, d / 2, topZ + 1.2);
         return (
           <g transform={`translate(${p.sx}, ${p.sy})`} pointerEvents="none">
             <circle r={7} fill={SW_COLORS.alarm}>
@@ -3136,7 +2713,7 @@ function IsoAmbientBlock({ amb }: { amb: AmbientLayout }) {
 
   // Buffers and mat-handling carts sit at floor level — short height so
   // they don't overpower the engine stations.
-  const h = Math.max(0.2, Math.min(amb.h, 1.6));
+  const h = Math.max(0.2, Math.min(amb.base.h, 1.6));
 
   return (
     <g transform={`translate(${origin.sx}, ${origin.sy})`} opacity={0.78} pointerEvents="none">
@@ -3194,177 +2771,206 @@ function IsoAmbientBlock({ amb }: { amb: AmbientLayout }) {
 // TOP 2D VIEW
 // ============================================================================
 
-function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta, selectedOpId, onSelectStation }: SimViewProps) {
-  if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
-  const VIEWBOX_W = 1200;
-  const VIEWBOX_H = 600;
-  const stationCount = stations.length;
-  const perRow = Math.min(stationCount, 12);
-  const rows = Math.ceil(stationCount / perRow);
-  const xStep = (VIEWBOX_W - 200) / Math.max(1, perRow - 1);
-  const xStart = perRow === 1 ? VIEWBOX_W / 2 : 100;
-  const yStart = rows === 1 ? VIEWBOX_H / 2 : 200;
-  const yStep = rows > 1 ? 200 : 0;
+/**
+ * The plan projection of the ISO floor.
+ *
+ * Same cells, same footprints, same authored coordinates — the only
+ * difference between this and `SimIsoView` is `flatProj` in place of
+ * `isoProj`, which is exactly the relationship Builder's 2D and ISO floors
+ * have to each other.
+ *
+ * It used to be a different factory. It laid out one card per *operation*
+ * (not per machine) at the mean position of that op's machines, normalised
+ * into a 1200 x 600 box under a non-uniform scale, in a fixed 72 x 100 card
+ * that had nothing to do with the machine's footprint. So a 3-machine
+ * operation was three boxes in ISO and one card here, at a spot no machine
+ * stood on, at a spacing that was not the floor's.
+ *
+ * Live state now hangs off the footprint rather than replacing it: the box is
+ * the machine, a fill bar inside it is utilisation, the inbound queue stacks
+ * on the −x side (where it stacks in ISO), and the op badge floats above.
+ */
+function SimTopView({ stations, bottleneckOpIndex, simTime, floor, selectedOpId, onSelectStation }: SimViewProps) {
+  if (stations.length === 0) return <g />;
 
-  const twinPositions = twinPositionsForView(stations, twinMeta, VIEWBOX_W, VIEWBOX_H, 120, 120);
-  const positions = twinPositions ?? stations.map((_, i) => {
-    const row = Math.floor(i / perRow);
-    const col = i % perRow;
-    return { x: xStart + col * xStep, y: yStart + row * yStep };
-  });
+  const { cells, ambientCells } = floor;
+  // Same rule as ISO: chaining consecutive cells with a conveyor only means
+  // something when there is one cell per operation.
+  const oneCellPerOp = cells.length === stations.length;
+  const bottleneckOpId = stations[bottleneckOpIndex]?.opId ?? null;
+
+  /** Centre of a cell's footprint, in world px. */
+  const centreOf = (c: { gx: number; gy: number; w: number; d: number }) =>
+    flatProj(c.gx + c.w / 2, c.gy + c.d / 2);
 
   return (
-    <svg viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`} style={{ width: '100%', height: '100%' }}>
-      <defs>
-        <pattern id="sim-grid-top" width={40} height={40} patternUnits="userSpaceOnUse">
-          <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff10" strokeWidth={1} />
-        </pattern>
-      </defs>
-      <rect width={VIEWBOX_W} height={VIEWBOX_H} fill="#0d1219" />
-      <rect width={VIEWBOX_W} height={VIEWBOX_H} fill="url(#sim-grid-top)" />
-
-      {/* Title */}
-      <text
-        x={VIEWBOX_W / 2}
-        y={28}
-        textAnchor="middle"
-        fill="#ffffff80"
-        fontFamily={SW_FONTS.mono}
-        fontSize={12}
-        fontWeight={800}
-        letterSpacing="2px"
-      >
-        {garmentName.toUpperCase()} · TOP 2D · BLUEPRINT FLOW
-      </text>
-
-      {/* Connecting flow line + animated WIP dots */}
-      {Array.from({ length: rows }).map((_, r) => {
-        const startCol = r * perRow;
-        const endCol = Math.min(startCol + perRow, stationCount) - 1;
-        if (endCol <= startCol) return null;
-        const y = positions[startCol].y;
+    <g>
+      {/* Ambient service blocks — the rest of the factory, as footprints.
+          ISO has drawn these for a while; the plan view showed none of them,
+          so the same floor had a different set of things on it depending on
+          which tab you were in. */}
+      {ambientCells.map((a) => {
+        const o = flatProj(a.gx, a.gy);
+        const mark = stationMark(a.catalogId);
         return (
-          <g key={`flow-${r}`}>
-            <line
-              x1={positions[startCol].x}
-              y1={y}
-              x2={positions[endCol].x}
-              y2={y}
-              stroke="#ffffff25"
-              strokeWidth={3}
-              strokeDasharray="6 6"
-              style={{ animation: 'sim-march 1s linear infinite' }}
+          <g key={`amb-${a.wsId}`} transform={`translate(${o.sx}, ${o.sy})`} opacity={0.5} pointerEvents="none">
+            <StationGlyph
+              {...mark}
+              label={mark.code || mark.markCode ? undefined : a.name}
+              width={a.w * FLAT_CELL}
+              height={a.d * FLAT_CELL}
+              muted={a.cat === 'zone'}
             />
-            {/* WIP travelling dots */}
-            {Array.from({ length: 6 }).map((_, k) => {
-              const phase = ((simTime * 0.03 + k / 6 + r * 0.13) % 1 + 1) % 1;
-              const x = positions[startCol].x + (positions[endCol].x - positions[startCol].x) * phase;
-              return <circle key={k} cx={x} cy={y} r={4} fill={SW_COLORS.thread} opacity={0.85} />;
-            })}
           </g>
         );
       })}
 
-      {stations.map((s, i) => {
-        const { x, y } = positions[i];
-        const isHot = i === bottleneckOpIndex && s.queueLen > 0;
+      {/* Conveyor between consecutive stations + marching WIP dots. Skips
+          segments that cross a lineId boundary, same guard as ISO. */}
+      {oneCellPerOp && cells.length > 1 &&
+        cells.slice(0, -1).map((c, i) => {
+          const next = cells[i + 1];
+          if (c.lineId && next.lineId && c.lineId !== next.lineId) return null;
+          const a = centreOf(c);
+          const b = centreOf(next);
+          return (
+            <g key={`flow-${i}`} pointerEvents="none">
+              <line
+                x1={a.sx}
+                y1={a.sy}
+                x2={b.sx}
+                y2={b.sy}
+                stroke="#ffffff25"
+                strokeWidth={3}
+                strokeDasharray="6 6"
+                style={{ animation: 'sim-march 1s linear infinite' }}
+              />
+              {Array.from({ length: 3 }).map((_, k) => {
+                const phase = ((simTime * 0.03 + k / 3 + i * 0.13) % 1 + 1) % 1;
+                return (
+                  <circle
+                    key={k}
+                    cx={a.sx + (b.sx - a.sx) * phase}
+                    cy={a.sy + (b.sy - a.sy) * phase}
+                    r={4}
+                    fill={SW_COLORS.thread}
+                    opacity={0.85}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+
+      {/* Stations — the footprint IS the sprite. */}
+      {cells.map((c, i) => {
+        const { s } = c;
+        const o = flatProj(c.gx, c.gy);
+        const W = c.w * FLAT_CELL;
+        const H = c.d * FLAT_CELL;
+        const isHot = s.opId === bottleneckOpId && s.queueLen > 0;
         const isSelected = s.opId === selectedOpId;
         const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
+        const mark = c.catalogId ? stationMark(c.catalogId) : { code: s.machineCode as MachineCode };
         return (
           <g
-            key={`${s.opId}-${i}`}
-            transform={`translate(${x}, ${y})`}
+            key={c.cellKey ?? `${s.opId}-${i}`}
+            transform={`translate(${o.sx}, ${o.sy})`}
             onClick={onSelectStation ? (e) => { e.stopPropagation(); onSelectStation(s.opId); } : undefined}
             style={onSelectStation ? { cursor: 'pointer' } : undefined}
           >
-            {isSelected && (
-              <rect x={-42} y={-56} width={84} height={112} rx={8} fill="none" stroke={SW_COLORS.brand} strokeWidth={3} />
-            )}
-            <rect
-              x={-36}
-              y={-50}
-              width={72}
-              height={100}
-              rx={6}
-              fill={isHot ? `${SW_COLORS.alarm}30` : `${SW_COLORS.brand}20`}
-              stroke={isHot ? SW_COLORS.alarm : `${SW_COLORS.brand}80`}
-              strokeWidth={2}
+            {/* The machine, drawn with the same glyph the Build floor uses.
+                Fixtures with no mark to draw (PML blocks, racks) fall back to
+                a label, exactly as Builder's `FlatStationBody` does. */}
+            <StationGlyph
+              {...mark}
+              label={mark.code || mark.markCode ? undefined : stationLabel(s)}
+              width={W}
+              height={H}
             />
-            <text
+
+            {/* Utilisation — a fill rising from the foot of the footprint, so
+                load reads as a level inside the machine rather than as a
+                separate widget parked next to it. */}
+            <rect
               x={0}
-              y={-32}
-              textAnchor="middle"
-              fill="#ffffffaa"
-              fontFamily={SW_FONTS.mono}
-              fontSize={10}
-              fontWeight={800}
-            >
-              {s.opCode ?? `OP-${i + 1}`}
-            </text>
-            <text x={0} y={-20} textAnchor="middle" fill="#ffffff60" fontFamily={SW_FONTS.mono} fontSize={8} fontWeight={700}>
-              {s.smv.toFixed(2)}m
-            </text>
-            {/* Operators */}
-            {Array.from({ length: Math.min(s.serversTotal, 3) }).map((_, k) => {
-              const cx = (k - (Math.min(s.serversTotal, 3) - 1) / 2) * 18;
-              const isWorking = k < s.busy;
-              return (
-                <g key={k} transform={`translate(${cx}, 0)`}>
-                  <circle
-                    cx={0}
-                    cy={0}
-                    r={9}
-                    fill={isWorking ? (isHot ? SW_COLORS.alarm : SW_COLORS.bobbin) : '#ffffff30'}
-                    stroke="#fff"
-                    strokeWidth={1.5}
+              y={H * (1 - occupancy)}
+              width={W}
+              height={H * occupancy}
+              fill={isHot ? alpha(SW_COLORS.alarm, 0.28) : alpha(SW_COLORS.ok, 0.22)}
+              pointerEvents="none"
+            />
+
+            {(isHot || isSelected) && (
+              <rect
+                x={-2}
+                y={-2}
+                width={W + 4}
+                height={H + 4}
+                fill="none"
+                stroke={isHot ? SW_COLORS.alarm : SW_COLORS.brand}
+                strokeWidth={2.5}
+                pointerEvents="none"
+              />
+            )}
+
+            {/* Inbound queue — stacked on the −x side, the side it stacks on
+                in ISO, so the two views agree on where work waits. */}
+            {s.queueLen > 0 && (
+              <g transform={`translate(${-6}, ${H / 2})`} pointerEvents="none">
+                {Array.from({ length: Math.min(s.queueLen, 12) }).map((_, k) => (
+                  <rect
+                    key={k}
+                    x={-6 - Math.floor(k / 4) * 7}
+                    y={(k % 4) * 5 - 10}
+                    width={5}
+                    height={4}
+                    fill={SW_COLORS.thread}
+                    opacity={0.9 - k * 0.04}
                   />
-                  {isWorking && (
-                    <circle
-                      cx={0}
-                      cy={0}
-                      r={12 + Math.sin(simTime * 2 + i + k) * 2}
-                      fill="none"
-                      stroke={SW_COLORS.brand}
-                      strokeWidth={1}
-                      opacity={0.4}
-                    />
-                  )}
-                </g>
-              );
-            })}
-            {/* Queue */}
-            <g transform="translate(-26, 25)">
-              {Array.from({ length: Math.min(s.queueLen, 12) }).map((_, k) => (
-                <rect
-                  key={k}
-                  x={(k % 4) * 7}
-                  y={Math.floor(k / 4) * 5}
-                  width={6}
-                  height={4}
-                  fill={SW_COLORS.thread}
-                  opacity={0.9 - k * 0.04}
-                />
-              ))}
-              {s.queueLen > 12 && (
-                <text x={38} y={14} fill={SW_COLORS.thread} fontFamily={SW_FONTS.mono} fontSize={10} fontWeight={800}>
-                  +{s.queueLen - 12}
-                </text>
-              )}
-            </g>
-            {/* Util bar */}
-            <g transform="translate(-30, 42)">
-              <rect x={0} y={0} width={60} height={4} fill="#ffffff15" />
-              <rect x={0} y={0} width={60 * occupancy} height={4} fill={isHot ? SW_COLORS.alarm : SW_COLORS.ok} />
-              <text x={0} y={16} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={8} fontWeight={700}>
-                {s.busy}/{s.serversTotal}
+                ))}
+                {s.queueLen > 12 && (
+                  <text x={-30} y={16} textAnchor="end" fill={SW_COLORS.thread} fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={800}>
+                    +{s.queueLen - 12}
+                  </text>
+                )}
+              </g>
+            )}
+
+            {/* Op badge — same content and same anchor as the ISO badge:
+                above the footprint, centred on it. */}
+            <g transform={`translate(${W / 2}, ${-6})`} pointerEvents="none">
+              <text
+                x={0}
+                y={-12}
+                textAnchor="middle"
+                fill={isHot ? SW_COLORS.alarm : '#ffffffcc'}
+                fontFamily={SW_FONTS.mono}
+                fontSize={10}
+                fontWeight={900}
+                letterSpacing="0.05em"
+              >
+                {stationLabel(s)}
+              </text>
+              <text
+                x={0}
+                y={-2}
+                textAnchor="middle"
+                fill="#ffffff80"
+                fontFamily={SW_FONTS.mono}
+                fontSize={8}
+                fontWeight={700}
+              >
+                Q={s.queueLen} · {s.busy}/{s.serversTotal}
               </text>
             </g>
+
             {isHot && (
-              <g>
-                <circle cx={26} cy={-44} r={6} fill={SW_COLORS.alarm}>
+              <g transform={`translate(${W + 8}, ${-8})`} pointerEvents="none">
+                <circle r={6} fill={SW_COLORS.alarm}>
                   <animate attributeName="r" values="6;9;6" dur="0.8s" repeatCount="indefinite" />
                 </circle>
-                <text x={26} y={-40} textAnchor="middle" fill="#fff" fontFamily={SW_FONTS.display} fontSize={9} fontWeight={900}>
+                <text y={3.5} textAnchor="middle" fill="#fff" fontFamily={SW_FONTS.display} fontSize={9} fontWeight={900}>
                   !
                 </text>
               </g>
@@ -3372,7 +2978,7 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMet
           </g>
         );
       })}
-    </svg>
+    </g>
   );
 }
 
@@ -3380,79 +2986,67 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMet
 // HEAT VIEW
 // ============================================================================
 
-function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: SimViewProps) {
-  if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
-  const VIEWBOX_W = 1200;
-  const VIEWBOX_H = 600;
-  const perRow = Math.min(stations.length, 12);
-  const rows = Math.ceil(stations.length / perRow);
-  const xStep = (VIEWBOX_W - 200) / Math.max(1, perRow - 1);
-  const xStart = perRow === 1 ? VIEWBOX_W / 2 : 100;
-  const yStart = rows === 1 ? VIEWBOX_H / 2 : 200;
-  const yStep = rows > 1 ? 200 : 0;
-  const twinPositions = twinPositionsForView(stations, twinMeta, VIEWBOX_W, VIEWBOX_H, 140, 120);
-  const positions = twinPositions ?? stations.map((_, i) => {
-    const row = Math.floor(i / perRow);
-    const col = i % perRow;
-    return { x: xStart + col * xStep, y: yStart + row * yStep };
-  });
+/**
+ * Pressure, painted on the floor plan.
+ *
+ * Same cells and same coordinates as ISO and TOP — the blobs sit on the
+ * machines they describe, so "the heat is over there" points at a place on
+ * the floor the user can walk to. It used to normalise the floor into its own
+ * 1200 x 600 box with a *different* padding from TOP's, so the same factory
+ * was a different shape in the two plan views standing next to each other.
+ *
+ * Blob radius is in cells rather than pixels for the same reason: `HEAT_R`
+ * cells of bleed is a claim about the floor, and it holds at any zoom.
+ */
+const HEAT_BLOB_CELLS = 3;
+
+function SimHeatView({ stations, bottleneckOpIndex, floor }: SimViewProps) {
+  if (stations.length === 0) return <g />;
+
+  const { cells } = floor;
+  const bottleneckOpId = stations[bottleneckOpIndex]?.opId ?? null;
 
   return (
-    <svg viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`} style={{ width: '100%', height: '100%' }}>
+    <g>
       <defs>
-        {stations.map((s, i) => {
-          const isHot = i === bottleneckOpIndex && s.queueLen > 0;
+        {cells.map((c, i) => {
+          const s = c.s;
+          const isHot = s.opId === bottleneckOpId && s.queueLen > 0;
           const intensity = isHot
             ? 1
             : Math.min(1, 0.2 + (s.serversTotal > 0 ? s.busy / s.serversTotal : 0) * 0.7 + Math.min(0.5, s.queueLen / 10));
           const col = isHot ? SW_COLORS.alarm : intensity > 0.7 ? SW_COLORS.warn : SW_COLORS.ok;
           return (
-            <radialGradient key={`hg-${s.opId}-${i}`} id={`sim-heat-${s.opId}-${i}`} cx="50%" cy="50%" r="50%">
+            <radialGradient key={`hg-${i}`} id={`sim-heat-${c.cellKey ?? s.opId}-${i}`} cx="50%" cy="50%" r="50%">
               <stop offset="0%" stopColor={col} stopOpacity={intensity} />
               <stop offset="100%" stopColor={col} stopOpacity={0} />
             </radialGradient>
           );
         })}
-        <linearGradient id="sim-heat-legend" x1="0%" x2="100%">
-          <stop offset="0%" stopColor={SW_COLORS.ok} />
-          <stop offset="60%" stopColor={SW_COLORS.warn} />
-          <stop offset="100%" stopColor={SW_COLORS.alarm} />
-        </linearGradient>
       </defs>
 
-      <rect width={VIEWBOX_W} height={VIEWBOX_H} fill="#0d1219" />
-
-      {/* Title */}
-      <text
-        x={VIEWBOX_W / 2}
-        y={28}
-        textAnchor="middle"
-        fill="#ffffff80"
-        fontFamily={SW_FONTS.mono}
-        fontSize={12}
-        fontWeight={800}
-        letterSpacing="2px"
-      >
-        {garmentName.toUpperCase()} · HEAT · UTIL × QUEUE PRESSURE
-      </text>
-
-      {/* Heat blobs */}
-      {stations.map((s, i) => (
-        <circle
-          key={`blob-${s.opId}-${i}`}
-          cx={positions[i].x}
-          cy={positions[i].y}
-          r={120}
-          fill={`url(#sim-heat-${s.opId}-${i})`}
-          style={{ mixBlendMode: 'screen' }}
-        />
-      ))}
+      {/* Heat blobs, centred on each machine's footprint. */}
+      {cells.map((c, i) => {
+        const p = flatProj(c.gx + c.w / 2, c.gy + c.d / 2);
+        return (
+          <circle
+            key={`blob-${i}`}
+            cx={p.sx}
+            cy={p.sy}
+            r={HEAT_BLOB_CELLS * FLAT_CELL}
+            fill={`url(#sim-heat-${c.cellKey ?? c.s.opId}-${i})`}
+            style={{ mixBlendMode: 'screen' }}
+          />
+        );
+      })}
 
       {/* Station markers + label */}
-      {stations.map((s, i) => {
-        const isHot = i === bottleneckOpIndex && s.queueLen > 0;
+      {cells.map((c, i) => {
+        const s = c.s;
+        const isHot = s.opId === bottleneckOpId && s.queueLen > 0;
+        const p = flatProj(c.gx + c.w / 2, c.gy + c.d / 2);
         return (
-          <g key={`mk-${s.opId}-${i}`} transform={`translate(${positions[i].x}, ${positions[i].y})`}>
+          <g key={`mk-${i}`} transform={`translate(${p.sx}, ${p.sy})`}>
             <circle r={5} fill={isHot ? SW_COLORS.alarm : '#fff'} opacity={0.9} />
             <text
               y={-14}
@@ -3463,7 +3057,7 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
               fill={isHot ? SW_COLORS.alarm : '#ffffffcc'}
               letterSpacing="0.05em"
             >
-              {s.opCode ?? `OP-${i + 1}`}
+              {stationLabel(s)}
             </text>
             <text y={20} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={8} fill="#ffffff80">
               Q={s.queueLen} · {s.busy}/{s.serversTotal}
@@ -3471,22 +3065,7 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
           </g>
         );
       })}
-
-      {/* Legend */}
-      <g transform={`translate(${VIEWBOX_W - 220}, 50)`}>
-        <rect width={200} height={62} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
-        <text x={12} y={20} fill="#fff" fontFamily={SW_FONTS.mono} fontSize={10} fontWeight={900} letterSpacing="0.15em">
-          PRESSURE HEAT
-        </text>
-        <rect x={12} y={30} width={176} height={10} fill="url(#sim-heat-legend)" />
-        <text x={12} y={54} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
-          flowing
-        </text>
-        <text x={188} y={54} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9} textAnchor="end">
-          choked
-        </text>
-      </g>
-    </svg>
+    </g>
   );
 }
 
@@ -3497,51 +3076,45 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: Sim
 // Each operation becomes a flow card with its OP code, SMV, queue length,
 // busy/total servers, and live throughput. Cards are connected in routing
 // order with marching arrows, so the user can see WHERE in the logical flow
-// the bottleneck sits — independent of physical layout.
+// the bottleneck sits.
+//
+// THE ONE VIEW THAT IS NOT THE FLOOR. Its x/y are routing order, not floor
+// position, and it says so — a card carrying seven labelled numbers is six
+// cells wide, and cannot stand on the 1 x 2 cell its machine occupies without
+// burying the four cards around it.
+//
+// What it must not do is *pretend*. It used to stretch the authored floor
+// coordinates into a box sized by the card grid, under yet a third scale
+// factor, which put the cards neither in flow order nor at their machines'
+// positions. Now the layout is honestly ordinal — but it is still ruled by
+// the same lattice as every other canvas: every pad, card and gap below is a
+// whole number of `FLAT_CELL`s, and the grid starts at the world origin, so
+// the axis ticks under a card are as readable here as anywhere else.
 
-function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta }: SimViewProps) {
-  // Measure the parent container so the operation grid can pick a
-  // cols × rows shape whose aspect ratio matches the available area —
-  // otherwise the fixed 1200×1790 viewBox letterboxes hard on a wide
-  // landscape canvas and the cards render postage-stamp small.
-  const wrapRef = useRef(null as HTMLDivElement | null);
-  const [contSize, setContSize] = useState({ w: 1200, h: 700 });
-
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0]?.contentRect;
-      if (r && r.width > 0 && r.height > 0) {
-        setContSize({ w: r.width, h: r.height });
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  if (stations.length === 0) {
-    return (
-      <div ref={wrapRef} style={{ width: '100%', height: '100%' }}>
-        <svg style={{ width: '100%', height: '100%' }} />
-      </div>
-    );
-  }
+function SimLogicView({ stations, bottleneckOpIndex, simTime }: SimViewProps) {
+  if (stations.length === 0) return <g />;
 
   // Cards carry an explicit label for every number; flow connectors are
-  // bright and thick so the routing reads at a glance.
-  const CARD_W = 260;
-  const CARD_H = 210;
-  const PAD_X = 40;
-  const PAD_TOP = 70;
-  const PAD_BOTTOM = 110;
-  const ROW_GAP = 70;
-  const COL_GAP = 56;
+  // bright and thick so the routing reads at a glance. Every dimension is a
+  // multiple of FLAT_CELL (40) so card corners land on ruled lines.
+  const CARD_W = 6 * FLAT_CELL;  // 240
+  const CARD_H = 5 * FLAT_CELL;  // 200
+  // Even margin all round. The old asymmetric pads reserved room for a title
+  // strip at the top and a legend strip at the bottom; both belonged to the
+  // fixed viewBox and both are gone.
+  const PAD_X = FLAT_CELL;
+  const PAD_TOP = FLAT_CELL;
+  const PAD_BOTTOM = FLAT_CELL;
+  const ROW_GAP = 2 * FLAT_CELL;
+  const COL_GAP = 2 * FLAT_CELL;
 
-  // Pick the cols count that yields an SVG aspect ratio closest to the
-  // container's — that way `preserveAspectRatio="xMidYMid meet"` fills
-  // the canvas with no letterboxing and cards render as large as possible.
-  const targetRatio = contSize.w / Math.max(1, contSize.h);
+  // Pick the cols count whose block shape comes closest to a landscape
+  // sheet. This used to chase the container's live aspect ratio, because a
+  // fitted viewBox letterboxed hard on a wide canvas; on a free canvas there
+  // is nothing to letterbox against, so the schema keeps one stable shape
+  // and the user pans and zooms to it rather than having it reflow under
+  // the window.
+  const targetRatio = 16 / 9;
   let cols = Math.min(stations.length, 4);
   let bestDiff = Infinity;
   for (let c = 1; c <= stations.length; c++) {
@@ -3554,18 +3127,12 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
       cols = c;
     }
   }
-  const rows = Math.ceil(stations.length / cols);
-  const W = PAD_X * 2 + cols * CARD_W + (cols - 1) * COL_GAP;
-  const H = PAD_TOP + rows * CARD_H + (rows - 1) * ROW_GAP + PAD_BOTTOM;
-
-  const twinPositions = twinPositionsForView(stations, twinMeta, W - CARD_W, H - CARD_H, PAD_X, PAD_TOP);
+  // Serpentine, so the last card of a row sits directly above the first card
+  // of the next and the wrap connector stays short.
   const positions = stations.map((_, i) => {
     const row = Math.floor(i / cols);
     const rawCol = i % cols;
     const col = row % 2 === 0 ? rawCol : cols - 1 - rawCol;
-    if (twinPositions) {
-      return { x: twinPositions[i].x, y: twinPositions[i].y, col, row };
-    }
     return {
       x: PAD_X + col * (CARD_W + COL_GAP),
       y: PAD_TOP + row * (CARD_H + ROW_GAP),
@@ -3594,16 +3161,8 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
   }
 
   return (
-    <div ref={wrapRef} style={{ width: '100%', height: '100%' }}>
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="xMidYMid meet"
-      style={{ width: '100%', height: '100%', display: 'block' }}
-    >
+    <g>
       <defs>
-        <pattern id="sim-logic-grid" width={32} height={32} patternUnits="userSpaceOnUse">
-          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
-        </pattern>
         <marker
           id="sim-logic-arrow-ok"
           viewBox="0 0 10 10"
@@ -3638,22 +3197,6 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
           <path d="M0 0 L10 5 L0 10 z" fill={SW_COLORS.alarm} />
         </marker>
       </defs>
-      <rect width={W} height={H} fill="#0d1219" />
-      <rect width={W} height={H} fill="url(#sim-logic-grid)" />
-
-      <text
-        x={W / 2}
-        y={36}
-        textAnchor="middle"
-        fill="#ffffffcc"
-        fontFamily={SW_FONTS.mono}
-        fontSize={13}
-        fontWeight={800}
-        letterSpacing="2px"
-      >
-        {garmentName.toUpperCase()} · LOGIC · OPERATION FLOW SCHEMA
-      </text>
-
       {/* Flow connectors — colour-coded by the upstream station's pressure. */}
       {stations.map((_, i) => {
         if (i === stations.length - 1) return null;
@@ -3731,11 +3274,15 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
               fill="#fff"
               letterSpacing="0.08em"
             >
-              {s.opCode ?? `OP-${i + 1}`}
+              {stationLabel(s)}
             </text>
             {/* Machine-type tag on the right of the header strip — single
                 glyph + short name pulled from the asset library so the
-                card always announces the equipment that runs this op. */}
+                card always announces the equipment that runs this op.
+                Omitted when the block has no machine behind it (a Service
+                authored out of the BLOCKS palette), rather than printing a
+                placeholder where the equipment would go. */}
+            {cardAsset.known && (
             <text
               x={CARD_W - 14}
               y={21}
@@ -3748,19 +3295,25 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
             >
               {cardAsset.glyph} {cardAsset.label}
             </text>
+            )}
 
-            {/* Op name + SMV. */}
-            <text
-              x={CARD_W / 2}
-              y={52}
-              textAnchor="middle"
-              fontFamily={SW_FONTS.body}
-              fontSize={12}
-              fontWeight={700}
-              fill="#fff"
-            >
-              {s.opName.length > 30 ? s.opName.slice(0, 28) + '…' : s.opName}
-            </text>
+            {/* Op name + SMV. The name is skipped when the header strip is
+                already showing it — that happens on a station with no op
+                code, where `stationLabel` falls back to the same string and
+                the card would otherwise print it twice, one line apart. */}
+            {s.opCode && (
+              <text
+                x={CARD_W / 2}
+                y={52}
+                textAnchor="middle"
+                fontFamily={SW_FONTS.body}
+                fontSize={12}
+                fontWeight={700}
+                fill="#fff"
+              >
+                {s.opName.length > 30 ? s.opName.slice(0, 28) + '…' : s.opName}
+              </text>
+            )}
             <text
               x={CARD_W / 2}
               y={66}
@@ -3918,69 +3471,35 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinM
         );
       })}
 
-      {/* Legend — colour-coded swatches with explicit labels for each tier. */}
-      <g transform={`translate(${PAD_X}, ${H - 80})`}>
-        <rect width={W - PAD_X * 2} height={56} fill="#0a0d12cc" stroke="#ffffff20" rx={6} />
-        <text
-          x={16}
-          y={22}
-          fill="#fff"
-          fontFamily={SW_FONTS.mono}
-          fontSize={11}
-          fontWeight={900}
-          letterSpacing="0.2em"
-        >
-          LEGEND
-        </text>
-        {[
-          { color: SW_COLORS.ok, label: 'Healthy flow (util < 85%)' },
-          { color: SW_COLORS.warn, label: 'Warming (util ≥ 85%)' },
-          { color: SW_COLORS.alarm, label: 'Bottleneck (queue building)' },
-          { color: SW_COLORS.brand, label: 'Operation card · throughput' },
-        ].map((it, i) => (
-          <g key={i} transform={`translate(${90 + i * 245}, 14)`}>
-            <rect width={14} height={14} rx={3} fill={it.color} />
-            <text
-              x={22}
-              y={11}
-              fill="#ffffffcc"
-              fontFamily={SW_FONTS.mono}
-              fontSize={10}
-              fontWeight={700}
-            >
-              {it.label}
-            </text>
-          </g>
-        ))}
-        <text
-          x={16}
-          y={42}
-          fill="#ffffff80"
-          fontFamily={SW_FONTS.mono}
-          fontSize={10}
-          fontWeight={600}
-        >
-          Connectors flow left-to-right and snake across rows. Arrow colour matches the upstream station's pressure tier.
-        </text>
-      </g>
-    </svg>
-    </div>
+      {/* The in-canvas legend strip is gone: it was pinned to the bottom
+          edge of the old fixed viewBox, and a free canvas has no bottom
+          edge. The floating `<SimLegend view="logic">` overlay already
+          keys every connector colour and the ◆ bottleneck marker. */}
+    </g>
   );
 }
 
 // ============================================================================
-// SEWING LINES STRIP — per-line KPI cards above the canvas
+// SEWING LINES SCOPE — line pills in the top bar
 // ============================================================================
 
 /**
- * Horizontal strip of cards, one per sewing line in the active twin, plus an
- * "ALL LINES" pill that resets the scope. Selecting a card writes `?line=<id>`
- * to the URL; LiveSim re-reads that on the next render to rebuild the engine
- * scope. The card surfaces the line's name, production system, dominant
- * garment, simulated workstation count and a seed throughput derived from the
- * line's own bottleneck cycle.
+ * The engine's scope picker: an "ALL LINES" pill plus one pill per sewing
+ * line in the active twin. Selecting a pill writes `?scope=<...>` to the URL;
+ * LiveSim re-reads that on the next render to rebuild the engine scope.
+ *
+ * This was a full-width strip of three-line cards sitting between the header
+ * and the canvas — 78px of chrome to hold a radio group. Every card repeated
+ * production system, garment, workstation count and a seed rate that nobody
+ * reads while a run is playing; the one thing you look at is which line is
+ * lit. So the pills came up into the header beside TIME SETUP (the other
+ * control that says what the run IS), and the numbers moved into the
+ * tooltips, where they are one hover away instead of one row down.
+ *
+ * The rail scrolls horizontally rather than wrapping: the header must stay
+ * one line tall no matter how many lines the twin has.
  */
-function SewingLinesStrip({
+function SewingLinesScope({
   lineBuilds,
   scope,
   activeTwin,
@@ -3995,61 +3514,80 @@ function SewingLinesStrip({
   const selectedLineId = scope.kind === 'line' ? scope.id : null;
   // Departments are no longer a user-facing concept: a sewing floor has LINES,
   // and every twin now carries exactly one auto-managed "Sewing Floor" that the
-  // Builder creates and grows on its own. The scope strip is therefore
+  // Builder creates and grows on its own. The scope rail is therefore
   // ALL LINES + one pill per line, with no department tier in between.
   //
   // `Department` stays in the schema and `deptId` stays on every entity, so
   // saved .swproj files and IndexedDB twins keep loading untouched — this is a
   // UI removal, not a migration.
 
+  /** Shared pill shell. `accent` lights the border + wash when selected. */
+  const pill = (active: boolean, accent: string): CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    flex: 'none',
+    height: 28,
+    padding: '0 10px',
+    borderRadius: 999,
+    border: `1px solid ${active ? accent : '#ffffff20'}`,
+    background: active ? `${accent}26` : 'transparent',
+    color: '#fff',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  });
+
+  const nameStyle: CSSProperties = {
+    fontFamily: SW_FONTS.display,
+    fontSize: 10,
+    fontWeight: 900,
+    letterSpacing: '0.1em',
+  };
+  const metaStyle: CSSProperties = {
+    fontFamily: SW_FONTS.mono,
+    fontSize: 10,
+    color: '#ffffff99',
+  };
+
   return (
     <div
+      role="radiogroup"
+      aria-label="Simulation scope"
       style={{
-        padding: '8px 24px',
-        borderBottom: '1px solid #ffffff15',
-        background: '#0a0d12',
         display: 'flex',
-        alignItems: 'stretch',
-        gap: 10,
+        alignItems: 'center',
+        gap: 8,
+        // Claims the space the old spacer held, and shrinks before any of the
+        // fixed controls do — the rail scrolls, the buttons never squash.
+        flex: '1 1 0',
+        minWidth: 0,
         overflowX: 'auto',
+        paddingBottom: 2,
       }}
     >
       <span
         style={{
-          alignSelf: 'center',
+          flex: 'none',
           fontFamily: SW_FONTS.mono,
-          fontSize: 10,
+          fontSize: 9,
           fontWeight: 800,
           letterSpacing: '0.18em',
           color: SW_COLORS.brand,
         }}
       >
-        SEWING LINES
+        LINES
       </span>
 
       <button
+        type="button"
+        role="radio"
+        aria-checked={factoryActive}
         onClick={() => onPickScope({ kind: 'factory' })}
-        title="Simulate every wired sewing line in the twin — one engine per line, transport bar drives them together"
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
-          minWidth: 120,
-          padding: '6px 12px',
-          borderRadius: 6,
-          border: `1px solid ${factoryActive ? SW_COLORS.brand : '#ffffff20'}`,
-          background: factoryActive ? `${SW_COLORS.brand}26` : 'transparent',
-          color: '#fff',
-          cursor: 'pointer',
-          textAlign: 'left',
-        }}
+        title={`Simulate every wired sewing line in the twin — ${activeTwin.workstations.length} workstations, one engine per line, transport bar drives them together`}
+        style={pill(factoryActive, SW_COLORS.brand)}
       >
-        <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em' }}>
-          ALL LINES
-        </span>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
-          {activeTwin.workstations.length} workstations · whole twin
-        </span>
+        <span style={nameStyle}>ALL LINES</span>
+        <span style={metaStyle}>{activeTwin.workstations.length} ws</span>
       </button>
 
       {lineBuilds.map(({ line, build, ok, reason }) => {
@@ -4077,49 +3615,40 @@ function SewingLinesStrip({
         return (
           <button
             key={line.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
             onClick={() => onPickScope({ kind: 'line', id: line.id })}
+            // Everything the old card printed on its three lines, one hover
+            // away. Nothing was dropped — it just stopped costing a row.
             title={
               ok
-                ? `Scope the engine to ${line.name} — ${ops} operations on ${memberCount} workstation${memberCount === 1 ? '' : 's'}.`
-                : `Line not runnable yet — ${reason ?? 'no simulatable workstation'}.`
+                ? [
+                    line.name,
+                    ...(line.garmentId ? [line.garmentId] : []),
+                    `${ops} operations on ${memberCount} workstation${memberCount === 1 ? '' : 's'}`,
+                    `seed ${seedPiecesPerHr.toLocaleString()} pcs/hr`,
+                  ].join('\n')
+                : `${line.name} — not runnable yet: ${reason ?? 'no simulatable workstation'}.\nDrop machines + assign opIds to wire this line.`
             }
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-              minWidth: 200,
-              padding: '6px 12px',
-              borderRadius: 6,
-              border: `1px solid ${active ? accent : '#ffffff20'}`,
-              borderLeft: `4px solid ${accent}`,
-              background: active ? `${accent}26` : 'transparent',
-              color: '#fff',
-              cursor: 'pointer',
-              textAlign: 'left',
-              opacity: ok ? 1 : 0.6,
-            }}
+            style={{ ...pill(active, accent), opacity: ok ? 1 : 0.6 }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.06em' }}>
-                {line.name}
-              </span>
-              {!ok && (
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.warn, fontWeight: 800 }}>
-                  · EMPTY
-                </span>
-              )}
-            </div>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
-              {line.productionSystem.toUpperCase()}
-              {line.garmentId ? ` · ${line.garmentId}` : ''}
-              {' · '}
-              {memberCount} workstation{memberCount === 1 ? '' : 's'}
-            </span>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: ok ? SW_COLORS.ok : '#ffffff60' }}>
-              {ok
-                ? `${ops} operations · seed ${seedPiecesPerHr.toLocaleString()} pcs/hr`
-                : 'drop machines + assign opIds to wire this line'}
-            </span>
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                flex: 'none',
+                borderRadius: '50%',
+                background: accent,
+              }}
+            />
+            <span style={nameStyle}>{line.name}</span>
+            {ok ? (
+              <span style={metaStyle}>{memberCount} ws</span>
+            ) : (
+              <span style={{ ...metaStyle, color: SW_COLORS.warn, fontWeight: 800 }}>EMPTY</span>
+            )}
           </button>
         );
       })}
@@ -4127,8 +3656,8 @@ function SewingLinesStrip({
   );
 }
 
-/** Department-colour palette mirrored from Builder so the line strip's accent
- *  bar matches the canvas band. Hard-coded here (rather than imported from
+/** Department-colour palette mirrored from Builder so each line pill's dot
+ *  matches the canvas band. Hard-coded here (rather than imported from
  *  Builder.tsx) to keep this file's import surface narrow. */
 const DEPT_LINE_COLORS: Record<string, string> = {
   fabric: '#d4a574',

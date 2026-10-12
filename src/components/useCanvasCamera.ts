@@ -41,9 +41,10 @@ interface UseCanvasCameraOpts {
   /** The gesture surface. Wheel and middle/space mousedown bind here. */
   ref: React.RefObject<HTMLElement | null>;
   /**
-   * Where the camera's zero sits inside the element. The SVG canvases render
-   * through a centred viewBox, so their origin is the middle; the simulation
-   * viewport grows a wrapper from its top-left corner.
+   * Where the camera's zero sits inside the element. Every canvas in the app
+   * renders through a centred viewBox today, so they all pass `'center'`;
+   * `'topLeft'` stays available for a host that grows a wrapper from its
+   * corner instead.
    */
   origin: 'center' | 'topLeft';
   /** Live camera. Must read a ref — see the note above. */

@@ -1,7 +1,7 @@
 /**
  * Project store — the single source of truth for everything the user
  * "owns" inside Stitchworks: factory metadata, the live-sim configuration,
- * the Yamazumi assignment overrides, and the skill matrix. Persisted to
+ * and the skill matrix. Persisted to
  * localStorage automatically via zustand/middleware/persist.
  *
  * The shape is versioned (`schemaVersion`); future migrations bump the
@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { GARMENT_TEMPLATES, normalizeStationType, type GarmentTemplate, type Operation, type ProductionSystem, type StationType } from '../domain';
+import { GARMENT_TEMPLATES, normalizeStationType, type GarmentTemplate, type Operation, type StationType } from '../domain';
 import { indexedDbStorage } from './storage/indexedDbStorage';
 import type { ModelTimeUnit } from '../simulation/timeUnit';
 import type { Twin } from '../domain/twin';
@@ -31,8 +31,19 @@ const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
  *        worker / product edits, customs, hidden flags and uploaded images).
  *        The migration deletes those keys outright so IndexedDB payloads
  *        actually shrink rather than carrying dead maps forever.
+ *   v4 — user-authored station types.
+ *   v5 — dropped `orders`. The Orders wizard and the whole production-order
+ *        model went away; demand moved to a `demandPerDay` target on the
+ *        sewing line itself (since removed as well — the app has no demand
+ *        input today). The migration deletes the key so saved payloads stop
+ *        carrying order drafts nothing can read.
+ *   v6 — dropped `selectedProductionSystem`, and `productionSystem` off the
+ *        legacy `Line` seed. Production systems (PBS / modular / UPS /
+ *        synchro / straight) are out of scope until the app models them
+ *        properly; the key is deleted so a saved payload stops pinning a
+ *        choice nothing reads.
  */
-export const PROJECT_SCHEMA_VERSION = 4 as const;
+export const PROJECT_SCHEMA_VERSION = 7 as const;
 
 export interface ProjectMeta {
   name: string;
@@ -44,13 +55,6 @@ export interface ProjectMeta {
 /** Operator id → (operation id → efficiency 0..1). Sparse — missing entries
  *  fall back to the worker archetype's default efficiency. */
 export type SkillMatrix = Record<string, Record<string, number>>;
-
-export interface YamazumiAssignment {
-  /** Operator display id, e.g. "OPR-01". */
-  operatorId: string;
-  /** Operation ids assigned to this operator, in execution order. */
-  opIds: string[];
-}
 
 /** Display preferences. Persisted with the project so they roam with
  *  an exported `.swproj` file. Render sites must consume these (see
@@ -146,8 +150,6 @@ export interface Line {
   floorId: string;
   garmentTemplateId: string;
   operators: number;
-  /** PBS / modular / UPS / etc. Drives operator distribution + WIP. */
-  productionSystem: string;
   lastKpis?: ScenarioKpis;
   /** Wall-clock when lastKpis was captured. */
   lastRunAt?: string;
@@ -188,12 +190,6 @@ export interface ScenarioKpis {
   demandTaktGap?: number;
   /** Intrinsic balance ratio ÷ dynamic balance ratio. */
   intrinsicVsDynamicRatio?: number;
-  /** Minutes lost to changeover; populated in P4. */
-  changeoverMinutes?: number;
-  /** Total changeover minutes summed across every changeover event. */
-  totalChangeoverMinutes?: number;
-  /** Per-order completion time keyed by Order.id (sim minutes). */
-  perOrderCompletionTime?: Record<string, number>;
   /** Per-KPI standard deviation across replications, when available. */
   std?: {
     producedPieces: number;
@@ -220,7 +216,6 @@ export interface Scenario {
     operators: number;
     /** Sparse overrides at save time — recreate the run if needed. */
     skillMatrix: SkillMatrix;
-    yamazumiOverride?: YamazumiAssignment[];
     /** Snapshot of the active twin at save time. Lets a scenario carry its
      *  own factory layout (lines, workstations, connectors) so loading R1
      *  vs R2 swaps the floor, not just the per-garment config. Optional
@@ -232,51 +227,16 @@ export interface Scenario {
   kpis: ScenarioKpis;
 }
 
-/**
- * A production order as committed from the Orders wizard. Persisted so the
- * Simulation page can offer it as a swappable source alongside the canonical
- * twin and any loaded reference paper. We keep the input fields (qty, deadline,
- * client) on the draft so the chip can show meaningful labels and the user can
- * re-open the order later for tweaks.
- */
-export interface OrderDraft {
-  id: string;
-  po: string;
-  client: string;
-  style: string;
-  qty: number;
-  deadlineDays: number;
-  garmentTemplateId: string;
-  operators: number;
-  productionSystem: ProductionSystem;
-  createdAt: string;
-}
-
-/** Max recent orders kept in `orders[]`. Older entries are dropped FIFO. */
-export const MAX_RECENT_ORDERS = 20 as const;
-
 export interface ProjectState {
   schemaVersion: typeof PROJECT_SCHEMA_VERSION;
   meta: ProjectMeta;
 
-  /**
-   * Orders committed from the Orders wizard, most recent first. Surfaced
-   * in LiveSim's SOURCE dropdown so the user can switch the simulation
-   * between the canonical twin and any of their recent orders.
-   */
-  orders: OrderDraft[];
-
-  /** The production system the user picked in the Orders wizard. Drives
-   *  bundleSize in the sim and is surfaced in the LiveSim HUD so the user
-   *  can confirm their layout choice is being honoured. */
-  selectedProductionSystem: ProductionSystem;
+  /** The project's working production system. Drives bundleSize in the sim
+   *  and is surfaced in the LiveSim HUD so the user can confirm their layout
+   *  choice is being honoured. */
 
   /** Operator name overrides (id → name). */
   operatorNames: Record<string, string>;
-
-  /** Per-garment-template, the user's manual Yamazumi assignment, if any.
-   *  When absent, the Yamazumi falls back to the LPT auto-assignment. */
-  yamazumiOverrides: Record<string, YamazumiAssignment[]>;
 
   skillMatrix: SkillMatrix;
 
@@ -305,8 +265,8 @@ export interface ProjectState {
    * IDs of built-in garments the user has explicitly removed from the
    * library. They stay resolvable in `byId` (so factory workstations that
    * still reference them don't crash), but disappear from the picker list.
-   * Removing a built-in also drops its edit + yamazumi override — restoring
-   * later returns the clean catalog defaults.
+   * Removing a built-in also drops its edit — restoring later returns the
+   * clean catalog defaults.
    */
   hiddenGarmentIds: Record<string, true>;
 
@@ -320,20 +280,12 @@ export interface ProjectState {
 
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
-  setSelectedProductionSystem: (id: ProductionSystem) => void;
-  /** Push a new order to the front of `orders[]`, capping at MAX_RECENT_ORDERS.
-   *  Returns the persisted draft (with id + createdAt assigned). */
-  addOrder: (input: Omit<OrderDraft, 'id' | 'createdAt'>) => OrderDraft;
-  /** Drop a saved order by id. No-op if the id isn't found. */
-  removeOrder: (id: string) => void;
   /** Patch one unit/format preference. The Settings page calls this from
    *  each toggle's onChange. */
   setUnit: <K extends keyof UnitsPrefs>(key: K, value: UnitsPrefs[K]) => void;
   /** Patch one time-semantics field. */
   setTime: <K extends keyof TimeSettings>(key: K, value: TimeSettings[K]) => void;
   setOperatorName: (id: string, name: string) => void;
-  setYamazumiOverride: (garmentId: string, assignments: YamazumiAssignment[]) => void;
-  clearYamazumiOverride: (garmentId: string) => void;
   setSkill: (operatorId: string, opId: string, efficiency: number) => void;
   resetSkillMatrix: () => void;
 
@@ -359,9 +311,8 @@ export interface ProjectState {
   /** Rename a scenario in place. */
   renameScenario: (id: string, name: string) => void;
   /**
-   * Restore a scenario's config into the live project (garment, operators,
-   * skill matrix, yamazumi override). The scenario itself is not deleted —
-   * loading is non-destructive to the saved row.
+   * Restore a scenario's skill matrix into the live project. The scenario
+   * itself is not deleted — loading is non-destructive to the saved row.
    */
   loadScenario: (id: string) => void;
 
@@ -433,8 +384,8 @@ export interface ProjectState {
   ) => void;
   /** Drop the override for a garment id; built-in default returns. */
   resetGarment: (id: string) => void;
-  /** Hide a built-in garment from the picker and drop its edit + yamazumi
-   *  override. Custom garments should use `resetGarment` instead. */
+  /** Hide a built-in garment from the picker and drop its edit. Custom
+   *  garments should use `resetGarment` instead. */
   hideGarment: (id: string) => void;
   /** Unhide a previously hidden built-in. */
   unhideGarment: (id: string) => void;
@@ -442,8 +393,7 @@ export interface ProjectState {
   /**
    * Sweep custom (non-built-in) garments whose names match the test-name
    * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
-   * boot. Returns the count removed. Also drops any Yamazumi overrides keyed
-   * by a purged garment.
+   * boot. Returns the count removed.
    */
   purgeTestGarments: () => number;
 
@@ -479,14 +429,14 @@ function defaultFactory(): FactoryStructure {
       { id: 'F3', name: 'Floor 3 · Finishing', description: 'Press + pack — 2 lines',         color: 'thread' },
     ],
     lines: [
-      { id: 'L1', name: 'Line 1', floorId: 'F1', garmentTemplateId: 'tshirt',     operators: 25, productionSystem: 'PBS' },
-      { id: 'L2', name: 'Line 2', floorId: 'F1', garmentTemplateId: 'polo',       operators: 28, productionSystem: 'PBS' },
-      { id: 'L3', name: 'Line 3', floorId: 'F1', garmentTemplateId: 'shirt',      operators: 22, productionSystem: 'modular' },
-      { id: 'L4', name: 'Line 4', floorId: 'F1', garmentTemplateId: 'sweatshirt', operators: 24, productionSystem: 'PBS' },
-      { id: 'L5', name: 'Cut A',  floorId: 'F2', garmentTemplateId: 'tshirt',     operators: 6,  productionSystem: 'straight' },
-      { id: 'L6', name: 'Cut B',  floorId: 'F2', garmentTemplateId: 'shirt',      operators: 8,  productionSystem: 'straight' },
-      { id: 'L7', name: 'Finish A', floorId: 'F3', garmentTemplateId: 'tshirt',   operators: 10, productionSystem: 'straight' },
-      { id: 'L8', name: 'Finish B', floorId: 'F3', garmentTemplateId: 'shirt',    operators: 8,  productionSystem: 'straight' },
+      { id: 'L1', name: 'Line 1', floorId: 'F1', garmentTemplateId: 'tshirt',     operators: 25 },
+      { id: 'L2', name: 'Line 2', floorId: 'F1', garmentTemplateId: 'polo',       operators: 28 },
+      { id: 'L3', name: 'Line 3', floorId: 'F1', garmentTemplateId: 'shirt',      operators: 22 },
+      { id: 'L4', name: 'Line 4', floorId: 'F1', garmentTemplateId: 'sweatshirt', operators: 24 },
+      { id: 'L5', name: 'Cut A',  floorId: 'F2', garmentTemplateId: 'tshirt',     operators: 6 },
+      { id: 'L6', name: 'Cut B',  floorId: 'F2', garmentTemplateId: 'shirt',      operators: 8 },
+      { id: 'L7', name: 'Finish A', floorId: 'F3', garmentTemplateId: 'tshirt',   operators: 10 },
+      { id: 'L8', name: 'Finish B', floorId: 'F3', garmentTemplateId: 'shirt',    operators: 8 },
     ],
   };
 }
@@ -494,12 +444,7 @@ function defaultFactory(): FactoryStructure {
 const defaults: Omit<
   ProjectState,
   | 'rename'
-  | 'setSelectedProductionSystem'
-  | 'addOrder'
-  | 'removeOrder'
   | 'setOperatorName'
-  | 'setYamazumiOverride'
-  | 'clearYamazumiOverride'
   | 'setSkill'
   | 'resetSkillMatrix'
   | 'resetProject'
@@ -536,10 +481,7 @@ const defaults: Omit<
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     meta,
-    selectedProductionSystem: 'PBS',
-    orders: [],
     operatorNames: {},
-    yamazumiOverrides: {},
     skillMatrix: {},
     scenarios: [],
     factory: defaultFactory(),
@@ -580,23 +522,6 @@ export const useProject = create<ProjectState>()(
       rename: (name) =>
         set((s) => touch({ ...s, meta: { ...s.meta, name } })),
 
-      setSelectedProductionSystem: (id) =>
-        set((s) => touch({ ...s, selectedProductionSystem: id })),
-
-      addOrder: (input) => {
-        const id = `ord-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
-        const draft: OrderDraft = { id, createdAt: new Date().toISOString(), ...input };
-        set((s) =>
-          touch({
-            ...s,
-            orders: [draft, ...s.orders].slice(0, MAX_RECENT_ORDERS),
-          }),
-        );
-        return draft;
-      },
-
-      removeOrder: (id) =>
-        set((s) => touch({ ...s, orders: s.orders.filter((o) => o.id !== id) })),
 
       setUnit: (key, value) =>
         set((s) => touch({ ...s, units: { ...s.units, [key]: value } })),
@@ -606,21 +531,6 @@ export const useProject = create<ProjectState>()(
 
       setOperatorName: (id, name) =>
         set((s) => touch({ ...s, operatorNames: { ...s.operatorNames, [id]: name } })),
-
-      setYamazumiOverride: (garmentId, assignments) =>
-        set((s) =>
-          touch({
-            ...s,
-            yamazumiOverrides: { ...s.yamazumiOverrides, [garmentId]: assignments },
-          }),
-        ),
-
-      clearYamazumiOverride: (garmentId) =>
-        set((s) => {
-          const next = { ...s.yamazumiOverrides };
-          delete next[garmentId];
-          return touch({ ...s, yamazumiOverrides: next });
-        }),
 
       setSkill: (operatorId, opId, efficiency) =>
         set((s) => {
@@ -639,9 +549,6 @@ export const useProject = create<ProjectState>()(
         const cur = get();
         const id = `scn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         const { garmentTemplateId, operators } = input;
-        // Look up yamazumi against the scenario's own garment key — falling
-        // back to none when there's no override saved for that garment.
-        const yamSource = cur.yamazumiOverrides[garmentTemplateId];
         const scenario: Scenario = {
           id,
           name: input.name || `Scenario ${cur.scenarios.length + 1}`,
@@ -651,9 +558,6 @@ export const useProject = create<ProjectState>()(
             garmentTemplateId,
             operators,
             skillMatrix: JSON.parse(JSON.stringify(cur.skillMatrix)) as SkillMatrix,
-            yamazumiOverride: yamSource
-              ? JSON.parse(JSON.stringify(yamSource)) as YamazumiAssignment[]
-              : undefined,
             twin: input.twin ? (JSON.parse(JSON.stringify(input.twin)) as Twin) : undefined,
           },
           kpis: input.kpis,
@@ -677,16 +581,9 @@ export const useProject = create<ProjectState>()(
         set((s) => {
           const scenario = s.scenarios.find((x) => x.id === id);
           if (!scenario) return s;
-          const yamOverrides = { ...s.yamazumiOverrides };
-          if (scenario.config.yamazumiOverride) {
-            yamOverrides[scenario.config.garmentTemplateId] = scenario.config.yamazumiOverride;
-          } else {
-            delete yamOverrides[scenario.config.garmentTemplateId];
-          }
           return touch({
             ...s,
             skillMatrix: JSON.parse(JSON.stringify(scenario.config.skillMatrix)) as SkillMatrix,
-            yamazumiOverrides: yamOverrides,
           });
         }),
 
@@ -846,16 +743,13 @@ export const useProject = create<ProjectState>()(
 
       hideGarment: (id) =>
         set((s) => {
-          // Drop the override and any yamazumi override so a future restore
-          // returns the clean catalog defaults rather than stale edits.
+          // Drop the override so a future restore returns the clean catalog
+          // defaults rather than stale edits.
           const nextEdits = { ...s.garmentEdits };
           delete nextEdits[id];
-          const nextYama = { ...s.yamazumiOverrides };
-          delete nextYama[id];
           return touch({
             ...s,
             garmentEdits: nextEdits,
-            yamazumiOverrides: nextYama,
             hiddenGarmentIds: { ...s.hiddenGarmentIds, [id]: true },
           });
         }),
@@ -885,13 +779,7 @@ export const useProject = create<ProjectState>()(
           }
           if (purgedIds.length === 0) return s;
           removed = purgedIds.length;
-          const nextOverrides = { ...s.yamazumiOverrides };
-          for (const id of purgedIds) delete nextOverrides[id];
-          return touch({
-            ...s,
-            garmentEdits: next,
-            yamazumiOverrides: nextOverrides,
-          });
+          return touch({ ...s, garmentEdits: next });
         });
         return removed;
       },
@@ -901,14 +789,9 @@ export const useProject = create<ProjectState>()(
           ...defaults,
           meta: defaultMeta(),
           rename: get().rename,
-          setSelectedProductionSystem: get().setSelectedProductionSystem,
-          addOrder: get().addOrder,
-          removeOrder: get().removeOrder,
           setUnit: get().setUnit,
           setTime: get().setTime,
           setOperatorName: get().setOperatorName,
-          setYamazumiOverride: get().setYamazumiOverride,
-          clearYamazumiOverride: get().clearYamazumiOverride,
           setSkill: get().setSkill,
           resetSkillMatrix: get().resetSkillMatrix,
           saveScenario: get().saveScenario,
@@ -956,10 +839,7 @@ export const useProject = create<ProjectState>()(
           ...cur,
           schemaVersion: PROJECT_SCHEMA_VERSION,
           meta: { ...defaults.meta, ...s.meta, modifiedAt: new Date().toISOString() },
-          selectedProductionSystem: s.selectedProductionSystem ?? defaults.selectedProductionSystem,
-          orders: s.orders ?? [],
           operatorNames: s.operatorNames ?? {},
-          yamazumiOverrides: s.yamazumiOverrides ?? {},
           skillMatrix: s.skillMatrix ?? {},
           scenarios: s.scenarios ?? [],
           factory: s.factory ?? defaultFactory(),
@@ -982,10 +862,7 @@ export const useProject = create<ProjectState>()(
         return {
           schemaVersion: s.schemaVersion,
           meta: s.meta,
-          selectedProductionSystem: s.selectedProductionSystem,
-          orders: s.orders,
           operatorNames: s.operatorNames,
-          yamazumiOverrides: s.yamazumiOverrides,
           skillMatrix: s.skillMatrix,
           scenarios: s.scenarios,
           factory: s.factory,
@@ -1008,10 +885,7 @@ export const useProject = create<ProjectState>()(
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         meta: state.meta,
-        selectedProductionSystem: state.selectedProductionSystem,
-        orders: state.orders,
         operatorNames: state.operatorNames,
-        yamazumiOverrides: state.yamazumiOverrides,
         skillMatrix: state.skillMatrix,
         scenarios: state.scenarios,
         factory: state.factory,
@@ -1050,6 +924,55 @@ export const useProject = create<ProjectState>()(
         if (fromVersion < 4) {
           p = { ...p, stationTypes: p.stationTypes ?? [] };
         }
+        // v4 → v5: the Orders wizard is gone. Drop the key outright — the
+        // drafts reference a garment/system pairing nothing reads anymore,
+        // and leaving them would keep a dead list growing in IndexedDB.
+        if (fromVersion < 5) {
+          const next = { ...p } as Record<string, unknown>;
+          delete next.orders;
+          p = next as Partial<ProjectState>;
+        }
+        // v5 → v6: production systems are out of scope. Drop the selected
+        // system, and the per-line `productionSystem` string on the legacy
+        // factory seed — both name a concept the app no longer has.
+        if (fromVersion < 6) {
+          const next = { ...p } as Record<string, unknown>;
+          delete next.selectedProductionSystem;
+          const factory = next.factory as { lines?: Array<Record<string, unknown>> } | undefined;
+          if (factory?.lines) {
+            next.factory = {
+              ...factory,
+              lines: factory.lines.map((l) => {
+                const { productionSystem: _dropped, ...rest } = l;
+                void _dropped;
+                return rest;
+              }),
+            };
+          }
+          p = next as Partial<ProjectState>;
+        }
+        // v6 → v7: the per-garment Yamazumi override is gone. A line's balance
+        // is its twin now — the stations placed on it, the operation each one
+        // runs, and its parallel-channel count — and the twin is already
+        // snapshotted into `scenario.config.twin`. The old map keyed a manual
+        // assignment by GARMENT id, which could not name a line at all: two
+        // lines running the same style shared one override, and a third
+        // running a different style silently got none.
+        if (fromVersion < 7) {
+          const next = { ...p } as Record<string, unknown>;
+          delete next.yamazumiOverrides;
+          const scenarios = next.scenarios as Array<Record<string, unknown>> | undefined;
+          if (scenarios) {
+            next.scenarios = scenarios.map((sc) => {
+              const cfg = sc.config as Record<string, unknown> | undefined;
+              if (!cfg || !('yamazumiOverride' in cfg)) return sc;
+              const { yamazumiOverride: _dropped, ...restCfg } = cfg;
+              void _dropped;
+              return { ...sc, config: restCfg };
+            });
+          }
+          p = next as Partial<ProjectState>;
+        }
         return { ...p, schemaVersion: PROJECT_SCHEMA_VERSION } as Partial<ProjectState>;
       },
       // Payloads written before a slice existed hydrate it as undefined, and
@@ -1062,7 +985,6 @@ export const useProject = create<ProjectState>()(
           ...p,
           units: { ...defaultUnits, ...(p.units ?? {}) },
           hiddenGarmentIds: p.hiddenGarmentIds ?? {},
-          orders: p.orders ?? [],
           // Re-clamped on the way in: a payload hand-edited or written by an
           // older build can hold a footprint the canvas cannot draw.
           stationTypes: (p.stationTypes ?? []).map(normalizeStationType),

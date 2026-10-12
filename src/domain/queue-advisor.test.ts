@@ -52,7 +52,6 @@ const LINE: SewingLine = {
   id: 'line-1',
   deptId: 'dept-1',
   name: 'Line 1',
-  productionSystem: 'PBS',
   color: 'blue',
   policy: { bundleSize: 30 },
 };

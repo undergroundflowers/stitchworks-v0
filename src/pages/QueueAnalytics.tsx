@@ -190,7 +190,7 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
           stations={state.stations}
           stationHistory={state.stationHistory}
           bottleneckIdx={state.bottleneckOpIndex}
-          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
+          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
         />
       ) : (
         <CompareView
@@ -198,7 +198,7 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
           stationHistory={state.stationHistory}
           bottleneckIdx={state.bottleneckOpIndex}
           metric={metric}
-          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
+          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
         />
       )}
     </div>

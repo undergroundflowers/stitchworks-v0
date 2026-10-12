@@ -76,6 +76,13 @@ export const SW_COLORS = {
   /** Canvas grid, sub-cell tier. Drawn under the cell tier so cell
    *  boundaries stay visually dominant as the grid subdivides on zoom. */
   gridLineSub: '#E8EDF508',
+  /** Canvas grid, axis tier — the `x = 0` and `y = 0` rules. Several steps
+   *  up from `gridLine` because these two lines are the only ones the user
+   *  has to be able to pick out of the lattice: they are what the
+   *  Inspector's "Position (cells)" numbers are measured from. */
+  gridAxis: '#E8EDF54F',
+  /** Cell-coordinate tick labels along the axes, and the origin marker. */
+  gridAxisText: '#E8EDF599',
   /**
    * Modal/dialog backdrop. NOT ink-alpha: on a dark ground `ink` is the light
    * end, so an ink-alpha scrim would paint a white wash over the app instead
@@ -175,8 +182,10 @@ export const SW_CONTROL = {
   height: 28,
   /** Square side of an icon-only button (« », +, −). Same as `height`. */
   icon: 28,
-  /** Disclosure / caret glyph box — square, so rotation never nudges layout. */
-  chevron: 16,
+  /** Disclosure / caret glyph box — square, so rotation never nudges layout.
+   *  Sized so the triangle is a comfortable click target and reads as a
+   *  control rather than a punctuation mark next to its label. */
+  chevron: 20,
 } as const;
 
 /**
@@ -200,6 +209,16 @@ export const SW_Z = {
   modal: 300,
   toast: 400,
   tooltip: 500,
+  /**
+   * Anything anchored to a control but rendered at the document root: the
+   * HudSelect panel, first and so far only.
+   *
+   * Off the scale above on purpose. A portalled popover has to clear whatever
+   * it was opened from, and `Dialog` paints its overlay at a legacy 10040 —
+   * so a dropdown inside the station-type dialog would open behind the dialog
+   * at any value the rest of this scale offers.
+   */
+  popover: 10050,
 } as const;
 
 /**

@@ -11,17 +11,13 @@ import type { Projection } from './iso';
  * different things depending on which tab you were in.
  *
  * This module is the single source of truth for how a camera responds. It is
- * deliberately pure — no React, no element refs — so the two very different
- * host implementations can share it:
- *
- *   - the SVG canvases pan/zoom an inner `<g transform>` inside a **centred**
- *     viewBox, so their offset origin is the stage centre;
- *   - the simulation viewport sizes a wrapper div (percentage width/height,
- *     which keeps child SVGs vector-sharp instead of rasterising them at 1×)
- *     from its **top-left**.
- *
- * Both are just an offset space with a scale, so the same maths drives both.
- * Callers only differ in which point they call the origin.
+ * deliberately pure — no React, no element refs — so every host can share it.
+ * All of them now work the same way: a stage-filling `<svg>` with a
+ * **centred**, 1:1 viewBox and an inner `<g transform>` carrying the pan and
+ * zoom, so the offset origin is the stage centre. `origin` on the hook is
+ * still a parameter rather than an assumption, because a host that grows a
+ * wrapper from its top-left is the same offset-space-with-a-scale measured
+ * from a different point.
  */
 
 /** Pan in screen px plus a scale factor. `x`/`y` are offsets from the host's

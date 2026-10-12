@@ -11,6 +11,7 @@ import { createElement, type ReactNode } from 'react';
 import {
   PML_BLOCK_LIBRARY,
   pmlFixtureId,
+  type PmlBlockKind,
   type PmlBlockSpec,
   type PmlCategory,
 } from './pml';
@@ -18,6 +19,7 @@ import type { PmlIconComponent } from '../assets/pml-icons';
 import type { MachineCode } from './machines';
 import type { StationType } from './stationTypes';
 import { glyphMark, type GlyphFamily } from './machine-glyphs';
+import type { StationArt } from './station-art';
 import { PML_CATEGORY_TINT } from '../design/tokens';
 
 // ============================================================================
@@ -417,6 +419,64 @@ function fixtureBox(code?: string): IsoDrawFn {
     );
 }
 
+// ── Uploaded artwork ────────────────────────────────────────────────────────
+
+/** The axis-aligned screen box a cuboid of this footprint would occupy.
+ *  Uploaded ISO artwork is fitted into it, so a drawing stands exactly where
+ *  the box it replaces stood. */
+export function cuboidScreenBox(
+  w: number, d: number, h: number, r = 0,
+): { x: number; y: number; w: number; h: number } {
+  const pts = Object.values(isoCuboid(w, d, h, r).pts);
+  const xs = pts.map((p) => p.sx);
+  const ys = pts.map((p) => p.sy);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+
+/**
+ * Uploaded SVG fitted into `box`, as a `<g>` in the caller's user space.
+ *
+ * The markup is inlined rather than referenced through an `<image>` or a
+ * nested `<svg>`: it has to inherit the canvas transform (so it zooms and
+ * morphs with everything else) and it has to be one element the caller can
+ * position. `contain` fit, never stretched — a machine drawn 3:2 stays 3:2
+ * inside a square footprint.
+ *
+ * `color` is set on the wrapper so artwork authored with `currentColor`
+ * takes the floor's ink instead of shipping its own black.
+ *
+ * Safe to inline: `StationArt` only ever comes from `sanitizeStationArt`,
+ * and `normalizeStationType` re-checks it on every load.
+ */
+export function stationArtNode(
+  art: StationArt,
+  box: { x: number; y: number; w: number; h: number },
+  opts: { anchor?: 'center' | 'bottom'; color?: string } = {},
+): ReactNode {
+  const [vx, vy, vw, vh] = art.viewBox;
+  const s = Math.min(box.w / vw, box.h / vh);
+  const tx = box.x + (box.w - vw * s) / 2 - vx * s;
+  const ty =
+    opts.anchor === 'bottom'
+      ? box.y + box.h - vh * s - vy * s
+      : box.y + (box.h - vh * s) / 2 - vy * s;
+  return createElement('g', {
+    transform: `translate(${tx.toFixed(2)}, ${ty.toFixed(2)}) scale(${s.toFixed(4)})`,
+    style: opts.color ? { color: opts.color } : undefined,
+    dangerouslySetInnerHTML: { __html: art.svg },
+  });
+}
+
+/** A station type whose ISO body is an uploaded drawing. The footprint still
+ *  governs: the art is fitted to the box the cuboid would have filled and
+ *  stands on the same floor line. */
+function artBody(art: StationArt): IsoDrawFn {
+  return ({ w, d, h, r = 0 }) =>
+    stationArtNode(art, cuboidScreenBox(w, d, h, r), { anchor: 'bottom', color: SW_PAL.metal });
+}
+
 /** A painted floor region. Regions are annotation, so they get no volume. */
 function zoneFloor(label: string): IsoDrawFn {
   return ({ w, d, r = 0 }) => {
@@ -551,11 +611,10 @@ export type ApparelCategoryId = 'sew_mach';
 export interface ApparelCategory {
   id: ApparelCategoryId;
   label: string;
-  icon: string;
 }
 
 export const APPAREL_CATEGORIES: ApparelCategory[] = [
-  { id: 'sew_mach', label: 'Sewing machines', icon: '⌃' },
+  { id: 'sew_mach', label: 'Sewing machines' },
 ];
 
 /** The one built-in palette section: the sewing machines a garment op can
@@ -770,8 +829,9 @@ export const ISO_FIXTURE_TO_MACHINE_CODE: Record<string, MachineCode> = {
  * authored station from looking like a foreign object on the floor.
  */
 export function fixtureForStationType(t: StationType): IsoFixture {
-  const draw =
-    t.form === 'machine'
+  const draw = t.isoArt
+    ? artBody(t.isoArt)
+    : t.form === 'machine'
       ? machineBox(t.glyph, t.code)
       : t.form === 'block'
         ? pmlBlock(PML_BLOCK_LIBRARY[t.kind].Icon, pmlCatAccent(PML_BLOCK_LIBRARY[t.kind].category))
@@ -787,6 +847,34 @@ export function fixtureForStationType(t: StationType): IsoFixture {
     d: t.d,
     h: t.h,
     draw,
+  };
+}
+
+/**
+ * Re-skin a logic-block fixture so it draws a different PML kind.
+ *
+ * A logic block has no equipment to depict — its whole visual identity is the
+ * kind glyph and the category accent behind it. That identity comes from the
+ * catalog id it was dropped from (`pml_service`) or from the authored station
+ * type's `kind`, both of which are fixed at drop time. Change the block kind
+ * in the Inspector afterwards and the floor kept drawing the kind the station
+ * USED to be: a Service re-declared as a Queue still wore the Service icon in
+ * every view, in a model whose whole subject is what each block does.
+ *
+ * Footprint, id and everything else stay — only what is drawn on top changes,
+ * so the station does not move or resize when its kind does.
+ *
+ * Machines are deliberately out of scope: a single-needle lockstitch is a
+ * single-needle lockstitch whatever block kind it is simulated as, and its
+ * mark says which machine it is. Only fixtures whose drawing IS the kind
+ * follow the kind.
+ */
+export function withPmlKind(base: IsoFixture, kind: PmlBlockKind): IsoFixture {
+  const spec = PML_BLOCK_LIBRARY[kind];
+  return {
+    ...base,
+    label: spec.label,
+    draw: pmlBlock(spec.Icon, pmlCatAccent(spec.category)),
   };
 }
 

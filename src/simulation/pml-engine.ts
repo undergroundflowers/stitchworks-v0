@@ -31,15 +31,17 @@
  * harness, future export).
  */
 
-import type { Twin, Workstation, Order } from '../domain/twin';
+import type { Twin, Workstation } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
-import { GARMENT_TEMPLATES, type GarmentTemplate } from '../domain';
-import { PRODUCTION_SYSTEMS } from '../domain/routings';
-import { changeoverDurationMin } from '../domain/changeover';
+// Imported from the leaf module rather than the domain barrel on purpose:
+// `domain/index.ts` re-exports the balance layer, which reads the engine's
+// own `serversFor` so the chart and the run can never disagree about c.
+// Going through the barrel would close that into an import cycle.
+import { GARMENT_TEMPLATES, type GarmentTemplate } from '../domain/garments';
 import { MinHeap, mulberry32 } from './priority-queue';
 import {
   sample as sampleDist,
@@ -102,12 +104,15 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   // on a fixed 60/rate interval, which is a D arrival process, and every
   // downstream analytical number is then solved for a model the run is not.
   for (const ws of blockByKind.get('Source') ?? []) {
-    if (!getBlockParams(ws).arrivalDist) {
+    // Absent dist is the engine's deterministic (D) fallback; any non-exp dist
+    // is likewise not the M the downstream classification asserts.
+    const arrivalDist = getBlockParams(ws).arrivalDist;
+    if (!arrivalDist || arrivalDist.kind !== 'exp') {
       issues.push({
         level: 'warn',
         wsId: ws.id,
         message:
-          `"${ws.name}" releases bundles on a fixed interval, not a Poisson stream. `
+          `"${ws.name}" does not release bundles as a Poisson stream. `
           + 'The queueing classification assumes M (exponential gaps), so the '
           + 'closed-form numbers will not match the run. Give the Source an '
           + 'exponential inter-arrival distribution to make the M honest.',
@@ -239,24 +244,6 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   return issues;
 }
 
-/**
- * Changeover injection — schedules a CHANGEOVER_BEGIN / CHANGEOVER_END
- * pair on a specific line. In P2 these are passed manually so the IE can
- * model an interrupted shift; P4 will generate them automatically from
- * an OrderSequence.
- */
-export interface ChangeoverSpec {
-  /** When the changeover begins, in sim MINUTES from t=0. */
-  atMin: number;
-  /** SewingLine.id the changeover applies to — all workstations carrying
-   *  this lineId are blocked for the duration. */
-  lineId: string;
-  /** Duration in minutes the line is frozen. The caller is responsible
-   *  for computing this from `changeoverDurationMin({ base, from, to })`
-   *  (or any other rule); the engine treats it as a black-box freeze. */
-  durationMin: number;
-}
-
 export interface PmlSimOpts {
   twin: Twin;
   /**
@@ -281,10 +268,6 @@ export interface PmlSimOpts {
    *  per-block running totals into `result.samples`. Default 1 min.
    *  Set to 0 to disable sampling (saves memory / time). */
   samplePeriodMin?: number;
-  /** Manual changeover injections. Each entry freezes the named line for
-   *  the stated duration. Omit / empty array ⇒ no changeovers (today's
-   *  behaviour). */
-  changeovers?: ChangeoverSpec[];
   /** Per-op skill-efficiency multipliers keyed by Operation.id. Drives
    *  the cycle-time adjustment: effective cycle = nominal / efficiency.
    *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
@@ -549,12 +532,6 @@ export interface PmlSimResult {
    *  instead of dropping). A non-zero value means capacity was set somewhere
    *  a v1 block kind can't hold — surfaced as a warning too. */
   piecesLost: number;
-  /** Cumulative minutes lost to changeover events during the run. P2 default 0. */
-  changeoverMin: number;
-  /** Per-order completion time keyed by Order.id (minutes from the first
-   *  piece emitted by the Source to the last piece reaching the Sink).
-   *  Populated when a Source ran an OrderSequence. Empty otherwise. */
-  perOrderCompletionTime: Record<string, number>;
   /** Mean lead time across sunk agents, in minutes. */
   meanLeadTimeMin: number;
   /** Aggregate throughput across all sinks (agents/hr). */
@@ -595,10 +572,10 @@ interface Agent {
    *  reworkRate-driven Service block. 0 = first-pass. Incremented on each
    *  rework decision; scrapped when it exceeds the op's maxReworkAttempts. */
   reworkCount?: number;
-  /** Order id this piece belongs to — populated when the Source is
-   *  running an OrderSequence. Lets the Sink credit completion times
-   *  per order. Undefined for legacy single-garment Sources. */
-  orderId?: string;
+  /** Priority class this bundle carries, stamped at spawn from its Source's
+   *  `sourcePriority`. 1 = highest. Read only by stations whose discipline
+   *  is `Priority`. */
+  priority: number;
   /** Sim time this agent entered the CURRENT block's WAITING buffer. Written
    *  on every push into `queue` / `queueByInputPort`, read once at the
    *  matching shift to credit `waitSumMin`. Deliberately overwritten per
@@ -663,8 +640,6 @@ function poolKeyFor(ws: Workstation): string {
 type Event =
   | { time: number; kind: 'sourceTick'; wsId: string }
   | { time: number; kind: 'serviceEnd'; wsId: string; agentId: number }
-  | { time: number; kind: 'changeoverBegin'; lineId: string; durationMin: number }
-  | { time: number; kind: 'changeoverEnd'; lineId: string }
   // P2 — a downstream buffer freed a slot; re-attempt the forward that a
   // blocked holder (Service/Delay/Conveyor) or a stalled Queue was waiting on.
   // Zero-delay (fires at the same sim time) so back-pressure relief cascades
@@ -740,12 +715,9 @@ interface BlockState {
    *  doesn't pin a value — keeps pilot-factory `buf_in` workstations
    *  emitting full bundles instead of single pieces. */
   piecesPerAgent: number;
-  /** Source-only: position in the bound line's `orderSequence`. -1 ⇒ no
-   *  sequence (legacy infinite Source). */
-  orderSeqIndex: number;
-  /** Source-only: pieces emitted for the *current* order. Resets to 0
-   *  whenever orderSeqIndex advances. */
-  orderEmittedSoFar: number;
+  /** Source-only: priority class stamped on every bundle this Source emits.
+   *  1 = highest. */
+  sourcePriority: number;
   /** P2 — SYSTEM capacity K (agents allowed in this block = waiting + in
    *  service), matching the analytical M/M/c/K model so DES and theory agree.
    *  `Infinity` ⇒ unbounded (the default, and today's behaviour). Service:
@@ -1253,10 +1225,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       servers: serversFor(ws, opts.garmentsById),
       discipline: disciplineFor(ws, opts.garmentsById),
       piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
-      // P4 — order sequence tracking is enabled at engine-init time below,
-      // once we know which lines have a non-empty orderSequence.
-      orderSeqIndex: -1,
-      orderEmittedSoFar: 0,
+      sourcePriority: Math.max(1, Math.round(getBlockParams(ws).sourcePriority)),
       // P2 — finite-buffer state. Unbounded by default → identical to the
       // pre-P2 push-semantics engine.
       sysCapacity: systemCapacityFor(ws, opts.garmentsById),
@@ -1390,50 +1359,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let piecesLost = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
-  // P2 — line-blocking accumulator. Updated when CHANGEOVER_BEGIN /
-  // CHANGEOVER_END events fire.
-  let changeoverMinAccum = 0;
-  /** Lines currently frozen for changeover — tryStartService refuses to
-   *  start new service for workstations whose lineId is in this set. */
-  const frozenLines = new Set<string>();
-
-  // ── P4 order-sequence state ──────────────────────────────────────────────
-  /** Per-order completion tracking. Populated as agents flow through:
-   *  firstEmittedAt = first sourceTick that emitted a piece for this order;
-   *  lastSunkAt     = last sim time a piece of this order reached a Sink. */
-  const orderStats = new Map<
-    string,
-    { firstEmittedAt: number; lastSunkAt: number; sunkPieces: number }
-  >();
-  /** Order id → Order record, indexed once for hot-path lookup. */
-  const orderById = new Map<string, Order>();
-  for (const o of twin.orders ?? []) orderById.set(o.id, o);
-  /** Line id → orderSequence (ids), copied so we don't read the twin in
-   *  the hot path. */
-  const lineOrderSeq = new Map<string, string[]>();
-  for (const line of twin.lines ?? []) {
-    if (line.orderSequence && line.orderSequence.length > 0) {
-      lineOrderSeq.set(line.id, [...line.orderSequence]);
-    }
-  }
-  /** Line id → production-system base changeoverMin, used for the dynamic
-   *  CHANGEOVER_BEGIN events the Source raises between orders. */
-  const lineChangeoverBase = new Map<string, number>();
-  for (const line of twin.lines ?? []) {
-    const sys = PRODUCTION_SYSTEMS[line.productionSystem];
-    lineChangeoverBase.set(line.id, sys?.changeoverMin ?? 30);
-  }
-  // Tag each Source whose line has a non-empty orderSequence so its
-  // sourceTick handler enters the order-aware path instead of the
-  // legacy infinite-stream path.
-  for (const src of sources) {
-    const lineId = src.ws.lineId;
-    if (lineId && (lineOrderSeq.get(lineId)?.length ?? 0) > 0) {
-      src.orderSeqIndex = 0;
-      src.orderEmittedSoFar = 0;
-    }
-  }
-
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
 
@@ -1443,19 +1368,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // default behaviour for a stochastic Source.
   for (const src of sources) {
     pq.push({ time: drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
-  }
-
-  // P2: enqueue caller-supplied changeover injections. Each one freezes the
-  // named line for `durationMin` starting at `atMin`. Out-of-range / null
-  // entries are dropped silently.
-  for (const co of opts.changeovers ?? []) {
-    if (!(co.durationMin > 0) || !(co.atMin >= 0) || co.atMin > durationMin) continue;
-    pq.push({
-      time: co.atMin,
-      kind: 'changeoverBegin',
-      lineId: co.lineId,
-      durationMin: co.durationMin,
-    });
   }
 
   // Schedule periodic snapshot events so we can hand LiveSim a timeseries
@@ -1615,11 +1527,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function tryStartService(b: BlockState, now: number): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
-    // P2: don't start service while the workstation's line is in changeover.
-    // Pieces already in service complete normally; only new starts are
-    // blocked, which matches a real floor (operators finish the current
-    // bundle before the changeover begins).
-    if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
     // Per-station server cap: cannot exceed the configured `servers` count
     // even when the dept's pool has spare units. Matches "one machine =
     // one server" semantics — without this, the pool acts as a shared
@@ -1709,7 +1616,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function starvedOnPool(b: BlockState): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
-    if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
     return b.inService < b.servers;
   }
 
@@ -1831,14 +1737,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         totalProduced += agent.pieces;
         if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
-        // P4 order tracking: credit the order this piece belongs to.
-        if (agent.orderId) {
-          const stat = orderStats.get(agent.orderId);
-          if (stat) {
-            stat.sunkPieces += agent.pieces;
-            stat.lastSunkAt = now;
-          }
-        }
         return;
       case 'Source':
       case 'ResourcePool':
@@ -1906,11 +1804,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         if (b.queue.length >= b.batchSize) {
           const totalPieces = b.queue.reduce((s, a) => s + a.pieces, 0);
           const oldestBornAt = b.queue[0].bornAt;
+          // A batch is as urgent as its most urgent member — batching a rush
+          // bundle in with routine ones must not quietly demote it.
+          const topPriority = b.queue.reduce((m, a) => Math.min(m, a.priority), b.queue[0].priority);
           b.queue.length = 0;
           const bundle: Agent = {
             id: nextAgentId++,
             bornAt: oldestBornAt,
             pieces: totalPieces,
+            priority: topPriority,
           };
           emitOnFirstOutput(b, bundle, now);
         }
@@ -1936,7 +1838,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           return;
         }
         for (let i = 0; i < agent.pieces; i++) {
-          const piece: Agent = { id: nextAgentId++, bornAt: agent.bornAt, pieces: 1 };
+          const piece: Agent = {
+            id: nextAgentId++,
+            bornAt: agent.bornAt,
+            pieces: 1,
+            priority: agent.priority,
+          };
           emitOnFirstOutput(b, piece, now);
         }
         return;
@@ -1974,7 +1881,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // not physical division. (Use Unbatch for physical division.)
         const spec = getBlockSpec(b.ws);
         for (const out of spec.outputs) {
-          const dup: Agent = { id: nextAgentId++, bornAt: agent.bornAt, pieces: agent.pieces };
+          const dup: Agent = {
+            id: nextAgentId++,
+            bornAt: agent.bornAt,
+            pieces: agent.pieces,
+            priority: agent.priority,
+          };
           emitOnPort(b, out.id, dup, now);
         }
         return;
@@ -2020,10 +1932,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       if (emitMerged) {
         const totalPieces = popped.reduce((s, a) => s + a.pieces, 0);
         const oldestBornAt = popped.reduce((m, a) => Math.min(m, a.bornAt), popped[0].bornAt);
+        const topPriority = popped.reduce((m, a) => Math.min(m, a.priority), popped[0].priority);
         const merged: Agent = {
           id: nextAgentId++,
           bornAt: oldestBornAt,
           pieces: totalPieces,
+          priority: topPriority,
         };
         emitOnFirstOutput(b, merged, now);
       } else {
@@ -2081,12 +1995,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
   }
 
-  /** Lower sorts first. Orders without a priority, and agents without an
-   *  order, rank behind every explicitly prioritised bundle. */
+  /** Lower sorts first — the bundle's own priority class, stamped at spawn
+   *  from its Source's `sourcePriority`. */
   function priorityRank(a: Agent): number {
-    if (!a.orderId) return Number.MAX_SAFE_INTEGER;
-    const order = orderById.get(a.orderId);
-    return order?.priority ?? Number.MAX_SAFE_INTEGER;
+    return a.priority;
   }
 
   /** Remove and return the next agent under this block's discipline. */
@@ -2393,96 +2305,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       const src = blocks.get(e.wsId);
       if (!src) continue;
 
-      // ── Order-aware path (P4) ──────────────────────────────────────────
-      // When the Source's line carries a non-empty orderSequence we emit
-      // one order at a time, raise CHANGEOVER_BEGIN between orders whose
-      // garment differs, and stop scheduling ticks when the sequence is
-      // exhausted. Legacy infinite-source behaviour is preserved by the
-      // `orderSeqIndex < 0` branch below.
-      if (src.orderSeqIndex >= 0 && src.ws.lineId) {
-        const seq = lineOrderSeq.get(src.ws.lineId) ?? [];
-        if (src.orderSeqIndex >= seq.length) continue; // sequence done
-
-        const orderId = seq[src.orderSeqIndex];
-        const order = orderById.get(orderId);
-        if (!order) {
-          // Stale id — skip and advance, no rescheduling penalty.
-          src.orderSeqIndex += 1;
-          src.orderEmittedSoFar = 0;
-          pq.push({ time: now + 1e-3, kind: 'sourceTick', wsId: src.ws.id });
-          continue;
-        }
-
-        // P2 back-pressure: if the line's entry buffer is full, don't emit
-        // (and don't advance order state / stamp firstEmittedAt) — retry at
-        // the next arrival beat. The WIP waits in staging rather than dropping.
-        const fullTargetOrdered = blockedSourceTarget(src);
-        if (fullTargetOrdered) {
-          recordBalk(fullTargetOrdered, src.piecesPerAgent);
-          pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
-          continue;
-        }
-
-        // First-emission timestamp for completion tracking.
-        let stat = orderStats.get(orderId);
-        if (!stat) {
-          stat = { firstEmittedAt: now, lastSunkAt: 0, sunkPieces: 0 };
-          orderStats.set(orderId, stat);
-        }
-
-        // Emit one bundle (or one piece) tagged with the order id.
-        const pieces = Math.min(
-          src.piecesPerAgent,
-          Math.max(1, order.quantity - src.orderEmittedSoFar),
-        );
-        const agent: Agent = {
-          id: nextAgentId++,
-          bornAt: now,
-          pieces,
-          orderId,
-        };
-        emitFlow('spawn', agent, src.ws.id);
-        emitOnPort(src, 'out', agent, now);
-        src.orderEmittedSoFar += pieces;
-
-        // Order satisfied — advance and possibly fire a changeover.
-        if (src.orderEmittedSoFar >= order.quantity) {
-          src.orderSeqIndex += 1;
-          src.orderEmittedSoFar = 0;
-          const nextOrderId = seq[src.orderSeqIndex];
-          const nextOrder = nextOrderId ? orderById.get(nextOrderId) : undefined;
-          if (
-            nextOrder &&
-            nextOrder.garmentId !== order.garmentId &&
-            src.ws.lineId
-          ) {
-            const base = lineChangeoverBase.get(src.ws.lineId) ?? 30;
-            const dur = changeoverDurationMin({
-              baseChangeoverMin: base,
-              fromGarmentId: order.garmentId,
-              toGarmentId: nextOrder.garmentId,
-            });
-            if (dur > 0) {
-              pq.push({
-                time: now,
-                kind: 'changeoverBegin',
-                lineId: src.ws.lineId,
-                durationMin: dur,
-              });
-              // Resume emissions after the changeover completes — staging
-              // can still hold pieces but the line is paced by OPRs which
-              // are frozen by changeoverBegin.
-              pq.push({ time: now + dur, kind: 'sourceTick', wsId: src.ws.id });
-              continue;
-            }
-          }
-        }
-        // Schedule next tick at the normal arrival cadence.
-        pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
-        continue;
-      }
-
-      // ── Legacy infinite-source path ───────────────────────────────────
       // P2 back-pressure: reschedule without emitting when the downstream
       // entry buffer is full (unbounded default ⇒ never blocks).
       const fullTarget = blockedSourceTarget(src);
@@ -2492,7 +2314,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         continue;
       }
       const pieces = src.piecesPerAgent;
-      const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
+      const agent: Agent = {
+        id: nextAgentId++,
+        bornAt: now,
+        pieces,
+        priority: src.sourcePriority,
+      };
       emitFlow('spawn', agent, src.ws.id);
       emitOnPort(src, 'out', agent, now);
       pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
@@ -2570,32 +2397,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       const pool = operatorPools.get(e.poolKey);
       if (!pool) continue;
       wakePool(pool, now);
-      continue;
-    }
-
-    // ── P2 changeover events ──────────────────────────────────────────────
-    if (e.kind === 'changeoverBegin') {
-      frozenLines.add(e.lineId);
-      pq.push({
-        time: now + e.durationMin,
-        kind: 'changeoverEnd',
-        lineId: e.lineId,
-      });
-      // Attribute the wall-clock duration to the changeover accumulator.
-      // Multi-line parallel changeovers sum here — call sites can divide
-      // by the active-line count when they need a per-line figure.
-      changeoverMinAccum += e.durationMin;
-      continue;
-    }
-    if (e.kind === 'changeoverEnd') {
-      frozenLines.delete(e.lineId);
-      // Unfreezing might let queued agents resume — try to start service at
-      // every Service block on the line. Cheap loop; lines are small.
-      for (const b of blocks.values()) {
-        if (b.kind === 'Service' && b.ws.lineId === e.lineId) {
-          tryStartService(b, now);
-        }
-      }
       continue;
     }
 
@@ -2706,18 +2507,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   const finishedPieces = totalProduced + piecesScrapped;
   const firstPassYield = finishedPieces > 0 ? piecesProducedFTR / finishedPieces : 1;
 
-  // P4 — flatten orderStats into a Record. Only orders that emitted AND
-  // had at least one piece reach a Sink land here; orders still in
-  // progress at end-of-run are reported via `sunkPieces < quantity` —
-  // for the result KPI we emit the time-to-last-sink even if partial,
-  // since the IE wants to see "where did this order get to by the
-  // shift bell."
-  const perOrderCompletionTime: Record<string, number> = {};
-  for (const [orderId, stat] of orderStats) {
-    if (stat.firstEmittedAt >= 0 && stat.lastSunkAt > stat.firstEmittedAt) {
-      perOrderCompletionTime[orderId] = stat.lastSunkAt - stat.firstEmittedAt;
-    }
-  }
 
   return {
     durationMin,
@@ -2726,8 +2515,6 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     piecesScrapped,
     piecesLost,
     firstPassYield,
-    changeoverMin: changeoverMinAccum,
-    perOrderCompletionTime,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
     throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,
     blocks: blockObs,

@@ -23,6 +23,7 @@ import { QUANTITY, type QuantityId } from '../../simulation/notation';
 import { analyticalKpis, classify } from '../../simulation/queueing';
 import { meanOf, scaleServiceDist } from '../../simulation/distributions';
 import type { QueueNode } from '../../simulation/network';
+import { niceTicks, decimalsFor } from './sweep-ticks';
 
 /** What can be swept. Each maps to one field of the node. */
 type SweepVar = 'lambda' | 'mu' | 'servers' | 'capacity';
@@ -36,6 +37,15 @@ const SWEEP_OPTIONS: { value: SweepVar; label: string }[] = [
   { value: 'capacity', label: 'Capacity N' },
 ];
 
+/** The `QUANTITY` entry behind each sweepable field, so the x-axis title can
+ *  carry the same symbol / name / unit the rest of the app prints. */
+const SWEEP_QUANTITY: Record<SweepVar, QuantityId> = {
+  lambda: 'lambda',
+  mu: 'mu',
+  servers: 'servers',
+  capacity: 'capacity',
+};
+
 const PLOT_OPTIONS: { value: PlotMetric; label: string }[] = [
   { value: 'Lq', label: 'Lq' },
   { value: 'L', label: 'L' },
@@ -45,12 +55,15 @@ const PLOT_OPTIONS: { value: PlotMetric; label: string }[] = [
   { value: 'pWait', label: 'P(wait)' },
 ];
 
-const W = 640;
-const H = 220;
-const PAD_L = 52;
-const PAD_B = 34;
-const PAD_T = 14;
-const PAD_R = 14;
+const W = 660;
+const H = 264;
+// Left pad holds the widest tick label plus the rotated axis title; bottom pad
+// holds the tick row AND the axis title under it. Sizing the box to exclude
+// the axis band is how charts end up with a nested scrollbar.
+const PAD_L = 66;
+const PAD_B = 46;
+const PAD_T = 18;
+const PAD_R = 18;
 
 export interface LabSweepProps {
   node: QueueNode;
@@ -68,6 +81,7 @@ interface Point {
 export function LabSweep({ node, lambda }: LabSweepProps) {
   const [variable, setVariable] = useState<SweepVar>('lambda');
   const [metric, setMetric] = useState<PlotMetric>('Lq');
+  const [hover, setHover] = useState<Point | null>(null);
 
   const muNow = 60 / Math.max(1e-9, meanOf(node.serviceDist));
   const capNow = Number.isFinite(node.capacity) ? node.capacity : 20;
@@ -155,16 +169,37 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
   // Clip the y-axis so one near-asymptote point doesn't flatten the rest of
   // the curve into the baseline.
   const yCap = metric === 'rho' || metric === 'pWait' ? 1 : niceCap(defined.map((p) => p.y));
-  const yMax = Math.max(1e-6, Math.min(yMaxRaw, yCap));
+  const yLimit = Math.max(1e-6, Math.min(yMaxRaw, yCap));
 
   const xs = points.map((p) => p.x);
   const xMin = Math.min(...xs);
   const xMax = Math.max(...xs);
 
+  // Ticks land on rounded steps off the 1 / 2 / 5 ladder, and the axis then
+  // extends to the last of them, so the top gridline is a labelled round
+  // number rather than whatever the 90th-percentile clip happened to be.
+  //
+  // The labels used to be five evenly-spaced fractions of the data max, each
+  // printed through a fixed 2-decimal formatter. On a y-range of 0–0.02 that
+  // rendered "0 · 0.01 · 0.01 · 0.02 · 0.02" — two pairs of identical labels
+  // on four different gridlines, which is worse than no axis at all. Deriving
+  // the decimals from the step size makes duplicates impossible.
+  const yTicks = niceTicks(0, yLimit, 5, false, true);
+  const yMax = Math.max(yTicks[yTicks.length - 1] ?? yLimit, 1e-6);
+  const xTicks = niceTicks(xMin, xMax, 6, integral, false);
+  const yDecimals = decimalsFor(yTicks);
+  const xDecimals = decimalsFor(xTicks);
+
   const sx = (x: number) =>
     PAD_L + ((x - xMin) / Math.max(1e-9, xMax - xMin)) * (W - PAD_L - PAD_R);
-  const sy = (y: number) =>
-    H - PAD_B - (Math.min(y, yMax) / yMax) * (H - PAD_T - PAD_B);
+  // NOT clamped to yMax. The curve is clipped to the plot instead, so a value
+  // that runs past the ceiling visibly leaves the top of the chart. Clamping
+  // drew it as a flat plateau along the last gridline — an asymptote rendered
+  // as a shelf, which is the opposite of what the curve is trying to teach.
+  const sy = (y: number) => H - PAD_B - (y / yMax) * (H - PAD_T - PAD_B);
+  /** For point markers, which have to stay inside the frame to be readable. */
+  const syIn = (y: number) => sy(Math.min(y, yMax));
+  const clipped = yMaxRaw > yMax * (1 + 1e-9);
 
   // Break the path wherever the model stops being defined, so an unstable
   // region is a gap rather than a line drawn through nonsense.
@@ -181,7 +216,18 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
   if (current.length > 1) segments.push(current.join(' '));
 
   const q = QUANTITY[metric];
+  // The engine reports Wq / W in hours; QUANTITY prints their floor-facing
+  // unit (minutes). Name what is actually on the axis.
   const unitSuffix = metric === 'Wq' || metric === 'W' ? ' hr' : '';
+  const yUnit =
+    metric === 'Wq' || metric === 'W'
+      ? 'hr'
+      : metric === 'rho' || metric === 'pWait'
+        ? '%'
+        : (q.unit ?? '');
+  const yAxisTitle = `${q.symbol}${q.sub ?? ''} — ${q.name.toLowerCase()}${yUnit ? ` (${yUnit})` : ''}`;
+  const sweptQ = QUANTITY[SWEEP_QUANTITY[variable]];
+  const xAxisTitle = `${sweptQ.symbol}${sweptQ.sub ?? ''} — ${sweptQ.name.toLowerCase()}${sweptQ.unit ? ` (${sweptQ.unit})` : ''}`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -227,32 +273,59 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
           role="img"
           aria-label={`${q.name} against ${variable}`}
         >
-          {/* Frame + gridlines. */}
-          {[0, 0.25, 0.5, 0.75, 1].map((f) => {
-            const y = H - PAD_B - f * (H - PAD_T - PAD_B);
-            return (
-              <g key={f}>
-                <line
-                  x1={PAD_L}
-                  y1={y}
-                  x2={W - PAD_R}
-                  y2={y}
-                  stroke={SW_COLORS.line}
-                  strokeWidth={f === 0 ? 1.2 : 0.6}
-                />
-                <text
-                  x={PAD_L - 7}
-                  y={y + 3}
-                  textAnchor="end"
-                  fill={SW_COLORS.muted}
-                  fontFamily={SW_FONTS.mono}
-                  fontSize={9}
-                >
-                  {fmtAxis(yMax * f, metric)}
-                </text>
-              </g>
-            );
-          })}
+          {/* Y gridlines + ticks. Solid hairlines a shade off the surface —
+              a grid is a ruler, not a signal, and dashing it would make it
+              read as a threshold like the ρ = 1 wall below. */}
+          {yTicks.map((v) => (
+            <g key={`y-${v}`}>
+              <line
+                x1={PAD_L} y1={sy(v)} x2={W - PAD_R} y2={sy(v)}
+                stroke={SW_COLORS.lineSoft} strokeWidth={0.75}
+              />
+              <line
+                x1={PAD_L - 4} y1={sy(v)} x2={PAD_L} y2={sy(v)}
+                stroke={SW_COLORS.line} strokeWidth={1}
+              />
+              <text
+                x={PAD_L - 8} y={sy(v) + 3} textAnchor="end"
+                fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize={9.5}
+                style={{ fontVariantNumeric: 'tabular-nums' }}
+              >
+                {fmtTick(v, yDecimals, metric)}
+              </text>
+            </g>
+          ))}
+
+          {/* X gridlines + ticks. */}
+          {xTicks.map((v) => (
+            <g key={`x-${v}`}>
+              <line
+                x1={sx(v)} y1={PAD_T} x2={sx(v)} y2={H - PAD_B}
+                stroke={SW_COLORS.lineSoft} strokeWidth={0.75}
+              />
+              <line
+                x1={sx(v)} y1={H - PAD_B} x2={sx(v)} y2={H - PAD_B + 4}
+                stroke={SW_COLORS.line} strokeWidth={1}
+              />
+              <text
+                x={sx(v)} y={H - PAD_B + 15} textAnchor="middle"
+                fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize={9.5}
+                style={{ fontVariantNumeric: 'tabular-nums' }}
+              >
+                {fmtTick(v, xDecimals)}
+              </text>
+            </g>
+          ))}
+
+          {/* Spines. */}
+          <line
+            x1={PAD_L} y1={PAD_T} x2={PAD_L} y2={H - PAD_B}
+            stroke={SW_COLORS.line} strokeWidth={1}
+          />
+          <line
+            x1={PAD_L} y1={H - PAD_B} x2={W - PAD_R} y2={H - PAD_B}
+            stroke={SW_COLORS.line} strokeWidth={1}
+          />
 
           {/* The ρ = 1 wall. Everything to its right is a queue with no bound. */}
           {saturationX != null && saturationX <= xMax && (
@@ -286,10 +359,21 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
             </g>
           )}
 
-          {/* The curve. */}
-          {segments.map((d, i) => (
-            <path key={i} d={d} fill="none" stroke={SW_COLORS.brand} strokeWidth={2} />
-          ))}
+          {/* The curve, clipped to the plot. */}
+          <defs>
+            <clipPath id="lab-sweep-plot">
+              <rect
+                x={PAD_L} y={PAD_T}
+                width={Math.max(0, W - PAD_L - PAD_R)}
+                height={Math.max(0, H - PAD_T - PAD_B)}
+              />
+            </clipPath>
+          </defs>
+          <g clipPath="url(#lab-sweep-plot)">
+            {segments.map((d, i) => (
+              <path key={i} d={d} fill="none" stroke={SW_COLORS.brand} strokeWidth={2} />
+            ))}
+          </g>
 
           {/* Where the system sits right now. */}
           {(() => {
@@ -310,10 +394,10 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
             if (!here.defined) return null;
             return (
               <g>
-                <circle cx={sx(here.x)} cy={sy(here.y)} r={4} fill={SW_COLORS.ink} />
+                <circle cx={sx(here.x)} cy={syIn(here.y)} r={4} fill={SW_COLORS.ink} />
                 <circle
                   cx={sx(here.x)}
-                  cy={sy(here.y)}
+                  cy={syIn(here.y)}
                   r={7}
                   fill="none"
                   stroke={SW_COLORS.ink}
@@ -322,7 +406,7 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
                 />
                 <text
                   x={sx(here.x)}
-                  y={sy(here.y) - 12}
+                  y={syIn(here.y) - 12}
                   textAnchor="middle"
                   fill={SW_COLORS.ink}
                   fontFamily={SW_FONTS.mono}
@@ -335,41 +419,114 @@ export function LabSweep({ node, lambda }: LabSweepProps) {
             );
           })()}
 
-          {/* x axis ticks. */}
-          {[0, 0.5, 1].map((f) => {
-            const x = xMin + (xMax - xMin) * f;
-            return (
-              <text
-                key={f}
-                x={sx(x)}
-                y={H - PAD_B + 14}
-                textAnchor="middle"
-                fill={SW_COLORS.muted}
-                fontFamily={SW_FONTS.mono}
-                fontSize={9}
-              >
-                {round3(x)}
-              </text>
-            );
-          })}
+          {/* Axis titles. Both name the quantity AND its unit — an axis
+              labelled "Lq" alone tells you what is plotted but not what the
+              numbers mean, which is most of the difference between a chart
+              you can act on and a picture of a curve. */}
           <text
             x={(PAD_L + W - PAD_R) / 2}
-            y={H - 4}
+            y={H - 8}
             textAnchor="middle"
             fill={SW_COLORS.muted}
             fontFamily={SW_FONTS.mono}
-            fontSize={9}
+            fontSize={10}
+            fontWeight={700}
           >
-            {SWEEP_OPTIONS.find((o) => o.value === variable)?.label}
+            {xAxisTitle}
           </text>
+          <text
+            transform={`translate(14 ${(PAD_T + H - PAD_B) / 2}) rotate(-90)`}
+            textAnchor="middle"
+            fill={SW_COLORS.muted}
+            fontFamily={SW_FONTS.mono}
+            fontSize={10}
+            fontWeight={700}
+          >
+            {yAxisTitle}
+          </text>
+
+          {/* Hover readout. A swept curve whose values can only be estimated
+              off a gridline is a picture; being able to put the cursor
+              anywhere on it and read the pair back is what makes it an
+              instrument. The capture rect spans the whole plot so the target
+              is the column, not the 2px stroke. */}
+          {hover && (
+            <g pointerEvents="none">
+              <line
+                x1={sx(hover.x)} y1={PAD_T} x2={sx(hover.x)} y2={H - PAD_B}
+                stroke={SW_COLORS.ink} strokeWidth={0.75} opacity={0.45}
+              />
+              <circle
+                cx={sx(hover.x)} cy={syIn(hover.y)} r={3.5}
+                fill={SW_COLORS.brand} stroke={SW_COLORS.paper} strokeWidth={2}
+              />
+              {(() => {
+                const text = `${SWEEP_OPTIONS.find((o) => o.value === variable)?.label.split(' ').pop()} ${fmtTick(hover.x, xDecimals)}   ${q.symbol}${q.sub ?? ''} ${fmtTick(hover.y, Math.max(yDecimals, 2), metric)}`;
+                const boxW = text.length * 5.5 + 14;
+                // Flip to the left of the crosshair near the right edge so
+                // the box never runs out of the plot.
+                const flip = sx(hover.x) + boxW + 10 > W - PAD_R;
+                const bx = flip ? sx(hover.x) - boxW - 8 : sx(hover.x) + 8;
+                return (
+                  <g>
+                    <rect
+                      x={bx} y={PAD_T + 4} width={boxW} height={20} rx={4}
+                      fill={SW_COLORS.paperDeep}
+                      stroke={SW_COLORS.line}
+                    />
+                    <text
+                      x={bx + 7} y={PAD_T + 18}
+                      fill={SW_COLORS.ink} fontFamily={SW_FONTS.mono} fontSize={10}
+                      style={{ fontVariantNumeric: 'tabular-nums' }}
+                    >
+                      {text}
+                    </text>
+                  </g>
+                );
+              })()}
+            </g>
+          )}
+
+          {/* Capture surface, last so nothing steals its events. */}
+          <rect
+            x={PAD_L} y={PAD_T}
+            width={Math.max(0, W - PAD_L - PAD_R)}
+            height={Math.max(0, H - PAD_T - PAD_B)}
+            fill="transparent"
+            onMouseMove={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              if (r.width <= 0) return;
+              const dataX =
+                xMin + ((e.clientX - r.left) / r.width) * (xMax - xMin);
+              let best: Point | null = null;
+              for (const pt of points) {
+                if (!pt.defined) continue;
+                if (!best || Math.abs(pt.x - dataX) < Math.abs(best.x - dataX)) best = pt;
+              }
+              setHover(best);
+            }}
+            onMouseLeave={() => setHover(null)}
+          />
         </svg>
       </div>
 
+      {/* The axes now name what is plotted and in what units, so the caption
+          is left with the two things an axis cannot say: why the line stops,
+          and why the ceiling is where it is. */}
       <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.45 }}>
-        Plotting <Sym quantity={metric} /> {q.name.toLowerCase()}
-        {unitSuffix}. The curve breaks where the model has no answer — past ρ = 1 an
-        unbounded queue has no steady state at all, which is why the line stops rather
-        than climbing off the top.
+        Hover the plot to read <Sym quantity={metric} /> at any point on the sweep.
+        The curve <em>breaks</em> where the model has no answer — past ρ = 1 an
+        unbounded queue has no steady state at all, so the line stops rather than
+        climbing off the top.
+        {clipped && (
+          <>
+            {' '}The y-axis is capped at {fmtTick(yMax, yDecimals, metric)}
+            {unitSuffix} — near saturation the last points run thousands of times
+            higher, and scaling to them would flatten the rest of the curve onto
+            the baseline. The line leaves the top of the plot where it exceeds
+            the cap.
+          </>
+        )}
       </div>
     </div>
   );
@@ -404,10 +561,11 @@ function niceCap(values: number[]): number {
   return Math.max(1e-6, p90 * 1.15);
 }
 
-function fmtAxis(v: number, metric: PlotMetric): string {
-  if (metric === 'rho' || metric === 'pWait') return `${Math.round(v * 100)}%`;
-  if (v >= 100) return v.toFixed(0);
-  return Number(v.toFixed(2)).toString();
+function fmtTick(v: number, decimals: number, metric?: PlotMetric): string {
+  if (metric === 'rho' || metric === 'pWait') {
+    return `${Number((v * 100).toFixed(Math.max(0, decimals - 2)))}%`;
+  }
+  return v.toFixed(decimals);
 }
 
 function round3(v: number): number {

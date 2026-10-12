@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, HudSelect, LineScopePicker, LineSimEmpty, Tag, type OperatorAssignment } from '../components';
+import { Card, Button, SectionHeader, ToggleGroup, HideableBox, HudSelect, LineBalancePanel, LineScopePicker, LineSimEmpty, Tag } from '../components';
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -18,17 +18,6 @@ import {
 } from '../components/charts';
 import { ScenariosPanel } from './Scenarios';
 import {
-  smoothnessIndex,
-  balanceLoss,
-  lineBalanceRatio,
-  lineBalanceEfficiency,
-  optimumManning,
-  lineEfficiency,
-  bottleneckSmv,
-  suggestBalanceActions,
-  type BalanceSuggestion,
-} from '../domain';
-import {
   efficiencyFromSkillMatrix,
   runReplications,
   buildLinesFromTwin,
@@ -40,16 +29,44 @@ import {
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { useSimScope } from '../store/simScope';
-import { lineSystemBadge, shareDebtForLine } from '../domain/twin';
-import { runPmlOnTwin } from '../simulation/pml-runner';
-import { buildGarmentTwin } from '../domain/reference-twin';
-import { getBlockSpec, apparelRoleFor } from '../domain/pml';
+import { lineSystemBadge } from '../domain/twin';
 
 const SHIFT_MIN = 480;
 /** Base RNG seed for the page-level replications. Replication i uses
  *  `REPORT_BASE_SEED + i`. Kept as a constant so the seed strip in the
  *  page chrome can display the exact range without re-running the engine. */
 const REPORT_BASE_SEED = 42;
+
+/**
+ * All-zero aggregate. Structurally required so `kpiSource` has a type, never
+ * rendered: every consumer sits behind `factoryScope`, which is exactly the
+ * test for `factoryAgg !== null`.
+ */
+const EMPTY_AGGREGATE: AggregateKpis = (() => {
+  const zero = { mean: 0, std: 0 };
+  return {
+    n: 0,
+    producedPieces: zero,
+    throughputPerHr: zero,
+    efficiencyPct: zero,
+    meanLeadTime: zero,
+    utilization: zero,
+    wipBundles: zero,
+    oee: zero,
+    oeePerformance: zero,
+    oeeQuality: zero,
+    onStandardPct: zero,
+    offStandardLossPct: zero,
+    labourProductivity: zero,
+    demandTaktGap: zero,
+    bottleneckOpName: '—',
+    bottleneckQueue: 0,
+    replications: [],
+    firstHistory: [],
+    averagedHistory: [],
+    firstStations: [],
+  };
+})();
 
 /** Sum HistoryPoint series across multiple lines so the factory-scope
  *  OUTPUT OVER TIME chart shows the wired factory's combined cumulative
@@ -78,42 +95,15 @@ function sumHistories(
   });
 }
 
-/** Empty-state aggregate — used before the first replication completes or
- *  when the chosen garment carries no operations. */
-function emptyAgg(): AggregateKpis {
-  const zero = { mean: 0, std: 0 };
-  return {
-    n: 0,
-    producedPieces: zero,
-    throughputPerHr: zero,
-    efficiencyPct: zero,
-    meanLeadTime: zero,
-    utilization: zero,
-    wipBundles: zero,
-    oee: zero,
-    oeePerformance: zero,
-    oeeQuality: zero,
-    onStandardPct: zero,
-    offStandardLossPct: zero,
-    labourProductivity: zero,
-    demandTaktGap: zero,
-    totalChangeoverMin: zero,
-    perOrderCompletionTime: {},
-    bottleneckOpName: '—',
-    bottleneckQueue: 0,
-    replications: [],
-    firstHistory: [],
-    averagedHistory: [],
-    firstStations: [],
-  };
-}
-
 /**
- * Production KPIs page. Reads the user's selected garment + operator count
- * from the project store, runs a full shift through the DES engine on
- * mount, then renders KPIs from the resulting state. Yamazumi assignments
- * are user-overridable via drag; overrides are persisted in the project
- * store keyed by garment template id.
+ * Production KPIs page. Every tab reads the active twin — the factory the
+ * user built and the engine runs. There is no garment picker and no operator
+ * slider here any more: both existed to configure a *synthetic* line, and the
+ * page reported that line's numbers next to the real one's.
+ *
+ *   Performance   per-line and factory KPIs from `runReplications`
+ *   Line Balance  one `LineBalancePanel` per in-scope sewing line
+ *   Scenarios     saved runs to compare against
  *
  * `embedded` mode drops the outer scroll wrapper and the "Back to twin"
  * footer button so the same content can be mounted inside another page
@@ -123,26 +113,23 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const project = useProject();
   const garments = useGarments();
-  const setYamazumiOverride = project.setYamazumiOverride;
-  const clearYamazumiOverride = project.clearYamazumiOverride;
   const location = useLocation();
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
   // In-page tab nav. Line balance is a part of performance, Scenarios is the
   // saved-run comparison surface — both live under the same Reports umbrella
   // rather than as their own routes.
-  const [tab, setTab] = useState<'performance' | 'balance' | 'validation' | 'scenarios'>(() => {
-    const qs = new URLSearchParams(location.search).get('tab');
-    return qs === 'scenarios' || qs === 'balance' || qs === 'validation' || qs === 'performance'
-      ? qs
-      : 'performance';
-  });
-  // Honour ?tab= changes on subsequent navigations (e.g. clicking "Scenarios"
-  // from elsewhere in the app after the page is already mounted).
+  //
+  // Addressed by `?report=`, not `?tab=`. This page is almost always mounted
+  // INSIDE Insights, whose own tab strip already owns `?tab=` — so a deep
+  // link that wanted the balance tab had to spend the same parameter twice
+  // and lost. `?tab=` is still honoured for the standalone case; `?report=`
+  // wins when both are present.
+  const [tab, setTab] = useState<ReportTab>(() => readReportTab(location.search) ?? 'performance');
+  // Honour changes on subsequent navigations (e.g. clicking through from the
+  // Insights diagnosis list after the page is already mounted).
   useEffect(() => {
-    const qs = new URLSearchParams(location.search).get('tab');
-    if (qs === 'scenarios' || qs === 'balance' || qs === 'validation' || qs === 'performance') {
-      setTab(qs);
-    }
+    const next = readReportTab(location.search);
+    if (next) setTab(next);
   }, [location.search]);
 
   // Save-scenario modal state. We avoid `window.prompt()` because it's
@@ -152,131 +139,52 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [saveName, setSaveName] = useState('');
   const [saveNotes, setSaveNotes] = useState('');
 
-  // Yamazumi state — picks from store override if present, else LPT auto.
-  const [yamGarment, setYamGarment] = useState<string>(() => {
-    // Prefer a garment some line on this floor actually produces — that is
-    // what the user came here to balance.
-    const lines = selectActiveTwin(useTwin.getState()).lines ?? [];
-    return lines.find((l) => l.garmentId)?.garmentId ?? garments.all[0]?.id ?? '';
-  });
-  // Seed the line-balance operator count from a line's authored
-  // operatorTarget. It must reflect the line being balanced: balancing a 3-op
-  // line onto a factory-wide 25 reads as ~90% balance loss and misleads.
-  // Clamp matches the input's [4, 60] range.
-  const [yamOperators, setYamOperators] = useState<number>(() => {
-    const lines = selectActiveTwin(useTwin.getState()).lines ?? [];
-    const target = lines.find((l) => l.operatorTarget)?.operatorTarget ?? 4;
-    return Math.max(4, Math.min(60, target));
-  });
+  // The active twin. Everything on this page reads it; nothing on this page
+  // configures a line of its own any more.
+  const reportsTwin = useTwin(selectActiveTwin);
 
-  const yamTemplate = garments.byId[yamGarment] ?? garments.all[0];
-  const storedOverride = project.yamazumiOverrides[yamGarment];
-
-  const yamAssignments: OperatorAssignment[] = useMemo(() => {
-    if (storedOverride && storedOverride.length === yamOperators) {
-      // Reconstruct OperatorAssignment from stored opIds + the template's ops.
-      const opById = new Map(yamTemplate.operations.map((o) => [o.id, o]));
-      return storedOverride.map((s) => ({
-        id: s.operatorId,
-        operations: s.opIds.map((id) => opById.get(id)).filter((o): o is NonNullable<typeof o> => !!o),
-      }));
+  /**
+   * The garment the reports fall back to for a workstation that has not
+   * pinned one — voted for by the twin's own lines and stations.
+   *
+   * This used to be a picker: five built-in bulletins in a ToggleGroup, seeded
+   * from whichever line happened to declare a garment first. Picking one
+   * re-pointed the whole balance surface at a bulletin the factory might not
+   * run, which is the defect this page existed to demonstrate.
+   */
+  const defaultGarmentId = useMemo(() => {
+    const votes = new Map<string, number>();
+    for (const l of reportsTwin.lines ?? []) {
+      if (l.garmentId && garments.byId[l.garmentId]) {
+        votes.set(l.garmentId, (votes.get(l.garmentId) ?? 0) + 1);
+      }
     }
-    return autoAssign(
-      yamTemplate.operations,
-      yamOperators,
-      // Skill-aware balance: pass the matrix-derived efficiency so RPW
-      // biases ops toward operators who can actually run them at speed.
-      efficiencyFromSkillMatrix(project.skillMatrix, yamTemplate.operations),
-    );
-  }, [storedOverride, yamOperators, yamTemplate, project.skillMatrix]);
-
-  function handleYamazumiChange(next: OperatorAssignment[]) {
-    setYamazumiOverride(yamGarment, next.map((a) => ({ operatorId: a.id, opIds: a.operations.map((o) => o.id) })));
-  }
-
-  const stationSmvs = yamAssignments.map((a) =>
-    a.operations.reduce((s, o) => s + o.smv, 0),
-  );
-  const yamTakt = yamTemplate.totalSmv / yamOperators;
-  const yamBottleneck = bottleneckSmv(
-    yamAssignments.map((a) => ({ smv: a.operations.reduce((s, o) => s + o.smv, 0), id: a.id, code: '', name: '', machineCode: 'MNL', skill: 'stitching', category: 'manual' })),
-  );
-  const yamBalance = balanceLoss(stationSmvs);
-  const yamSmoothness = smoothnessIndex(stationSmvs, yamBottleneck);
-  const yamEfficiency = lineEfficiency({
-    producedPieces: Math.round((60 / yamBottleneck) * 8),
-    sam: yamTemplate.totalSmv,
-    operators: yamOperators,
-    workMinutes: 60 * 8,
-  });
-
-  // ── Sempai 3-metric line-balance suite ──────────────────────────────────
-  // Three metrics that the lean-manufacturing literature (e.g. Sempai's
-  // line-balance calculator) treats as a single triad:
-  //   1. Line Balance Ratio   — fairness across stations (sum / N × max).
-  //   2. Line Balance Efficiency — capacity used vs takt (sum / N × takt).
-  //   3. Optimum Manning      — theoretical headcount at takt (ΣSAM / takt).
-  // LBR and Balance Loss are complements (LBR + BL ≈ 100). LBE only differs
-  // from LBR when takt ≠ bottleneck, i.e. when demand actually drives the
-  // pace rather than the slowest station. Optimum manning is the headcount
-  // floor a perfect rebalance would land at; the gap to `yamOperators` is
-  // the labour cost of the current imbalance.
-  //
-  // Takt source: the user's most recent committed order gives a concrete
-  // demandPerShift = qty / deadlineDays, so takt = SHIFT_MIN / demand. When
-  // no order is committed yet, fall back to the bottleneck SMV — that's
-  // the cycle the line will naturally hold, and using it makes LBE collapse
-  // to LBR (which is the honest answer in the absence of a demand signal).
-  const latestOrder = project.orders[0];
-  const orderDemandPerShift =
-    latestOrder && latestOrder.deadlineDays > 0
-      ? latestOrder.qty / latestOrder.deadlineDays
-      : 0;
-  const taktFromOrder =
-    orderDemandPerShift > 0 ? SHIFT_MIN / orderDemandPerShift : 0;
-  const yamTaktReal = taktFromOrder > 0 ? taktFromOrder : yamBottleneck;
-  const taktSource: 'order' | 'bottleneck' =
-    taktFromOrder > 0 ? 'order' : 'bottleneck';
-  const yamLBR = lineBalanceRatio(stationSmvs);
-  const yamLBE = lineBalanceEfficiency({
-    stationSmvs,
-    taktMin: yamTaktReal,
-  });
-  const yamOptManning = optimumManning({
-    totalSam: yamTemplate.totalSmv,
-    taktMin: yamTaktReal,
-  });
-
-  // Balance-advisor suggestions — computed from the same numbers the metric
-  // tier shows, so the WHAT TO FIX list and the tiles can never disagree.
-  // The advisor is pure; deriving via useMemo is overkill at this dataset
-  // size (≤30 stations) and would just pin a stale array on garment swap.
-  const balanceSuggestions: BalanceSuggestion[] = suggestBalanceActions({
-    stations: yamAssignments.map((a) => ({
-      id: a.id,
-      operations: a.operations,
-      effectiveLoadMin: a.operations.reduce((s, o) => s + o.smv, 0),
-    })),
-    totalSam: yamTemplate.totalSmv,
-    operators: yamOperators,
-    taktMin: yamTaktReal,
-    taktSource,
-    bottleneckSmv: yamBottleneck,
-    lbr: yamLBR,
-    lbe: yamLBE,
-    optimumManning: yamOptManning,
-    balanceLoss: yamBalance,
-    smoothness: yamSmoothness,
-    hasManualOverride: !!storedOverride,
-    bulletinName: yamTemplate.name,
-  });
+    for (const w of reportsTwin.workstations) {
+      const gid = w.operation.garmentId;
+      if (gid && garments.byId[gid]) votes.set(gid, (votes.get(gid) ?? 0) + 1);
+    }
+    let bestId = garments.all[0]?.id ?? '';
+    let bestN = 0;
+    for (const [gid, n] of votes) {
+      if (n > bestN) {
+        bestN = n;
+        bestId = gid;
+      }
+    }
+    return bestId;
+  }, [reportsTwin, garments.byId, garments.all]);
 
   // ── Real run-driven KPIs from the sim engine ────────────────────────────
-  // Per-op efficiency derived from the project's skill matrix — when the
-  // user hand-tunes operator proficiency, the sim respects it.
+  // Per-op efficiency derived from the project's skill matrix.
+  //
+  // Built over EVERY garment's operations, not just one. The map is keyed by
+  // op id, so building it from a single bulletin silently dropped the skill
+  // ratings of every line running a different garment — on a two-product
+  // factory the second line ran at nominal speed while the header claimed the
+  // matrix was in force.
   const opEfficiency = useMemo(
-    () => efficiencyFromSkillMatrix(project.skillMatrix, yamTemplate.operations),
-    [project.skillMatrix, yamTemplate],
+    () => efficiencyFromSkillMatrix(project.skillMatrix, garments.all.flatMap((g) => g.operations)),
+    [project.skillMatrix, garments.all],
   );
   const skillEntries = Object.keys(opEfficiency).length;
   // Default to 5 replications so the stochastic engine's variance is
@@ -284,65 +192,27 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   // demo narrative depends on; 5 is a cheap-enough run count that the
   // page still paints under a second.
   const [runs, setRuns] = useState<number>(5);
-  // Synthesise a single-line twin from the chosen garment so the PML engine
-  // has a Source → ops → Sink graph to replicate. Falls back to a typed
-  // single-station twin when the bulletin is empty (corner case — the page
-  // shows zeros in that branch).
-  const runTwin = useMemo(
-    () => buildGarmentTwin(yamTemplate, yamOperators),
-    [yamTemplate, yamOperators],
-  );
-  const [agg, setAgg] = useState<AggregateKpis>(() =>
-    runTwin
-      ? runReplications({
-          twin: runTwin,
-          replications: runs,
-          simMinutes: SHIFT_MIN,
-          garment: yamTemplate,
-          operatorsOverride: yamOperators,
-        })
-      : emptyAgg(),
-  );
-
-  // Re-run when twin or replication count changes. Synchronous — typically
-  // <100ms even at runs=10.
-  useEffect(() => {
-    if (!runTwin) {
-      setAgg(emptyAgg());
-      return;
-    }
-    setAgg(
-      runReplications({
-        twin: runTwin,
-        replications: runs,
-        simMinutes: SHIFT_MIN,
-        garment: yamTemplate,
-        operatorsOverride: yamOperators,
-      }),
-    );
-  }, [runTwin, runs, yamTemplate, yamOperators]);
+  // Bumped by the Re-run button. Part of the replication memo key, which is
+  // the only thing that decides when the engine runs on this page.
+  const [rerunNonce, setRerunNonce] = useState(0);
 
   // ── Per-line replication ─────────────────────────────────────────────────
   // When the active twin has more than one wired sewing line, the
   // single-garment KPIs above can't honestly speak for the factory (Line 1
   // is knit, Line 2 is woven, etc.). Run a separate replication on each
   // wired line's config so the Performance tab can show a per-line table
-  // alongside the aggregate Yamazumi-driven tiles.
-  const reportsTwin = useTwin(selectActiveTwin);
+  // alongside the factory-weighted aggregate.
   const reportScope = useSimScope((s) => s.scope);
   const lineBuildsForReports: LineBuild[] = useMemo(() => {
     if ((reportsTwin.lines ?? []).length === 0) return [];
     return buildLinesFromTwin({
       twin: reportsTwin,
       garmentsById: garments.byId,
-      defaultGarmentId: yamGarment,
-      opEfficiency: efficiencyFromSkillMatrix(
-        project.skillMatrix,
-        (garments.byId[yamGarment] ?? garments.all[0]).operations,
-      ),
+      defaultGarmentId,
+      opEfficiency,
       modelTimeUnit: project.time.modelTimeUnit,
     });
-  }, [reportsTwin, garments.byId, garments.all, yamGarment, project.skillMatrix, project.time.modelTimeUnit]);
+  }, [reportsTwin, garments.byId, defaultGarmentId, opEfficiency, project.time.modelTimeUnit]);
   const perLineAggs = useMemo(() => {
     return lineBuildsForReports
       .filter((lb) => lb.ok)
@@ -372,17 +242,44 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             simMinutes: SHIFT_MIN,
             garment: lb.build.meta.garment,
             operatorsOverride: operatorsForLine,
+            // Both of these were computed on this page and then dropped on the
+            // floor. Without `opEfficiency` the header advertised "N operations
+            // respect skill matrix" over a run that used nominal SMVs; without
+            // `garmentsById` the engine resolved every station's c, K,
+            // discipline and service distribution against the frozen built-in
+            // catalog, so an edited or imported bulletin was invisible to the
+            // Reports numbers while LiveSim — which does pass it — showed
+            // something else.
+            opEfficiency,
+            garmentsById: garments.byId,
           }),
         };
       });
-  }, [lineBuildsForReports, reportsTwin, runs, reportScope]);
+  }, [lineBuildsForReports, reportsTwin, runs, reportScope, opEfficiency, garments.byId, rerunNonce]);
+
+  /**
+   * The lines the Line Balance tab draws, honouring the shared scope picker.
+   *
+   * Balance is a per-line reading — two lines running different garments have
+   * two unrelated bottlenecks — so factory scope means "one panel each", not
+   * "one blended chart". The old tab had a single card and resolved which
+   * line it was about by picking the first one that declared a garment,
+   * silently, on mount.
+   */
+  const balanceLineIds = useMemo(
+    () =>
+      (reportsTwin.lines ?? [])
+        .filter((l) => (reportScope.kind === 'line' ? l.id === reportScope.id : true))
+        .map((l) => l.id),
+    [reportsTwin.lines, reportScope],
+  );
 
   // ── Factory-level aggregate across wired lines ──────────────────────────
   // When the twin has ≥1 wired line, the top KPI tiles (and the FACTORY
   // summary row in the per-line table) describe the whole factory, computed
   // with proper IE weighting (operator-minutes for efficiency, operators for
   // utilisation, pieces for lead time). Without this, the tiles would either
-  // (a) show a synthetic Yamazumi-target line that disagreed with the per-
+  // (a) show a synthetic garment-template line that disagreed with the per-
   // line table below, or (b) report a simple arithmetic mean of percentages,
   // which silently misrepresents lines of different sizes.
   const factoryAgg = useMemo<AggregateKpis | null>(() => {
@@ -390,52 +287,24 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     return aggregateFactoryKpis(perLineAggs, SHIFT_MIN);
   }, [perLineAggs]);
 
-  // Top KPI tiles read from the factory aggregate when wired lines exist,
-  // otherwise from the single-config Yamazumi run. This is the same data that
-  // populates the FACTORY summary row in the per-line table, so the two views
-  // stay numerically consistent.
-  const kpiSource: AggregateKpis = factoryAgg ?? agg;
+  /**
+   * Top KPI tiles, and the numbers a saved scenario captures.
+   *
+   * `factoryAgg` is null exactly when no line is wired, and every consumer
+   * below sits behind `factoryScope`, which is that same test — so the tiles
+   * are never rendered from this fallback. It used to fall back to a
+   * replication of a line SYNTHESISED from the garment picker: five
+   * stochastic shifts, re-run on every garment or operator change, whose
+   * result no pixel on the page ever displayed. Deleting it removed the last
+   * thing on this page that simulated a factory the user had not built.
+   */
+  const kpiSource: AggregateKpis = factoryAgg ?? EMPTY_AGGREGATE;
   const efficiency = kpiSource.efficiencyPct.mean;
   const throughputPerHr = kpiSource.throughputPerHr.mean;
   const producedPieces = kpiSource.producedPieces.mean;
   const meanLeadTime = kpiSource.meanLeadTime.mean;
   const utilization = kpiSource.utilization.mean;
   const wipBundles = kpiSource.wipBundles.mean;
-
-  // ── PML run section data ────────────────────────────────────────────────
-  const pmlTwin = useTwin(selectActiveTwin);
-  const setKpiObserved = useTwin((s) => s.setKpiObserved);
-  /** Force re-render after RUN — selectActiveTwin returns the same Twin
-   *  reference on observed-only edits so we need a tick. */
-  const [pmlRunBump, setPmlRunBump] = useState(0);
-
-  const pmlBlocks = useMemo(() => {
-    void pmlRunBump; // trigger memo on run
-    return pmlTwin.workstations
-      .filter((w) => w.kpiObserved && w.kpiObserved.capacityPerHr > 0)
-      .map((w) => {
-        const spec = getBlockSpec(w);
-        return {
-          ws: w,
-          kind: spec.kind,
-          role: apparelRoleFor(w),
-          throughput: w.kpiObserved!.capacityPerHr,
-          util: w.kpiObserved!.utilizationPct,
-          bottleneck: w.kpiObserved!.bottleneck,
-        };
-      })
-      .sort((a, b) => b.throughput - a.throughput);
-  }, [pmlTwin, pmlRunBump]);
-
-  const pmlSinkThroughput = useMemo(
-    () =>
-      pmlTwin.workstations
-        .filter((w) => getBlockSpec(w).kind === 'Sink')
-        .reduce((s, w) => s + (w.kpiObserved?.capacityPerHr ?? 0), 0),
-    [pmlTwin, pmlRunBump],
-  );
-  const pmlBottleneck = pmlBlocks.find((b) => b.bottleneck) ?? null;
-  const pmlAnyObserved = pmlBlocks.length > 0;
 
   // Period scaling for cumulative KPIs. Throughput is a rate and percentages
   // (efficiency, utilization) are intensive — they don't scale. Only OUTPUT
@@ -445,8 +314,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const periodLabel = period === 'SHIFT' ? 'SHIFT' : period === 'DAY' ? 'DAY' : period === 'WEEK' ? 'WEEK' : 'MONTH';
   const scaledProducedMean = producedPieces * periodMultiplier;
   const scaledProducedStd = (runs > 1 ? kpiSource.producedPieces.std : 0) * periodMultiplier;
-  // True when the headline tiles describe the wired factory rather than the
-  // single-config Yamazumi run. Drives the sub-line copy below.
+  // True when there is a wired factory to report on at all. Everything on the
+  // Performance tab sits behind it; without it the tab shows an empty state.
   const factoryScope = factoryAgg !== null;
   const factoryLineCount = perLineAggs.length;
 
@@ -456,8 +325,12 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader
         kicker="Reports"
-        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Engine report' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
-        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`}
+        title={tab === 'balance' ? 'Line balance' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
+        sub={
+          tab === 'balance'
+            ? `Read from the twin · ${(reportsTwin.lines ?? []).length} sewing ${(reportsTwin.lines ?? []).length === 1 ? 'line' : 'lines'} · ${skillEntries > 0 ? `${skillEntries} operations carry a skill rating` : 'no skill overrides'}`
+            : `${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · ${SHIFT_MIN}-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : 'No wired line'} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`
+        }
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {/* Bound to the shared scope, so picking a line here also moves the
@@ -472,7 +345,17 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 { value: '10', label: '10' },
               ]}/>
             </div>
-            <Button variant="secondary" size="sm" icon="↻" onClick={() => runTwin && setAgg(runReplications({ twin: runTwin, replications: runs, simMinutes: SHIFT_MIN, garment: yamTemplate, operatorsOverride: yamOperators }))}>
+            {/* The per-line replications are keyed on (twin, runs, scope,
+                skill matrix, garments), so re-running is a matter of busting
+                that key rather than calling the engine here. The button used
+                to re-run a synthetic single-garment twin whose result nothing
+                on the page displayed. */}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="↻"
+              onClick={() => setRerunNonce((n) => n + 1)}
+            >
               Re-run
             </Button>
             <Button variant="primary" size="sm" icon="✦"
@@ -483,7 +366,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 const wallStamp = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                 const scopeLabel = factoryAgg !== null
                   ? `Factory · ${perLineAggs.length} ${perLineAggs.length === 1 ? 'line' : 'lines'} · ${perLineAggs.reduce((sum, l) => sum + l.operators, 0)} ops`
-                  : `${yamTemplate.name} · ${yamOperators} ops`;
+                  : 'No wired line';
                 const defaultName = `${scopeLabel} · ${runs > 1 ? `${runs}× ` : ''}${wallStamp} (device)`;
                 setSaveName(defaultName);
                 setSaveNotes('');
@@ -526,12 +409,12 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               letterSpacing: '1.5px',
             }}
           >
-            Active systems
+            Lines
           </span>
           {(reportsTwin.lines ?? []).map((l) => (
             <span
               key={l.id}
-              title={`${l.name} — ${l.productionSystem}`}
+              title={`${l.name} — ${lineSystemBadge(l, reportsTwin)}`}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -557,125 +440,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       )}
 
       {/* ── In-page tabs ─────────────────────────────────────────────────
-          Reports is the umbrella. Performance gives the headline KPIs;
-          Line Balance gives the Yamazumi authoring surface; Validation
-          shows how the model lines up with the reference paper / wired
-          block graph. */}
-      <ReportTabBar value={tab} onChange={setTab} hasPml={pmlAnyObserved} />
+          Reports is the umbrella. Performance gives the headline KPIs,
+          Line Balance the per-line Yamazumi read off the twin, Scenarios the
+          saved runs to compare them against. */}
+      <ReportTabBar value={tab} onChange={setTab} />
 
-      {/* ── Reference paper validation ───────────────────────────────────
-          Visible only when the user has loaded a published case study into
-          the active twin from the Simulation tab. Side-by-side paper KPIs
-          vs. Stitchworks observed, with delta% and pass/fail badges. */}
-      {/* ── PML simulation report ───────────────────────────────────────
-          Reads observed KPIs that the Builder's PML runner wrote onto
-          each workstation. Lets the user re-run from this page so they
-          don't have to bounce back to Builder for a quick check. */}
-      {tab === 'validation' && (
-      <HideableBox style={{ marginBottom: 20 }}>
-      <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
-          <div>
-            <div style={{ ...SW_TYPE.heading }}>
-              ⚙ PML SIMULATION
-            </div>
-            <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 2 }}>
-              Block-graph DES over the active twin · {pmlTwin.workstations.length} blocks · {pmlTwin.connectors.length} connectors
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="primary"
-              size="sm"
-              icon="▶"
-              onClick={() => {
-                runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
-                setPmlRunBump((n) => n + 1);
-              }}
-            >
-              Run PML
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => navigate('/line')}>
-              Open Builder
-            </Button>
-          </div>
-        </div>
-
-        {!pmlAnyObserved ? (
-          <div
-            style={{
-              padding: '14px 16px',
-              border: `1px dashed ${SW_COLORS.line}`,
-              borderRadius: 6,
-              fontSize: 12,
-              color: SW_COLORS.muted,
-            }}
-          >
-            No PML run on this twin yet. Click <strong style={{ color: SW_COLORS.brand }}>▶ Run PML</strong> to simulate the wired graph and populate per-block KPIs.
-          </div>
-        ) : (
-          <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 12 }}>
-              <Stat label="SINK THROUGHPUT" value={Math.round(pmlSinkThroughput).toLocaleString()} unit="pcs/hr" color={SW_COLORS.brand} />
-              <Stat label="ACTIVE BLOCKS"   value={String(pmlBlocks.length)}                                  unit="" color={SW_COLORS.fabric} />
-              <Stat label="BOTTLENECK"       value={pmlBottleneck ? (() => { const n = pmlBottleneck.ws.name.replace(/^\d+\.\s*/, ''); return n.length > 16 ? n.slice(0, 15) + '…' : n; })() : '—'}  unit=""        color={pmlBottleneck ? SW_COLORS.alarm : SW_COLORS.muted} />
-              <Stat label="MAX UTIL"         value={Math.max(0, ...pmlBlocks.map((b) => b.util)).toFixed(0)}    unit="%"       color={SW_COLORS.thread} />
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table
-                style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  fontFamily: SW_FONTS.mono,
-                  fontSize: 11,
-                }}
-              >
-                <thead>
-                  <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>BLOCK</th>
-                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>KIND</th>
-                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>ROLE</th>
-                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>PCS/HR</th>
-                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>UTIL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pmlBlocks.slice(0, 20).map((b) => (
-                    <tr
-                      key={b.ws.id}
-                      style={{
-                        borderBottom: `1px solid ${SW_COLORS.line}`,
-                        background: b.bottleneck ? `${SW_COLORS.alarm}24` : 'transparent',
-                      }}
-                    >
-                      <td style={{ padding: '6px 8px', color: SW_COLORS.ink, fontWeight: 700 }}>
-                        {b.bottleneck && '◆ '}
-                        {b.ws.name}
-                      </td>
-                      <td style={{ padding: '6px 8px', color: SW_COLORS.muted }}>{b.kind}</td>
-                      <td style={{ padding: '6px 8px', color: SW_COLORS.muted }}>{b.role}</td>
-                      <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: SW_COLORS.ink }}>
-                        {Math.round(b.throughput).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.muted }}>
-                        {b.util > 0 ? `${b.util.toFixed(0)}%` : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {pmlBlocks.length > 20 && (
-                <div style={{ marginTop: 6, fontSize: 11, color: SW_COLORS.muted, fontStyle: 'italic' }}>
-                  +{pmlBlocks.length - 20} more blocks not shown
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </Card>
-      </HideableBox>
-      )}
 
       {tab === 'performance' && (
       <>
@@ -911,219 +680,34 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       </>
       )}
 
-      {/* Yamazumi — drag operations between operators to rebalance */}
-      {tab === 'balance' && (
-      <HideableBox style={{ marginBottom: 14 }}>
-        <Card padding={20}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap: 14, flexWrap: 'wrap', paddingRight: 36 }}>
-            <div>
-              <div style={{ ...SW_TYPE.heading }}>YAMAZUMI · LINE BALANCE</div>
-              <div style={{ fontSize:12, color: SW_COLORS.muted }}>
-                Operator-by-operation SMV stack with takt-line overlay. Drag any segment onto another operator's bar to rebalance manually. Bars over the takt line are bottlenecks.
-              </div>
-            </div>
-            <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
-              {/* Line presets — quick-load a wired line's garment + operator
-                  target so the Yamazumi reflects the bulletin that line is
-                  actually running. Without this the user has to re-derive
-                  Line 2's setup from the LiveSim picker and type it in. */}
-              {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).length > 0 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>LOAD LINE</span>
-                  {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).map((lb) => {
-                    const accent = DEPT_LINE_COLORS[lb.line.color] ?? SW_COLORS.brand;
-                    const lineGarmentId = lb.line.garmentId!;
-                    const isActive = yamGarment === lineGarmentId
-                      && yamOperators === (lb.line.operatorTarget ?? yamOperators);
-                    return (
-                      <button
-                        key={lb.line.id}
-                        onClick={() => {
-                          setYamGarment(lineGarmentId);
-                          if (lb.line.operatorTarget) setYamOperators(lb.line.operatorTarget);
-                        }}
-                        title={`Set Yamazumi to ${lb.line.name}: garment "${garments.byId[lineGarmentId]?.name ?? lineGarmentId}"${lb.line.operatorTarget ? ` · ${lb.line.operatorTarget} operators` : ''}`}
-                        style={{
-                          padding: '4px 10px',
-                          border: `1px solid ${isActive ? accent : SW_COLORS.line}`,
-                          borderLeft: `4px solid ${accent}`,
-                          background: isActive ? `${accent}22` : 'transparent',
-                          borderRadius: SW_RADIUS.sm,
-                          fontFamily: SW_FONTS.mono,
-                          fontSize: 10,
-                          fontWeight: 800,
-                          letterSpacing: '0.05em',
-                          color: isActive ? '#fff' : SW_COLORS.ink,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {lb.line.name.toUpperCase()}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
-              <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
-                <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPERATORS</span>
-                <input type="number" min={4} max={60} value={yamOperators}
-                  onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
-                  style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
-              </div>
-              {storedOverride && (
-                <Button variant="ghost" size="sm" onClick={() => clearYamazumiOverride(yamGarment)}>Reset to auto</Button>
-              )}
-            </div>
-          </div>
-          <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300} onChange={handleYamazumiChange}/>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 8 }}>
-            <Stat label="GARMENT SAM" value={yamTemplate.totalSmv.toFixed(2)} unit="min"/>
-            <Stat label="TAKT" value={yamTakt.toFixed(3)} unit="min" color={SW_COLORS.brand}/>
-            <Stat label="BOTTLENECK" value={yamBottleneck.toFixed(3)} unit="min" color={SW_COLORS.alarm}/>
-            <Stat label="BALANCE LOSS" value={yamBalance.toFixed(1)} unit="%" color={yamBalance > 25 ? SW_COLORS.alarm : SW_COLORS.thread}/>
-            <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
-          </div>
-          {/* Sempai's 3 line-balance metrics, surfaced as their own tier so
-              the user can read them as a related triad rather than mixed in
-              with the engine-scope KPIs above. LBR = fairness across the
-              line as built; LBE = capacity used vs takt; Opt manning =
-              theoretical minimum headcount at takt. */}
-          <div style={{ marginTop: 10, padding: '6px 10px 4px', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, background: '#fafaf6' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6, justifyContent: 'space-between' }}>
-              <div style={{ ...SW_TYPE.kicker, fontWeight: 800, letterSpacing: '0.08em', color: SW_COLORS.muted }}>
-                3-METRIC LINE BALANCE  ·  FAIRNESS · TAKT-EFFICIENCY · MANNING
-              </div>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-                Takt {yamTaktReal.toFixed(3)} min · source: {taktSource === 'order'
-                  ? `Order ${latestOrder?.po ?? '—'} (${latestOrder?.qty ?? 0} pcs / ${latestOrder?.deadlineDays ?? 0} d)`
-                  : 'bottleneck SMV (no committed order — commit one for demand-driven takt)'}
-              </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-              <div>
-                <Stat
-                  label="LINE BALANCE RATIO"
-                  value={yamLBR.toFixed(1)}
-                  unit="%"
-                  color={yamLBR >= 85 ? SW_COLORS.ok : yamLBR >= 75 ? SW_COLORS.thread : SW_COLORS.alarm}
-                  info={<><b>Fairness</b> across stations.<br/>LBR = Σ stationSMV ÷ (N × longest station) × 100.<br/>Complement of Balance Loss. 100 % = every station as loaded as the bottleneck.</>}
-                />
-                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
-                  Fairness across stations · complement of Balance Loss
-                </div>
-              </div>
-              <div>
-                <Stat
-                  label="LINE BALANCE EFF"
-                  value={yamLBE.toFixed(1)}
-                  unit="%"
-                  color={
-                    yamLBE > 100 ? SW_COLORS.alarm
-                    : yamLBE >= 85 ? SW_COLORS.ok
-                    : yamLBE >= 70 ? SW_COLORS.thread
-                    : SW_COLORS.alarm
-                  }
-                  info={<><b>Capacity used vs takt.</b><br/>LBE = Σ stationSMV ÷ (N × takt) × 100.<br/>&lt;100 = spare capacity vs demand; &gt;100 = infeasible at current manning.</>}
-                />
-                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
-                  {yamLBE > 100 ? 'Infeasible — bottleneck slower than takt' : 'Capacity used vs takt'}
-                </div>
-              </div>
-              <div>
-                <Stat
-                  label="OPTIMUM MANNING"
-                  value={yamOptManning.toFixed(0)}
-                  unit={`/ ${yamOperators} now`}
-                  color={
-                    yamOptManning > yamOperators ? SW_COLORS.alarm
-                    : yamOptManning === yamOperators ? SW_COLORS.ok
-                    : SW_COLORS.thread
-                  }
-                  info={<><b>Theoretical headcount</b> at takt.<br/>Manning = ⌈ Garment SAM ÷ takt ⌉.<br/>The minimum operators a perfectly balanced line would need to hit takt — gap to actual = labour cost of imbalance.</>}
-                />
-                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
-                  {yamOptManning > yamOperators
-                    ? `Need ${yamOptManning - yamOperators} more to hit takt`
-                    : yamOptManning < yamOperators
-                      ? `${yamOperators - yamOptManning} above theoretical floor`
-                      : 'At theoretical floor'}
-                </div>
-              </div>
-            </div>
-          </div>
-          {/* WHAT TO FIX — actionable suggestions derived from the live
-              metrics. Severity-coloured rows so the user can scan to the
-              red items first. Empty state shows a "healthy" info row. */}
-          <div style={{ marginTop: 12, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, overflow: 'hidden' }}>
-            <div style={{ padding: '8px 12px', background: SW_COLORS.ink, color: SW_COLORS.paper, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 900, letterSpacing: '0.08em' }}>
-                WHAT TO FIX  ·  {balanceSuggestions.length} {balanceSuggestions.length === 1 ? 'item' : 'items'}
-              </div>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#dcd6c6' }}>
-                Updates live as you change garment, operators, or drag the Yamazumi
-              </div>
-            </div>
-            <div>
-              {balanceSuggestions.map((s, i) => {
-                const colourBySeverity: Record<typeof s.severity, { bar: string; chip: string; chipText: string; label: string }> = {
-                  critical:    { bar: SW_COLORS.alarm,  chip: SW_COLORS.alarm,  chipText: '#fff',         label: 'CRITICAL' },
-                  warn:        { bar: '#d49a2a',        chip: '#d49a2a',        chipText: '#fff',         label: 'WARN' },
-                  opportunity: { bar: SW_COLORS.brand,  chip: SW_COLORS.brand,  chipText: '#fff',         label: 'OPPORTUNITY' },
-                  info:        { bar: SW_COLORS.line,   chip: '#eee9d8',        chipText: SW_COLORS.ink,  label: 'INFO' },
-                };
-                const c = colourBySeverity[s.severity];
-                return (
-                  <div
-                    key={s.id}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'auto 1fr',
-                      gap: 12,
-                      padding: '10px 12px',
-                      borderTop: i === 0 ? 'none' : `1px solid ${SW_COLORS.line}`,
-                      borderLeft: `4px solid ${c.bar}`,
-                      background: '#fff',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'flex-start', paddingTop: 1 }}>
-                      <span
-                        style={{
-                          padding: '2px 6px',
-                          ...SW_TYPE.overline,
-                          fontWeight: 900,
-                          background: c.chip,
-                          color: c.chipText,
-                          borderRadius: 3,
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {c.label}
-                      </span>
-                    </div>
-                    <div>
-                      <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 2 }}>
-                        {s.title}
-                      </div>
-                      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.45, marginBottom: 4 }}>
-                        {s.detail}
-                      </div>
-                      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.ink, fontWeight: 600, lineHeight: 1.45 }}>
-                        <span style={{ color: SW_COLORS.muted, fontWeight: 700 }}>→ </span>
-                        {s.action}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+      {/* ── LINE BALANCE ──────────────────────────────────────────────────
+          One panel per sewing line IN SCOPE, read straight off the twin.
 
-          <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-            Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · {storedOverride ? `Manual override (${storedOverride.length} operators)` : 'LPT auto-assignment'} · Source bulletin: {yamTemplate.operations.length} operations from {yamTemplate.name}
-          </div>
-        </Card>
-      </HideableBox>
+          What stood here: a single card driven by a five-option garment
+          ToggleGroup and an OPERATORS number field, packing the chosen
+          bulletin onto that many synthetic operators with the RPW heuristic.
+          It had a "LOAD LINE" row that copied a real line's garment and
+          headcount into those two controls — an admission that the surface
+          was meant to describe a line, without ever reading one. The stations
+          on the chart, the SMVs behind them and the operator count under them
+          were all invented here, so nothing the user built in BUILD and
+          nothing the engine ran on RUN could move a single bar. */}
+      {tab === 'balance' && (
+        balanceLineIds.length === 0 ? (
+          <LineSimEmpty
+            reason={reportsTwin.workstations.length === 0 ? 'no-stations' : 'stations-not-in-a-line'}
+            unassignedStationCount={reportsTwin.workstations.filter((ws) => !ws.lineId).length}
+            what="Line balance"
+          />
+        ) : (
+          <>
+            {balanceLineIds.map((id) => (
+              <LineBalancePanel key={id} lineId={id} />
+            ))}
+          </>
+        )
       )}
+
 
       {tab === 'performance' && !factoryScope && (
         // No wired line means there is nothing real to report on. This used to
@@ -1154,8 +738,10 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         // For factory scope, sum across each line's own ceiling. This is
         // the steady-state ceiling the engine is asymptotically approaching
         // and serves as the dashed reference line on the throughput chart.
-        const targetThroughputPerHr = factoryScope
-          ? perLineAggs.reduce((sum, r) => {
+        // `factoryScope` is already true here — this whole block is gated on
+        // it — so the old `: (…)` fallbacks over the garment template were
+        // dead branches describing a line the page no longer synthesises.
+        const targetThroughputPerHr = perLineAggs.reduce((sum, r) => {
               const garmentOps = r.agg.firstStations.length > 0
                 ? r.agg.firstStations
                 : [];
@@ -1164,28 +750,19 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 0,
               );
               return sum + (maxSmv > 0 ? 60 / maxSmv : 0);
-            }, 0)
-          : (() => {
-              const maxSmv = yamTemplate.operations.reduce(
-                (m, o) => Math.max(m, o.smv),
-                0,
-              );
-              return maxSmv > 0 ? 60 / maxSmv : 0;
-            })();
+            }, 0);
 
         // Approximate warm-up: time for the first bundle to traverse the
         // line, ≈ Σ SMV × bundleSize. We pick the *longest* line in
         // factory scope so the shaded region covers everyone. Empty in
         // edge cases — the chart degrades gracefully.
-        const warmupMin = factoryScope
-          ? Math.max(
-              0,
-              ...perLineAggs.map((r) => {
-                const totalSmv = r.agg.firstStations.reduce((s, st) => s + st.smv, 0);
-                return totalSmv * r.bundleSize;
-              }),
-            )
-          : yamTemplate.totalSmv * 1; // bundle size factor unknown at this scope
+        const warmupMin = Math.max(
+          0,
+          ...perLineAggs.map((r) => {
+            const totalSmv = r.agg.firstStations.reduce((s, st) => s + st.smv, 0);
+            return totalSmv * r.bundleSize;
+          }),
+        );
 
         return (
           <>
@@ -1406,7 +983,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                         action={
                           topN <= 2
                             ? `Click into the bar with the largest queue — that's the single op to add capacity to for the biggest throughput gain.`
-                            : `Use Yamazumi (LineBalance tab) to find the broader pacing problem; spot-fixes won't help here.`
+                            : `Open the Line Balance tab: several stations are near the pace, so the fix is levelling the whole chart, not adding capacity at one bar.`
                         }
                       />
                     );
@@ -1418,82 +995,13 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         );
       })()}
 
-      {tab === 'performance' && perLineAggs.length > 0 && (
-      <div style={{ marginBottom:14 }}>
-        <HideableBox>
-          <Card padding={20}>
-            <div style={{ ...SW_TYPE.heading, marginBottom:6, paddingRight: 36 }}>BY SYSTEM</div>
-            <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 14 }}>
-              Efficiency = SAM-earned ÷ operator-minutes, weighted across the lines on each system. Pieces are summed across those lines{periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''}.
-            </div>
-            {(() => {
-              const SYSTEM_META: Record<string, { label: string; color: string }> = {
-                PBS:      { label: 'PBS',      color: SW_COLORS.brand },
-                modular:  { label: 'Modular',  color: SW_COLORS.fabric },
-                UPS:      { label: 'UPS',      color: SW_COLORS.bobbin },
-                synchro:  { label: 'Synchro',  color: SW_COLORS.ok },
-                straight: { label: 'Straight', color: SW_COLORS.thread },
-              };
-              type Bucket = { key: string; label: string; color: string; lines: number; produced: number; opMinutes: number; samEarned: number; sharedStations: number; sharedSavings: number };
-              // Per-line shared-station rollup via the shared helper, so this
-              // card and SewingLineBand can't drift on the math.
-              const byKey: Record<string, Bucket> = {};
-              for (const r of perLineAggs) {
-                const key = r.line.productionSystem;
-                const meta = SYSTEM_META[key] ?? { label: key, color: SW_COLORS.muted };
-                const b = byKey[key] ?? { key, label: meta.label, color: meta.color, lines: 0, produced: 0, opMinutes: 0, samEarned: 0, sharedStations: 0, sharedSavings: 0 };
-                b.lines += 1;
-                b.produced += r.agg.producedPieces.mean;
-                b.opMinutes += r.operators * SHIFT_MIN;
-                b.samEarned += r.agg.producedPieces.mean * r.totalSmv;
-                const sh = shareDebtForLine(reportsTwin, r.line.id);
-                b.sharedStations += sh.stations;
-                b.sharedSavings += sh.savings;
-                byKey[key] = b;
-              }
-              const buckets = Object.values(byKey).sort((a, b) => b.produced - a.produced);
-              if (buckets.length === 0) return null;
-              return buckets.map((b) => {
-                const efficiency = b.opMinutes > 0 ? (b.samEarned / b.opMinutes) * 100 : 0;
-                return (
-                  <div key={b.key} style={{ marginBottom: 12 }}>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
-                      <span style={{ fontWeight:700, fontSize:13 }}>
-                        {b.label}
-                        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 600, color: SW_COLORS.muted, marginLeft: 6 }}>
-                          · {b.lines} {b.lines === 1 ? 'line' : 'lines'}
-                        </span>
-                        {b.sharedStations > 0 && (
-                          <span
-                            title={`${b.sharedStations} station${b.sharedStations === 1 ? '' : 's'} share an operator · ${b.sharedSavings.toFixed(1)} operator-equivalent${b.sharedSavings >= 1.05 ? 's' : ''} saved (each ⇄ slows that station's cycle 1/shareFrac×)`}
-                            style={{
-                              ...SW_TYPE.kicker,
-                              color: SW_COLORS.bobbin,
-                              marginLeft: 8,
-                              padding: '1px 6px',
-                              border: `1px solid ${SW_COLORS.bobbin}`,
-                              borderRadius: 3,
-                              letterSpacing: '0.05em',
-                            }}
-                          >
-                            ⇄ {b.sharedStations} SHARED · −{b.sharedSavings.toFixed(1)} OPR
-                          </span>
-                        )}
-                      </span>
-                      <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: b.color }}>{efficiency.toFixed(1)}%</span>
-                    </div>
-                    <Progress value={Math.min(100, efficiency)} color={b.color} height={8}/>
-                    <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>
-                      {Math.round(b.produced * periodMultiplier).toLocaleString()} pcs
-                    </div>
-                  </div>
-                );
-              });
-            })()}
-          </Card>
-        </HideableBox>
-      </div>
-      )}
+      {/* "BY SYSTEM" lived here — one efficiency bar per production system,
+          bucketing the wired lines by PBS / Modular / UPS / Synchro /
+          Straight. The card existed only to compare production systems, and
+          with systems out of scope there is nothing left for it to bucket on:
+          every line would fall into one unlabelled group. The per-line
+          efficiency it rolled up is still on the per-line table above, which
+          is where it was read from in the first place. */}
 
       {tab === 'scenarios' && (
         <ScenariosPanel embedded />
@@ -1513,10 +1021,10 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           onNameChange={setSaveName}
           onNotesChange={setSaveNotes}
           summary={{
-            template: factoryScope ? `Factory · ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : yamTemplate.name,
-            operators: factoryScope
-              ? perLineAggs.reduce((sum, l) => sum + l.operators, 0)
-              : yamOperators,
+            template: factoryScope
+              ? `Factory · ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}`
+              : 'No wired line',
+            operators: perLineAggs.reduce((sum, l) => sum + l.operators, 0),
             runs: kpiSource.n,
             throughputPerHr: kpiSource.throughputPerHr.mean,
             efficiencyPct: kpiSource.efficiencyPct.mean,
@@ -1529,11 +1037,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               name: trimmed,
               notes: saveNotes.trim() || undefined,
               twin: reportsTwin,
-              garmentTemplateId: yamGarment,
-              operators:
-                perLineAggs.length > 0
-                  ? perLineAggs.reduce((sum, l) => sum + l.operators, 0)
-                  : yamOperators,
+              garmentTemplateId: defaultGarmentId,
+              operators: perLineAggs.reduce((sum, l) => sum + l.operators, 0),
               kpis: {
                 producedPieces: kpiSource.producedPieces.mean,
                 throughputPerHr: kpiSource.throughputPerHr.mean,
@@ -1563,27 +1068,31 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   );
 }
 
-type ReportTab = 'performance' | 'balance' | 'validation' | 'scenarios';
+type ReportTab = 'performance' | 'balance' | 'scenarios';
+
+const REPORT_TABS: ReportTab[] = ['performance', 'balance', 'scenarios'];
+
+/** Resolve the Reports sub-tab from a query string. `?report=` wins over
+ *  `?tab=` because Insights, which hosts this page, owns `?tab=` itself. */
+function readReportTab(search: string): ReportTab | null {
+  const qs = new URLSearchParams(search);
+  for (const key of ['report', 'tab']) {
+    const v = qs.get(key);
+    if (v && (REPORT_TABS as string[]).includes(v)) return v as ReportTab;
+  }
+  return null;
+}
 
 interface ReportTabBarProps {
   value: ReportTab;
   onChange: (next: ReportTab) => void;
-  hasPml: boolean;
 }
 
-/** Underline-style segmented tabs sitting under the Reports SectionHeader.
- *  The badge on the Validation tab tells the user when there's something
- *  to look at — a loaded reference paper, or observed PML KPIs. */
-function ReportTabBar({ value, onChange, hasPml }: ReportTabBarProps) {
+/** Underline-style segmented tabs sitting under the Reports SectionHeader. */
+function ReportTabBar({ value, onChange }: ReportTabBarProps) {
   const tabs: { id: ReportTab; label: string; hint: string; badge?: string }[] = [
     { id: 'performance', label: 'Performance', hint: 'KPIs · output · efficiency' },
-    { id: 'balance',     label: 'Line Balance', hint: 'Yamazumi · takt · efficiency' },
-    {
-      id: 'validation',
-      label: 'Validation',
-      hint: 'Reference paper · PML run',
-      badge: hasPml ? 'PML' : undefined,
-    },
+    { id: 'balance',     label: 'Line Balance', hint: 'Per line · pitch · bottleneck' },
     { id: 'scenarios',   label: 'Scenarios',   hint: 'Saved runs · compare KPIs' },
   ];
   return (
@@ -1759,7 +1268,8 @@ function SaveScenarioModal({
                 padding: '8px 10px',
                 border: `1px solid ${SW_COLORS.line}`,
                 borderRadius: SW_RADIUS.sm,
-                background: '#fff',
+                background: SW_COLORS.paperDeep,
+                colorScheme: 'dark',
                 fontFamily: SW_FONTS.body,
                 fontSize: 13,
                 color: SW_COLORS.ink,
@@ -1780,7 +1290,8 @@ function SaveScenarioModal({
                 padding: '8px 10px',
                 border: `1px solid ${SW_COLORS.line}`,
                 borderRadius: SW_RADIUS.sm,
-                background: '#fff',
+                background: SW_COLORS.paperDeep,
+                colorScheme: 'dark',
                 fontFamily: SW_FONTS.body,
                 fontSize: 13,
                 color: SW_COLORS.ink,

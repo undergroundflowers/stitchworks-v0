@@ -20,10 +20,10 @@
 
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { HudSelect } from './HudSelect';
+import { NumberInput } from './NumberInput';
 import { FieldLabel, Sym } from './Sym';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { meanOf, type ServiceDist, type QueueDiscipline } from '../simulation';
-import { glossOf } from '../simulation/notation';
 import type { ParamFieldSpec } from '../domain/pml';
 
 export type DistKind = ServiceDist['kind'];
@@ -230,14 +230,13 @@ export function NumberField({
       >
         {label}
       </span>
-      <input
-        type="number"
-        value={Number.isFinite(value) ? value : ''}
+      <NumberInput
+        value={Number.isFinite(value) ? value : undefined}
         min={min}
         max={max}
         step={step}
         disabled={!editable}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(v) => { if (v !== undefined) onChange(v); }}
         style={inputStyle(editable)}
       />
     </label>
@@ -269,18 +268,14 @@ export function CapacityField({
         <FieldLabel quantity="capacity" />
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
-        <input
-          type="number"
-          value={finite ? capacity : ''}
+        <NumberInput
+          value={finite ? capacity : undefined}
           placeholder={finite ? '' : '∞'}
           min={1}
           step={1}
           disabled={!editable}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            if (Number.isFinite(v) && v > 0) onChange(v);
-          }}
-          style={{ ...inputStyle(editable), flex: 1 }}
+          onChange={(v) => { if (v !== undefined && v > 0) onChange(v); }}
+          style={{ ...inputStyle(editable), flex: 1, minWidth: 0 }}
         />
         <button
           type="button"
@@ -432,25 +427,31 @@ const helpDot = (open: boolean): CSSProperties => ({
  * explanation.
  *
  * The prose used to sit permanently under every input, which turned a list of
- * four numbers into a wall of text — so it is behind the toggle now, together
- * with the textbook gloss for the quantity when the field sets one.
+ * four numbers into a wall of text — so it is behind the toggle now.
  *
- * `onClear` is optional: the Inspector edits a station that can fall back to
- * its catalog default, so it offers a clear; a station type is authoring the
- * default itself and has nothing to fall back to.
+ * WHAT THE `?` SAYS. One plain sentence: what this number does on the floor.
+ * It used to also append `glossOf(quantity)` — the textbook wording plus the
+ * formula — which is how a four-word question got a five-line answer full of
+ * phrases like "the fifth field of Kendall–Lee a/b/c:d/e" and
+ * "Pollaczek–Khinchine". That vocabulary is worth having, but not here: the
+ * `?` is read mid-edit by someone who wants to know what to type. The textbook
+ * gloss is still one hover away on the `<Sym>` beside the label, and in full
+ * on the Queueing reference sheet.
+ *
+ * The row used to carry a SET/auto badge and a ✕ that dropped the override
+ * back to the catalog default. It is gone: the row shows the number the engine
+ * will use, and typing a different one is the whole interaction. Where that
+ * value came from is bookkeeping the user was being asked to track on the
+ * app's behalf.
  */
 export function BlockParamRow({
   field: f,
   value,
-  isAuthored,
   onSet,
-  onClear,
 }: {
   field: ParamFieldSpec;
   value: number;
-  isAuthored: boolean;
   onSet: (v: number) => void;
-  onClear?: () => void;
 }) {
   const [showHelp, setShowHelp] = useState(false);
   return (
@@ -471,47 +472,11 @@ export function BlockParamRow({
         >
           ?
         </button>
-        {onClear && (
-          <span
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 9,
-              fontWeight: 700,
-              color: isAuthored ? SW_COLORS.brand : SW_COLORS.muted,
-            }}
-          >
-            {isAuthored ? 'SET' : 'auto'}
-          </span>
-        )}
-        {onClear && isAuthored && (
-          <button
-            type="button"
-            onClick={onClear}
-            title="Drop this override and fall back to the catalog default"
-            style={{
-              background: SW_COLORS.paper,
-              border: `1px solid ${SW_COLORS.line}`,
-              borderRadius: SW_RADIUS.sm,
-              color: SW_COLORS.muted,
-              fontFamily: SW_FONTS.display,
-              fontWeight: 900,
-              padding: '1px 6px',
-              fontSize: 9,
-              cursor: 'pointer',
-            }}
-          >
-            ✕
-          </button>
-        )}
       </div>
-      <input
-        type="number"
+      <NumberInput
         value={value}
         step={f.step}
-        onChange={(e) => {
-          const v = parseFloat(e.target.value);
-          if (isFinite(v)) onSet(v);
-        }}
+        onChange={(v) => { if (v !== undefined) onSet(v); }}
         style={blockInput}
       />
       {showHelp && (
@@ -525,7 +490,6 @@ export function BlockParamRow({
           }}
         >
           {f.hint}
-          {f.quantity ? `\n${glossOf(f.quantity)}` : ''}
         </div>
       )}
     </div>

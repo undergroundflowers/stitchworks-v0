@@ -26,16 +26,17 @@
  */
 
 import type { GlyphFamily } from './machine-glyphs';
+import { normalizeStationArt, type StationArt } from './station-art';
 import type { PmlBlockKind, PmlBlockParams } from './pml';
 
 /**
- * How the type is built in the isometric view.
+ * How the type is built in the isometric view when it carries no `isoArt`.
  *
- * Deliberately a closed set drawn from the existing fixture vocabulary
- * rather than an uploaded model or image: the canvas is SVG and the 2D↔ISO
- * morph interpolates geometry, so artwork has to be geometry too. Three
- * forms cover the floor — a machine on a table, a plain volume, and a
- * logic block.
+ * A closed set drawn from the existing fixture vocabulary — three forms
+ * cover the floor: a machine on a table, a plain volume, and a logic block.
+ * Uploaded artwork overrides this per view (see `planArt` / `isoArt`), and
+ * it is SVG for the same reason this set is small: the canvas is SVG and the
+ * 2D↔ISO morph interpolates geometry, so artwork has to be vector too.
  */
 export type StationForm = 'machine' | 'bench' | 'block';
 
@@ -73,6 +74,12 @@ export interface StationType {
   w: number;
   d: number;
   h: number;
+  /** Uploaded SVG drawn inside the 2D plan footprint, replacing the stroke
+   *  mark. Absent means the `glyph` mark is drawn. */
+  planArt?: StationArt;
+  /** Uploaded SVG drawn in place of the whole isometric body, fitted to the
+   *  footprint's projected box. Absent means `form` builds the cuboid. */
+  isoArt?: StationArt;
   /** What the simulation runs this as. Drives which params exist. */
   kind: PmlBlockKind;
   /** Authored defaults, stamped onto every station dropped from this type. */
@@ -107,5 +114,11 @@ export function normalizeStationType(t: StationType): StationType {
     w: clamp(t.w, 0.5, 12, 1),
     d: clamp(t.d, 0.5, 12, 1),
     h: clamp(t.h, 0.1, 8, 1.4),
+    // Artwork is re-validated, not just carried: this runs on every load
+    // path, including a hand-edited `.swproj`, and the markup ends up in
+    // `dangerouslySetInnerHTML`. Anything that fails is dropped and the
+    // station falls back to its Form / Mark.
+    planArt: normalizeStationArt(t.planArt),
+    isoArt: normalizeStationArt(t.isoArt),
   };
 }

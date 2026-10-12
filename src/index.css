@@ -165,3 +165,18 @@ body,
     scroll-behavior: auto !important;
   }
 }
+
+/* Number spinners. `NumberInput` (components/NumberInput.tsx) is a text field
+   and has none, but the WebKit/Blink spinner is a pseudo-element that inline
+   styles cannot reach — so any `type="number"` that outlives the migration is
+   stripped here rather than left with arrows nobody asked for. */
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

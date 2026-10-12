@@ -22,7 +22,7 @@ import {
   type SewingLine,
   type TwinSchemaVersion,
   TWIN_SCHEMA_VERSION,
-  defaultPolicyFor,
+  DEFAULT_LINE_POLICY,
   newTwinId,
   newLineId,
   newConnectorId,
@@ -230,18 +230,16 @@ export function buildGarmentTwin(
   // root of "no sewing line builds reported".
   //
   // Every workstation gets the SAME lineId, including the Source, the Sink and
-  // the operator ResourcePool. That consistency is load-bearing in two places:
-  // the engine keys operator pools by line, so a pool tagged differently from
-  // the Services it serves would silently impose no constraint at all; and the
-  // Source reads `ws.lineId` to find its order sequence and raise changeovers.
+  // the operator ResourcePool. That consistency is load-bearing because the
+  // engine keys operator pools by line, so a pool tagged differently from the
+  // Services it serves would silently impose no constraint at all.
   const line: SewingLine = {
     id: newLineId(),
     name: `Line 1 · ${garment.name}`,
-    productionSystem: 'PBS',
     garmentId: garment.id,
     color: 'blue',
     operatorTarget: operators,
-    policy: defaultPolicyFor('PBS'),
+    policy: { ...DEFAULT_LINE_POLICY },
   };
   for (const ws of workstations) ws.lineId = line.id;
 

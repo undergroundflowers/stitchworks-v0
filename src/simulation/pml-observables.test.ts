@@ -59,7 +59,7 @@ function poolTwin(opts: { poolUnits: number; serviceMeanMin: number; lambdaPerHr
     createdAt: new Date(0).toISOString(), modifiedAt: new Date(0).toISOString(),
     gridW: 8, gridH: 4,
     departments: [{ id: deptId, name: 'Sewing Floor', kind: 'Sewing', color: 'blue', bounds: { x: 0, y: 0, w: 8, h: 4 } }],
-    lines: [{ id: lineId, deptId, name: 'Line 1', productionSystem: 'PBS', color: 'blue' }],
+    lines: [{ id: lineId, deptId, name: 'Line 1', color: 'blue' }],
     workstations: [...chain, pool],
     connectors,
     operators: [], assignments: [],

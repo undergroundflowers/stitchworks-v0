@@ -18,6 +18,7 @@
 
 import type { GarmentTemplate, Operation } from '../domain';
 import type { Twin, Workstation, SewingLine } from '../domain/twin';
+import { wsBaseFootprint } from '../domain/twin';
 import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
@@ -75,6 +76,16 @@ export interface TwinWorkstationCell {
   gy: number;
   /** 0/90/180/270, in case the renderer wants to honour rotation. */
   rotation: number;
+  /** Catalogue id, so the Run floor draws the same sprite Builder does. */
+  catalogId: string;
+  /** UNROTATED catalogue extent in world cells (`wsBaseFootprint`), size
+   *  override included. Carried rather than re-derived so a renderer never
+   *  has to reach back into the store for the twin — and so the Run floor
+   *  cannot invent a footprint of its own, which is exactly what it used to
+   *  do (every station was 0.9 x 1.4 whatever machine it was). */
+  w: number;
+  d: number;
+  h: number;
   /** Which sewing line this cell belongs to (when the twin defines lines). */
   lineId?: string;
   /** Workstation display name from Builder. */
@@ -314,12 +325,17 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
       sumY += ws.position.y;
       const bs = ws.operation.bundleSize;
       if (bs && bs > 0) bundleSizeSamples.push(bs);
+      const fp = wsBaseFootprint(ws);
       workstations.push({
         wsId: ws.id,
         opId,
         gx: ws.position.x,
         gy: ws.position.y,
         rotation: ws.rotation ?? 0,
+        catalogId: ws.catalogId,
+        w: fp.w,
+        d: fp.d,
+        h: fp.h,
         lineId: ws.lineId,
         name: ws.name,
       });

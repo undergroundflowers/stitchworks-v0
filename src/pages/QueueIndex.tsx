@@ -15,12 +15,14 @@
 import { useNavigate } from 'react-router-dom';
 import {
   Card,
+  DataTable,
   LineScopePicker,
   LineSimEmpty,
   QueueDiagram,
   SectionHeader,
   WipSparkline,
   Sym,
+  type DataTableColumn,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { type StationView } from '../simulation';
@@ -143,78 +145,91 @@ export function QueueIndexPage({ embedded = false }: QueueIndexPageProps = {}) {
         <StationTable
           stations={state.stations}
           bottleneckIdx={bottleneckIdx}
-          onPick={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId))}
+          onPick={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'queues'))}
         />
       </Card>
 
-      <Card>
-        <SectionHeader
-          title="Queue graphics"
-          sub="Live picture of the line. The sparkline tracks total WIP over time; each strip below is one workstation as a classical M/M/c queue (arrival → bundles waiting → server boxes → departure)."
-        />
-        <div
-          style={{
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            color: SW_COLORS.muted,
-            letterSpacing: '0.6px',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-            marginBottom: 6,
-          }}
-        >
-          Line WIP over time (<Sym quantity="L" />, summed over stations)
-        </div>
-        <WipSparkline history={state.history} />
-        <div
-          style={{
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            color: SW_COLORS.muted,
-            letterSpacing: '0.6px',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-            margin: '18px 0 8px',
-          }}
-        >
-          Per-station queue diagrams
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {state.stations.map((s, i) => (
-            <QueueDiagram
-              key={s.wsId}
-              station={s}
-              isBottleneck={i === bottleneckIdx}
-              onClick={() => navigate(DRILL_PATHS.workstation('sewing', s.wsId))}
-            />
-          ))}
-          {state.stations.length === 0 && (
-            <p style={{ color: SW_COLORS.muted, fontSize: 13 }}>Warming up the simulator…</p>
-          )}
-        </div>
-      </Card>
+      {/* Graphics and instructions are two columns, not two stacked bands.
+          The how-to is read once, beside the thing it describes; stacked, it
+          sat below a variable-length list of station diagrams, so on any real
+          line it was off-screen at the moment it was any use. */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.75fr) minmax(280px, 1fr)',
+          gap: 16,
+          alignItems: 'start',
+        }}
+      >
+        <Card>
+          <SectionHeader
+            title="Queue graphics"
+            sub="Live picture of the line. The chart tracks total WIP over time; each strip below is one workstation as a classical M/M/c queue (arrival → bundles waiting → server boxes → departure)."
+          />
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.6px',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              marginBottom: 6,
+            }}
+          >
+            Line WIP over time (<Sym quantity="L" />, summed over stations)
+          </div>
+          <WipSparkline history={state.history} height={180} />
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.6px',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              margin: '18px 0 8px',
+            }}
+          >
+            Per-station queue diagrams
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {state.stations.map((s, i) => (
+              <QueueDiagram
+                key={s.wsId}
+                station={s}
+                isBottleneck={i === bottleneckIdx}
+                onClick={() => navigate(DRILL_PATHS.workstation('sewing', s.wsId, 'queues'))}
+              />
+            ))}
+            {state.stations.length === 0 && (
+              <p style={{ color: SW_COLORS.muted, fontSize: 13 }}>Warming up the simulator…</p>
+            )}
+          </div>
+        </Card>
 
-      <Card>
-        <SectionHeader title="How to use this view" />
-        <ol style={{ fontSize: 13, lineHeight: 1.7, paddingLeft: 18, margin: 0 }}>
-          <li>
-            <strong>Spot the bottleneck</strong> — the row marked{' '}
-            <Tag color={SW_COLORS.alarm}>BOTTLENECK</Tag> has the highest ρ on the line; it caps the
-            line's throughput. Move operators to it (Resources page) or relax its service-time
-            distribution to drop ρ below 1.
-          </li>
-          <li>
-            <strong>Read WIP per station</strong> — the <code>L</code> column is the
-            steady-state expected number of bundles at the station (queue + in-service). Sum across
-            stations to estimate total line WIP.
-          </li>
-          <li>
-            <strong>Open the inspector</strong> on any station to switch its service-time
-            distribution (M/D/G/Eₖ/Normal), apply a finite buffer (M/M/c/N), or compare simulated
-            ρ/Lq against Naidu's analytical values.
-          </li>
-        </ol>
-      </Card>
+        <Card>
+          <SectionHeader title="How to use this view" />
+          <ol style={{ fontSize: 13, lineHeight: 1.7, paddingLeft: 18, margin: 0 }}>
+            <li>
+              <strong>Spot the bottleneck</strong> — the row marked{' '}
+              <Tag color={SW_COLORS.alarm}>BOTTLENECK</Tag> has the highest ρ on the line; it caps the
+              line's throughput. Move operators to it (Resources page) or relax its service-time
+              distribution to drop ρ below 1.
+            </li>
+            <li>
+              <strong>Read WIP per station</strong> — the <code>L</code> column is the
+              steady-state expected number of bundles at the station (queue + in-service). Sum across
+              stations to estimate total line WIP.
+            </li>
+            <li>
+              <strong>Open the inspector</strong> on any station to switch its service-time
+              distribution (M/D/G/Eₖ/Normal), apply a finite buffer (M/M/c/N), or compare simulated
+              ρ/Lq against Naidu's analytical values.
+            </li>
+          </ol>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -223,6 +238,21 @@ export function QueueIndexPage({ embedded = false }: QueueIndexPageProps = {}) {
 //  Sub-components
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * One row per workstation.
+ *
+ * Ten columns of dense classification and measurement, which is exactly the
+ * case a fixed layout cannot serve: `Operation` needs room for a real op
+ * name, `ρ theory` needs six characters forever. So the widths here are only
+ * a starting point — every rule between headers is draggable, and the choice
+ * is remembered.
+ *
+ * This used to band alternate rows with a hard-coded `#FAF7F0`, a light-theme
+ * cream left behind by the move to the Control Room ground. On near-black
+ * paper that band was a white slab under near-white text: every second row
+ * was unreadable. Rows are separated by a hairline now, and the only row that
+ * carries colour is the one that has earned it — the bottleneck.
+ */
 function StationTable({
   stations,
   bottleneckIdx,
@@ -233,166 +263,136 @@ function StationTable({
   /** Receives a WORKSTATION id — two stations can share an operation. */
   onPick: (wsId: string) => void;
 }) {
-  if (stations.length === 0) {
-    return <p style={{ color: SW_COLORS.muted, fontSize: 13 }}>Warming up the simulator…</p>;
-  }
-  return (
-    <div
-      style={{
-        border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: SW_RADIUS.sm,
-        overflow: 'hidden',
-        marginTop: 12,
-      }}
-    >
-      <Row header>
-        <Col w="40px">#</Col>
-        <Col w="2fr">Operation</Col>
-        <Col w="1.2fr">Classification</Col>
-        {/* Symbols go through <Sym>, which resets the header row's inherited
-            `text-transform: uppercase`. Written as plain text they render as
-            Λ, Ρ and LQ — a different letter and a different quantity. */}
-        <Col w="60px" right>
-          <Sym quantity="servers" />
-        </Col>
-        <Col w="80px" right>
-          <Sym quantity="lambda" /> /hr
-        </Col>
-        <Col w="80px" right>
-          <Sym quantity="rho" /> sim
-        </Col>
-        <Col w="70px" right>
-          <Sym quantity="rho" /> theory
-        </Col>
-        <Col w="70px" right>
-          <Sym quantity="Lq" /> sim
-        </Col>
-        <Col w="70px" right>
-          <Sym quantity="Lq" /> theory
-        </Col>
-        <Col w="100px">Flags</Col>
-        <Col w="100px" />
-      </Row>
-      {stations.map((s, i) => (
-        <Row key={s.wsId} alt={i % 2 === 1} highlight={i === bottleneckIdx}>
-          <Col w="40px" mono>
-            {i + 1}
-          </Col>
-          <Col w="2fr">
-            <strong>{s.opName}</strong>
-            <span style={{ color: SW_COLORS.muted, marginLeft: 6, fontSize: 11 }}>
-              {s.opCode ?? s.opId}
-            </span>
-          </Col>
-          <Col w="1.2fr" mono>
-            {s.notation.label}
-          </Col>
-          <Col w="60px" right mono>
-            {s.serversTotal}
-          </Col>
-          <Col w="80px" right mono>
-            {fmt2(s.lambda)}
-          </Col>
-          <Col w="80px" right mono>
-            <RhoCell value={s.utilization} stable={s.isStable} />
-          </Col>
-          <Col w="70px" right mono>
-            {fmt2(s.analytical.rho)}
-          </Col>
-          <Col w="70px" right mono>
-            {fmt2(s.LqObserved)}
-          </Col>
-          <Col w="70px" right mono>
-            {fmt2(s.analytical.Lq)}
-          </Col>
-          <Col w="100px">
-            {i === bottleneckIdx && <Tag color={SW_COLORS.alarm}>BOTTLENECK</Tag>}
-            {!s.isStable && i !== bottleneckIdx && <Tag color={SW_COLORS.alarm}>UNSTABLE</Tag>}
-            {s.balked > 0 && <Tag color={SW_COLORS.warn}>{s.balked} BALKED</Tag>}
-          </Col>
-          <Col w="100px" right>
-            <button
-              type="button"
-              onClick={() => onPick(s.wsId)}
-              style={analyzeBtn()}
-            >
-              Analyze →
-            </button>
-          </Col>
-        </Row>
-      ))}
-    </div>
-  );
-}
+  // Symbols go through <Sym>, which resets the header's inherited
+  // `text-transform: uppercase`. Written as plain text they render as Λ, Ρ
+  // and LQ — a different letter and a different quantity.
+  const columns: DataTableColumn<StationView>[] = [
+    {
+      key: 'n',
+      header: '#',
+      width: 46,
+      minWidth: 36,
+      align: 'right',
+      numeric: true,
+      cell: (_s, i) => i + 1,
+    },
+    {
+      key: 'operation',
+      header: 'Operation',
+      width: 300,
+      minWidth: 120,
+      cell: (s) => (
+        <span title={`${s.opName} · ${s.opCode ?? s.opId}`}>
+          <strong style={{ fontWeight: 600 }}>{s.opName}</strong>
+          <span style={{ color: SW_COLORS.muted, marginLeft: 6, fontSize: 11 }}>
+            {s.opCode ?? s.opId}
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: 'classification',
+      header: 'Classification',
+      width: 168,
+      minWidth: 90,
+      numeric: true,
+      cell: (s) => <span title={s.notation.label}>{s.notation.label}</span>,
+    },
+    {
+      key: 'servers',
+      header: <Sym quantity="servers" />,
+      width: 62,
+      align: 'right',
+      numeric: true,
+      cell: (s) => s.serversTotal,
+    },
+    {
+      key: 'lambda',
+      header: <><Sym quantity="lambda" /> /hr</>,
+      width: 86,
+      align: 'right',
+      numeric: true,
+      cell: (s) => fmt2(s.lambda),
+    },
+    {
+      key: 'rhoSim',
+      header: <><Sym quantity="rho" /> sim</>,
+      width: 82,
+      align: 'right',
+      numeric: true,
+      cell: (s) => <RhoCell value={s.utilization} stable={s.isStable} />,
+    },
+    {
+      key: 'rhoTheory',
+      header: <><Sym quantity="rho" /> theory</>,
+      width: 82,
+      align: 'right',
+      numeric: true,
+      cell: (s) => fmt2(s.analytical.rho),
+    },
+    {
+      key: 'LqSim',
+      header: <><Sym quantity="Lq" /> sim</>,
+      width: 78,
+      align: 'right',
+      numeric: true,
+      cell: (s) => fmt2(s.LqObserved),
+    },
+    {
+      key: 'LqTheory',
+      header: <><Sym quantity="Lq" /> theory</>,
+      width: 82,
+      align: 'right',
+      numeric: true,
+      cell: (s) => fmt2(s.analytical.Lq),
+    },
+    {
+      key: 'flags',
+      header: 'Flags',
+      width: 150,
+      minWidth: 80,
+      cell: (s, i) => (
+        <>
+          {i === bottleneckIdx && <Tag color={SW_COLORS.alarm}>BOTTLENECK</Tag>}
+          {!s.isStable && i !== bottleneckIdx && <Tag color={SW_COLORS.alarm}>UNSTABLE</Tag>}
+          {s.balked > 0 && <Tag color={SW_COLORS.warn}>{s.balked} BALKED</Tag>}
+        </>
+      ),
+    },
+    {
+      key: 'action',
+      header: '',
+      width: 104,
+      minWidth: 80,
+      // Left-aligned: the table's slack parks in the filler track past this
+      // column, so a right-aligned button would float away from the data it
+      // belongs to.
+      cell: (s) => (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onPick(s.wsId);
+          }}
+          style={analyzeBtn()}
+        >
+          Analyze →
+        </button>
+      ),
+    },
+  ];
 
-function Row({
-  children,
-  header,
-  alt,
-  highlight,
-}: {
-  children: React.ReactNode;
-  header?: boolean;
-  alt?: boolean;
-  highlight?: boolean;
-}) {
-  const bg = header
-    ? SW_COLORS.paperDeep
-    : highlight
-    ? `${SW_COLORS.alarm}10`
-    : alt
-    ? '#FAF7F0'
-    : SW_COLORS.paper;
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns:
-          '40px 2fr 1.2fr 60px 80px 80px 70px 70px 100px 100px',
-        gap: 8,
-        padding: '10px 12px',
-        background: bg,
-        borderBottom: `1px solid ${SW_COLORS.line}`,
-        fontFamily: header ? SW_FONTS.mono : SW_FONTS.body,
-        fontSize: header ? 10 : 13,
-        fontWeight: header ? 700 : 500,
-        textTransform: header ? 'uppercase' : 'none',
-        letterSpacing: header ? '0.5px' : 'normal',
-        color: header ? SW_COLORS.muted : SW_COLORS.ink,
-        alignItems: 'center',
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function Col({
-  children,
-  w,
-  right,
-  mono,
-}: {
-  children?: React.ReactNode;
-  w: string;
-  right?: boolean;
-  mono?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        gridColumn: 'auto',
-        width: undefined,
-        textAlign: right ? 'right' : 'left',
-        fontFamily: mono ? SW_FONTS.mono : undefined,
-        whiteSpace: 'normal',
-        overflowWrap: 'anywhere',
-        minWidth: 0,
-      }}
-      data-w={w}
-    >
-      {children}
-    </div>
+    <DataTable
+      columns={columns}
+      rows={stations}
+      rowKey={(s) => s.wsId}
+      onRowClick={(s) => onPick(s.wsId)}
+      rowStyle={(_s, i) => (i === bottleneckIdx ? { tone: SW_COLORS.alarm } : null)}
+      empty="Warming up the simulator…"
+      storageKey="queueIndex.stationTable.widths"
+      style={{ marginTop: 12 }}
+    />
   );
 }
 

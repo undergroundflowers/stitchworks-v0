@@ -5,7 +5,6 @@
  */
 
 import type { Operation } from './operations';
-import type { ProductionSystem } from './routings';
 
 /** Total SAM (sum of operation SMVs) for a bulletin. */
 export function totalSam(ops: Operation[]): number {
@@ -220,147 +219,17 @@ export function labourRequired(opts: {
   );
 }
 
-/**
- * Crew size required to staff a line under a specific production system.
- * The `labourRequired` formula above is system-agnostic — it answers "how
- * much labour is required to hit this demand" but doesn't reflect that
- * different systems STAFF that labour differently:
+/*
+ * `crewSizeFor` and `systemFeasibilityHint` used to sit here.
  *
- *   • PBS / bundle / straight / synchro / UPS / unit_handle — fixed-station
- *     systems, so the crew must cover every operation even when one
- *     operator could in theory handle two short ops. Floor at opCount.
- *   • modular / clump — multi-skilled rotation cells run lean: a 25-op
- *     T-shirt cell typically runs with 5–8 operators, not 25. We size the
- *     cell at ~40 % of opCount, clamped to a realistic 3–8 operator range.
- *   • make_through — one operator owns the whole garment, so crew is
- *     purely throughput-bound (pcs/hr × SAM/60).
- *
- * Returns a positive integer. Callers should pass realistic attendance /
- * utilisation / BSI margins when computing `demandPerHour` upstream.
+ * Both took a `productionSystem` and switched on it — crew sizing returned a
+ * 3–8 operator cell for modular/clump and a per-operation floor for the rest;
+ * the feasibility hint warned when the order's size and complexity did not
+ * suit the chosen system. Both had had NO CALLERS since the Orders wizard was
+ * deleted, and both were entirely production-system logic, so they went with
+ * the systems rather than being left as two dead exports switching on a type
+ * that no longer exists.
  */
-export function crewSizeFor(opts: {
-  productionSystem: ProductionSystem;
-  sam: number;
-  opCount: number;
-  demandPerHour: number;
-  attendancePct?: number;
-  utilisationPct?: number;
-  bsiPct?: number;
-}): number {
-  const attendancePct = opts.attendancePct ?? 90;
-  const utilisationPct = opts.utilisationPct ?? 80;
-  const bsiPct = opts.bsiPct ?? 95;
-  const basicLabour = labourRequired({
-    sam: opts.sam,
-    demandPerHour: opts.demandPerHour,
-    attendancePct,
-    utilisationPct,
-    bsiPct,
-  });
-  switch (opts.productionSystem) {
-    case 'make_through':
-      // One operator builds the whole garment; total crew = throughput ÷
-      // per-operator output rate. With 8 h shifts this collapses to the
-      // basic labour estimate without the per-station floor.
-      return Math.max(1, Math.ceil(basicLabour));
-    case 'modular':
-    case 'clump': {
-      // Cell-based: 5–8 multi-skilled operators is the literature norm.
-      // 40 % of opCount lands a 25-op bulletin at 10 operators; we clamp
-      // to the realistic 3–8 range so the recommendation is honest about
-      // the cell size constraint.
-      const sized = Math.ceil(opts.opCount * 0.4);
-      return Math.max(3, Math.min(8, sized));
-    }
-    case 'PBS':
-    case 'bundle':
-    case 'straight':
-    case 'synchro':
-    case 'UPS':
-    case 'unit_handle':
-    default:
-      // Fixed-station: must cover every operation. If demand exceeds the
-      // 1:1 ceiling, basic labour wins — that's the multi-shift / parallel
-      // station case.
-      return Math.max(opts.opCount, Math.ceil(basicLabour));
-  }
-}
-
-/**
- * Quick gut-check that the chosen production system fits the order's
- * size and complexity. Returns a short, user-facing warning string when
- * the pairing is off, or `null` when the choice is reasonable.
- *
- * Used by the Orders wizard's recommendation card so the user gets a
- * concrete reason to reconsider before they ship. Not exhaustive — covers
- * the common mismatches (too small for PBS, too complex for modular,
- * too high-volume for make-through).
- */
-export function systemFeasibilityHint(opts: {
-  productionSystem: ProductionSystem;
-  qty: number;
-  days: number;
-  opCount: number;
-}): { severity: 'warn' | 'error'; message: string } | null {
-  const dailyDemand = opts.qty / Math.max(1, opts.days);
-  switch (opts.productionSystem) {
-    case 'make_through':
-      // One operator per garment caps at roughly 60 pcs/day for a typical
-      // 8 min SMV top. Larger orders need a multi-station line.
-      if (dailyDemand > 100) {
-        return {
-          severity: 'warn',
-          message:
-            'Make-Through scales linearly with operators — large orders saturate the labour pool. Consider Modular or PBS for > 100 pcs/day.',
-        };
-      }
-      return null;
-    case 'modular':
-    case 'clump':
-      // Cells max out around 8 ops; 25-op garments either need a giant
-      // (un-rotatable) cell or two cells running in parallel.
-      if (opts.opCount > 12) {
-        return {
-          severity: 'warn',
-          message: `${opts.opCount} ops is large for a rotation cell — operators may not stay cross-trained on every station. Consider splitting into two cells or moving to PBS.`,
-        };
-      }
-      return null;
-    case 'PBS':
-    case 'bundle':
-      // PBS pays a setup cost in bundle ticketing + balancing. For short
-      // runs that overhead never amortises.
-      if (opts.qty < 100) {
-        return {
-          severity: 'warn',
-          message:
-            'PBS has a long setup tail (balancing, bundle tickets, line bring-up). Short runs typically suit Make-Through or Modular better.',
-        };
-      }
-      return null;
-    case 'synchro':
-      if (dailyDemand < 200) {
-        return {
-          severity: 'warn',
-          message:
-            'Synchro / takt lines need stable, high demand to keep the belt loaded. Consider Modular for variable mid-volume runs.',
-        };
-      }
-      return null;
-    case 'UPS':
-    case 'unit_handle':
-      if (opts.qty < 500) {
-        return {
-          severity: 'warn',
-          message:
-            'UPS / overhead-rail capex is hard to justify on small runs. Consider PBS or Modular.',
-        };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
 
 /**
  * Floater pool size = total_operators × absentee% × (avg_BSI / floater_BSI)

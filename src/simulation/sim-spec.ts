@@ -211,15 +211,11 @@ function lineSignature(
     .map((a) => `${a.operatorId}@${a.wsId}:${a.role}:${a.shareFrac ?? ''}:${a.rotationOrder ?? ''}`)
     .sort()
     .join(';');
-  const orders = (twin.orders ?? [])
-    .map((o) => `${o.id}:${o.garmentId}:${o.quantity}`)
-    .sort()
-    .join(';');
   const meta = twin.lines
     .filter((l) => l.id === line.lineId)
-    .map((l) => `${l.id}:${l.productionSystem}:${l.garmentId ?? ''}:${(l.orderSequence ?? []).join(',')}:${JSON.stringify(l.policy ?? null)}`)
+    .map((l) => `${l.id}:${l.garmentId ?? ''}:${JSON.stringify(l.policy ?? null)}`)
     .join(';');
-  return [line.lineId, line.garment?.id ?? '', meta, ws, conns, assigns, orders].join('#');
+  return [line.lineId, line.garment?.id ?? '', meta, ws, conns, assigns].join('#');
 }
 
 /**

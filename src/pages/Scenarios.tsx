@@ -50,8 +50,8 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
   async function handleLoad(s: Scenario) {
     const hasTwin = !!s.config.twin;
     const message = hasTwin
-      ? `Load "${s.name}"? This swaps in the saved factory layout and restores the garment, operators, skill matrix and Yamazumi assignment captured at save time.`
-      : `Load "${s.name}"? This replaces the current factory's garment, operators, skill matrix and Yamazumi assignment. (This scenario was saved before factory snapshots were supported — the floor layout won't change.)`;
+      ? `Load "${s.name}"? This swaps in the saved factory layout and restores the skill matrix captured at save time.`
+      : `Load "${s.name}"? This replaces the current skill matrix. (This scenario was saved before factory snapshots were supported — the floor layout won't change.)`;
     if (!(await confirm({ title: 'Load scenario', message, confirmLabel: 'Load' }))) return;
     project.loadScenario(s.id);
     // Project scenarios saved after the twin-snapshot upgrade carry their
@@ -138,9 +138,11 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
               title="Capture your first scenario"
               body={
                 <>
-                  Open <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, configure the garment / operator count / skill matrix / Yamazumi
-                  assignment you want to evaluate, then click <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong>. The current
-                  KPIs and configuration are stored together so you can compare runs apples-to-apples later.
+                  Build the line you want to evaluate, run it on{' '}
+                  <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, then click{' '}
+                  <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong> on Reports. The floor
+                  layout, the skill matrix and the KPIs of that run are stored together, so a later
+                  change has something to be compared against.
                 </>
               }
               action={{ label: 'Open Simulation →', onClick: () => navigate('/sim') }}
@@ -155,7 +157,6 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
               const garmentName = garment?.name ?? s.config.garmentTemplateId;
               const isSelected = selectedIds.includes(s.id);
               const isRenaming = renamingId === s.id;
-              const overrideCount = s.config.yamazumiOverride?.length ?? 0;
               const skillEntries = Object.values(s.config.skillMatrix ?? {}).reduce((sum, row) => sum + Object.keys(row).length, 0);
               return (
                 <Card key={s.id} padding={0} style={{ overflow: 'hidden', borderColor: isSelected ? SW_COLORS.brand : undefined }}>
@@ -213,14 +214,16 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
                     </div>
 
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
-                      {overrideCount > 0 && (
-                        <Tag soft color={SW_COLORS.brand}>Yamazumi override · {overrideCount}</Tag>
-                      )}
-                      {skillEntries > 0 && (
+                      {/* The "Yamazumi override · N" chip that stood here
+                          counted a per-garment manual assignment the app no
+                          longer authors: a line's balance IS its twin now —
+                          its stations, their operations and their channel
+                          counts — and the twin snapshot below already carries
+                          all of it. */}
+                      {skillEntries > 0 ? (
                         <Tag soft color={SW_COLORS.bobbin}>Skill cells · {skillEntries}</Tag>
-                      )}
-                      {overrideCount === 0 && skillEntries === 0 && (
-                        <Tag soft color={SW_COLORS.muted}>Baseline (auto-assignment)</Tag>
+                      ) : (
+                        <Tag soft color={SW_COLORS.muted}>Baseline (no skill overrides)</Tag>
                       )}
                     </div>
 

@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Chevron, Tag, Logo, useConfirm } from '../components';
+import { Card, Button, Chevron, Tag, Logo, Icon, useConfirm } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import {
   useProject,
   useFactoryLibrary,
   archiveAndStartFresh,
+  archiveAndImportSwproj,
   isFactoryNameTaken,
+  pickProjectFile,
   FACTORY_LIBRARY_MAX,
 } from '../store';
 import { getFlag, setFlag } from '../lib/safeStorage';
@@ -75,6 +77,37 @@ export function MenuPage() {
     setNewFactoryName(seed);
     setNewFactoryOpen(true);
   };
+  // Import result banner — the file picker gives no feedback of its own, and
+  // an import that silently swapped the whole app's state would read as a bug.
+  const [importMsg, setImportMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const handleImportFactory = async () => {
+    setImportMsg(null);
+    let raw: unknown;
+    try {
+      raw = await pickProjectFile();
+    } catch {
+      // Cancelled picker / unreadable file. Nothing was touched, so say
+      // nothing — the user is still looking at the menu they started on.
+      return;
+    }
+    try {
+      const result = archiveAndImportSwproj(raw);
+      if (!result.ok) {
+        setImportMsg({ kind: 'err', text: result.reason ?? 'Import failed.' });
+        return;
+      }
+      setImportMsg({
+        kind: 'ok',
+        text: result.legacy
+          ? `Imported "${result.name}" — legacy file, no factory layout inside it.`
+          : `Imported "${result.name}". "${result.archivedAs}" moved to the library.`,
+      });
+      navigate('/line');
+    } catch (e) {
+      setImportMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   const confirmNewFactory = () => {
     const name = newFactoryName.trim();
     if (!name) return;
@@ -112,14 +145,23 @@ export function MenuPage() {
         radial-gradient(circle at 80% 80%, #4F7CFF18 0%, transparent 50%),
         ${SW_COLORS.paper}
       `,
-      display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)',
       overflow: 'auto',
     }}>
-      {/* Hero + quick actions + the factory library */}
-      {/* Capped so the library rows keep a readable measure — a factory row
-          stretched across a 1440px display puts its name and its station count
-          at opposite ends of the screen. */}
-      <div style={{ padding: '64px 56px', maxWidth: 940, display: 'flex', flexDirection: 'column', gap: 28 }}>
+      {/* Two columns: the pitch on the left, your factories on the right.
+          `auto-fit` + a 400px floor collapses this to a single stacked column
+          on narrow viewports without a media query — the library lands under
+          the hero rather than squeezing beside it. */}
+      <div style={{
+        padding: '64px 56px',
+        maxWidth: 1440,
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+        alignItems: 'start',
+        columnGap: 48,
+        rowGap: 28,
+      }}>
+      {/* Hero + the single create action */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
         <Logo size={32}/>
 
         <div>
@@ -139,78 +181,115 @@ export function MenuPage() {
         </div>
 
         {/* NEW — the single "create" action. Your saved factories live in the
-            FACTORY LIBRARY list below, so the menu reads like any file-based
-            app: one NEW button + an Open/Recents list. */}
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={openNewFactoryDialog}
-            icon="+"
-          >
-            CREATE NEW FACTORY
-          </Button>
-        </div>
-
-        {/* FACTORY LIBRARY — the one place you open things from. Reads like a
-            file app's Open / Recents panel: the active factory first, then your
-            saved factories (pinned float to the top, the rest newest-first). */}
-        <div style={{ marginTop: 8 }}>
-          <button
-            type="button"
-            onClick={toggleLibrary}
-            aria-expanded={libraryOpen}
-            aria-controls="factory-library-list"
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              width: '100%', marginBottom: 8, gap: 12, flexWrap: 'wrap',
-              background: 'transparent', border: 'none', padding: '2px 0',
-              cursor: 'pointer', textAlign: 'left',
-            }}
-          >
-            <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted }}>
-              FACTORY LIBRARY · {savedCount} / {FACTORY_LIBRARY_MAX} SAVED
-            </span>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...SW_TYPE.kicker, fontWeight: 600, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
-              STORED ON THIS DEVICE
-              <Chevron open={libraryOpen} />
-            </span>
-          </button>
-          {libraryOpen && (
-          <div id="factory-library-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {/* ACTIVE — your current factory */}
-            <LibraryCard
-              icon="◆"
-              title={factoryName || 'Untitled Factory'}
-              caption={`${activeStationCount} STATIONS`}
-              tag="ACTIVE"
-              tagColor={SW_COLORS.ok}
-              scenarioCount={activeScenarioCount}
-              onClick={() => navigate('/line')}
-              onOpenScenarios={handleOpenScenariosForActive}
-            />
-
-            {/* RECENTS + PINNED — your saved factories. Pinned float to the
-                top (sortedSaved); the rest follow newest-first. */}
-            {sortedSaved.map((slot) => (
-              <LibraryCard
-                key={slot.id}
-                icon="▤"
-                title={slot.name}
-                caption={`${slot.stationCount} STATIONS · ${fmtSavedAt(slot.savedAt)}`}
-                tag={slot.pinned ? 'PINNED' : 'SAVED'}
-                tagColor={slot.pinned ? SW_COLORS.thread : SW_COLORS.muted}
-                pinned={slot.pinned}
-                scenarioCount={slot.project.scenarios?.length ?? 0}
-                onClick={() => handleLoadSaved(slot.id)}
-                onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
-                onTogglePin={() => togglePin(slot.id)}
-                onDelete={() => handleDeleteSaved(slot.id, slot.name)}
-              />
-            ))}
+            FACTORY LIBRARY column beside this one, so the menu reads like any
+            file-based app: one NEW button + an Open/Recents list. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <Button
+              variant="primary"
+              size="lg"
+              onClick={openNewFactoryDialog}
+              icon="+"
+            >
+              CREATE NEW FACTORY
+            </Button>
+            {/* The other way into the library: a factory that lives in a file
+                rather than in this browser. Sits beside CREATE because those
+                are the only two ways to get a factory you don't already have
+                — everything else on this screen opens one you do. */}
+            <Button
+              variant="secondary"
+              size="lg"
+              onClick={handleImportFactory}
+              icon={<Icon name="import" size={16} />}
+            >
+              IMPORT FACTORY
+            </Button>
           </div>
+          {importMsg && (
+            <div
+              role="status"
+              style={{
+                padding: '8px 12px',
+                borderRadius: SW_RADIUS.sm,
+                background: importMsg.kind === 'ok' ? `${SW_COLORS.ok}20` : `${SW_COLORS.alarm}20`,
+                color: importMsg.kind === 'ok' ? SW_COLORS.ok : SW_COLORS.alarm,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                lineHeight: 1.45,
+              }}
+            >
+              {importMsg.text}
+            </div>
           )}
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.45 }}>
+            Import reads a <code>.swproj</code> file — the whole factory, its
+            scenarios and its settings. Export one from the SETTINGS page.
+          </div>
         </div>
+
+      </div>
+
+      {/* FACTORY LIBRARY — the one place you open things from. Reads like a
+          file app's Open / Recents panel: the active factory first, then your
+          saved factories (pinned float to the top, the rest newest-first). */}
+      <div style={{ minWidth: 0 }}>
+        <button
+          type="button"
+          onClick={toggleLibrary}
+          aria-expanded={libraryOpen}
+          aria-controls="factory-library-list"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            width: '100%', marginBottom: 8, gap: 12, flexWrap: 'wrap',
+            background: 'transparent', border: 'none', padding: '2px 0',
+            cursor: 'pointer', textAlign: 'left',
+          }}
+        >
+          <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted }}>
+            FACTORY LIBRARY · {savedCount} / {FACTORY_LIBRARY_MAX} SAVED
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...SW_TYPE.kicker, fontWeight: 600, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
+            STORED ON THIS DEVICE
+            <Chevron open={libraryOpen} />
+          </span>
+        </button>
+        {libraryOpen && (
+        <div id="factory-library-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* ACTIVE — your current factory */}
+          <LibraryCard
+            icon="◆"
+            title={factoryName || 'Untitled Factory'}
+            caption={`${activeStationCount} STATIONS`}
+            tag="ACTIVE"
+            tagColor={SW_COLORS.ok}
+            scenarioCount={activeScenarioCount}
+            onClick={() => navigate('/line')}
+            onOpenScenarios={handleOpenScenariosForActive}
+          />
+
+          {/* RECENTS + PINNED — your saved factories. Pinned float to the
+              top (sortedSaved); the rest follow newest-first. */}
+          {sortedSaved.map((slot) => (
+            <LibraryCard
+              key={slot.id}
+              icon="▤"
+              title={slot.name}
+              caption={`${slot.stationCount} STATIONS · ${fmtSavedAt(slot.savedAt)}`}
+              tag={slot.pinned ? 'PINNED' : 'SAVED'}
+              tagColor={slot.pinned ? SW_COLORS.thread : SW_COLORS.muted}
+              pinned={slot.pinned}
+              scenarioCount={slot.project.scenarios?.length ?? 0}
+              onClick={() => handleLoadSaved(slot.id)}
+              onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
+              onTogglePin={() => togglePin(slot.id)}
+              onDelete={() => handleDeleteSaved(slot.id, slot.name)}
+            />
+          ))}
+        </div>
+        )}
+      </div>
 
       </div>
 
@@ -250,7 +329,10 @@ export function MenuPage() {
  * Rows, not tiles. A library is a list you scan down — wrapping cards made
  * every factory look like a separate destination and put the name, the station
  * count and the scenario button on three different lines each. In a row they
- * line up into columns you can read across.
+ * line up into columns you can read across: tag, then name over its station
+ * count, then the scenario button and the row controls pinned to the right.
+ * The name/caption stack keeps the row legible in the menu's right-hand
+ * column, which is roughly half the width the list used to have.
  */
 interface LibraryCardProps {
   icon: string;
@@ -303,12 +385,13 @@ function LibraryCard({
         <Tag soft color={tagColor}>{tag}</Tag>
       </span>
 
-      <div style={{ ...SW_TYPE.heading, fontWeight: 800, color: SW_COLORS.ink, flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {title}
-      </div>
-
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>
-        {caption}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ ...SW_TYPE.heading, fontWeight: 800, color: SW_COLORS.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {title}
+        </div>
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {caption}
+        </div>
       </div>
 
       <button
@@ -472,11 +555,14 @@ function NewFactoryModal({
                 if (e.key === 'Escape') onCancel();
               }}
               aria-invalid={duplicate || undefined}
+              // A well, not a sheet of paper: `ink` is the near-white
+              // foreground of the dark theme, so the white ground this used to
+              // carry put it at about 1.1:1 against its own text.
               style={{
                 padding: '8px 10px',
                 border: `1px solid ${duplicate ? SW_COLORS.alarm : SW_COLORS.line}`,
                 borderRadius: SW_RADIUS.sm,
-                background: '#fff',
+                background: SW_COLORS.paperDeep,
                 fontFamily: SW_FONTS.body,
                 fontSize: 13,
                 color: SW_COLORS.ink,

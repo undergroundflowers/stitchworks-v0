@@ -1,6 +1,8 @@
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { glyphFamilyOf, glyphMark, type GlyphFamily } from '../domain/machine-glyphs';
+import { stationArtNode } from '../domain/iso';
+import type { StationArt } from '../domain/station-art';
 import type { MachineCode } from '../domain/machines';
 
 interface StationGlyphProps {
@@ -13,6 +15,9 @@ interface StationGlyphProps {
   family?: GlyphFamily;
   /** Free-text code drawn under the mark. Use with `family`; `code` wins. */
   markCode?: string;
+  /** Uploaded plan artwork. Drawn inside the footprint in place of the mark,
+   *  fitted to the box above the code line. Wins over `family` / `code`. */
+  art?: StationArt;
   /** Non-machine fixture (rack, trolley, buffer): label only, no mark. */
   label?: string;
   /** Box to fill, in the parent's user space. Drawn from (0,0). */
@@ -38,6 +43,7 @@ export function StationGlyph({
   code,
   family,
   markCode,
+  art,
   label,
   width,
   height,
@@ -53,16 +59,18 @@ export function StationGlyph({
   const showCode = height >= 22 && min >= 14;
   const showMark = min >= 14;
 
-  const hasMark = showMark && !!markFamily;
+  const hasArt = showMark && !!art;
+  const hasMark = showMark && !hasArt && !!markFamily;
   // The mark spans half the station's short side — big enough to read at a
   // glance on a 30-station floor, small enough to leave the footprint legible.
   const s = min * 0.5;
   const cx = width / 2;
   const cy = showCode ? height * 0.42 : height / 2;
   const fontSize = Math.max(7, Math.min(10, height * 0.2));
-  // With a mark above it the code sits on the floor of the box; alone (a rack,
-  // a trolley — anything with no mechanism to draw) it centres instead.
-  const textY = hasMark ? height - 5 : height / 2 + fontSize / 3;
+  // With a mark or artwork above it the code sits on the floor of the box;
+  // alone (a rack, a trolley — anything with no mechanism to draw) it
+  // centres instead.
+  const textY = hasMark || hasArt ? height - 5 : height / 2 + fontSize / 3;
 
   return (
     <g>
@@ -79,6 +87,15 @@ export function StationGlyph({
       />
 
       <g>
+        {hasArt &&
+          stationArtNode(
+            art,
+            // Inset off the footprint edge, and clear of the code line when
+            // one is drawn, so uploaded art never collides with the label.
+            { x: 3, y: 3, w: Math.max(0, width - 6), h: Math.max(0, height - (showCode ? 16 : 6)) },
+            { color: SW_COLORS.muted },
+          )}
+
         {hasMark && glyphMark(markFamily, cx, cy, s, SW_COLORS.muted)}
 
         {showCode && (text || label) && (

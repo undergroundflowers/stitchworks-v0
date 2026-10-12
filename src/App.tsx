@@ -5,12 +5,12 @@ import { SW_COLORS, SW_FONTS } from './design/tokens';
 import { ErrorBoundary, useToast } from './components';
 import { QUOTA_EVENT, type QuotaEventDetail } from './store/persist-storage';
 import { useStoresHydrated } from './store/storage/useHydrated';
+import { useBackspaceGuard } from './lib/use-backspace-guard';
 
 import { useProject } from './store/project';
 import { SimSessionDriver } from './simulation/SimSessionDriver';
 
 import { MenuPage } from './pages/Menu';
-import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
 import { ResourcesPage } from './pages/Resources';
 import { SettingsPage } from './pages/Settings';
@@ -27,6 +27,11 @@ export default function App() {
   const location = useLocation();
   const toast = useToast();
   const hydrated = useStoresHydrated();
+
+  // A bare Backspace outside a text field still means "go back" in Safari and
+  // in most embedded webviews, which threw the user out of whatever surface
+  // they were on and back to the home menu. Cancel that default app-wide.
+  useBackspaceGuard();
 
   // NOTE: there is deliberately no auto-seed here.
   //
@@ -116,18 +121,16 @@ export default function App() {
         <Routes>
           <Route path="/" element={<MenuPage />} />
 
-          {/* The four surfaces. */}
+          {/* The rail's surfaces. Resources holds the operator roster, the
+              machine catalog, the garment operation libraries and the skill
+              matrix — everything the other four draw from. */}
+          <Route path="/resources" element={<ResourcesPage />} />
           <Route path="/line" element={<BuilderPage />} />
           <Route path="/sim" element={<LiveSimPage />} />
           <Route path="/insights" element={<InsightsPage />} />
           <Route path="/lab" element={<QueueLabPage />} />
           <Route path="/settings" element={<SettingsPage />} />
 
-          {/* Secondary surfaces — reachable from BUILD and from deep links, but
-              not top-level destinations. Orders authors demand; Resources holds
-              the operation bulletin and the skill matrix. */}
-          <Route path="/orders" element={<OrdersPage />} />
-          <Route path="/resources" element={<ResourcesPage />} />
           {/* One station's queueing detail, drilled into from INSIGHTS. */}
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
 
@@ -143,6 +146,7 @@ export default function App() {
           <Route path="/queues" element={<Navigate to="/insights" replace />} />
           <Route path="/queues/analytics" element={<Navigate to="/insights" replace />} />
           <Route path="/scenarios" element={<Navigate to="/insights" replace />} />
+          <Route path="/orders" element={<Navigate to="/resources?tab=operations" replace />} />
           <Route path="/floor" element={<Navigate to="/" replace />} />
           <Route path="/reference" element={<Navigate to="/" replace />} />
           <Route path="/pilot" element={<Navigate to="/" replace />} />

@@ -63,6 +63,17 @@ export function snapProcess(v: number): number {
  *  readable grid instead of an endless horizontal strip. */
 export const PROCESS_ROW_MAX = 16;
 
+/**
+ * How far a copy lands from its original on the PROCESS canvas, in world px.
+ *
+ * The counterpart to the floor's +1 / +1 cell nudge. Duplicate and paste both
+ * carry the source's `block` across — including its `processPos` — so without
+ * this the copy sits exactly on top of the original and the canvas looks like
+ * nothing happened. One grid cell (FLAT_CELL, and a multiple of PROCESS_SNAP)
+ * so the copy stays on the lattice.
+ */
+export const PROCESS_CLONE_OFFSET = 40;
+
 const COL_W = PROCESS_BLOCK_W + PROCESS_GAP_X;
 const ROW_H = PROCESS_BLOCK_H + PROCESS_ROW_GAP;
 
@@ -230,6 +241,94 @@ export function resolveProcessPositions(twin: Twin): Map<string, { x: number; y:
   return out;
 }
 
+/**
+ * How far a port dot sits OUTSIDE the block face, in world px.
+ *
+ * Ports used to sit ON the edge (x = 0 and x = w), where three things fought
+ * for the same pixels: the coloured face, the selection ring at -4 / +4, and
+ * the dot itself with its 5px radius. The ring cut straight through every
+ * port. Standing the ports off the face gives each one clear air on both
+ * sides: `PROCESS_PORT_OUTER_R` below is the widest a port ever draws, and
+ * this gap is set so even that state clears the ring's outer edge.
+ */
+export const PROCESS_PORT_GAP = 18;
+
+/** Visible radius of a port dot at rest. */
+export const PROCESS_PORT_R = 5;
+
+/** Radius of the paper disc drawn behind each dot. It knocks a hole in
+ *  whatever passes underneath — a wire, the selection ring — so the port
+ *  always reads as a distinct node rather than a bump on another line. And it
+ *  is where a wire stops: trimming to this radius is what makes an arrow
+ *  arrive AT the port instead of on top of it. */
+export const PROCESS_PORT_HALO = 8;
+
+/** Minimum vertical pitch between two ports in the same column. Five outputs
+ *  spread across a 56px face land 9.3px apart, which is less than one dot is
+ *  wide — SelectOutput5's ports overlapped each other before this. */
+export const PROCESS_PORT_PITCH = 13;
+
+/** Centre-offset of port `index` of `count`, measured from the block's top
+ *  edge. Ports stay centred on the face and spread evenly; when the face is
+ *  too short to hold them at a legible pitch the column grows symmetrically
+ *  instead of packing tighter. */
+export function portOffsetY(index: number, count: number, h: number): number {
+  const span = Math.max(h, (count + 1) * PROCESS_PORT_PITCH);
+  const pitch = span / (count + 1);
+  return h / 2 - span / 2 + pitch * (index + 1);
+}
+
+/**
+ * The selection / bottleneck ring around a block face: inset on every side,
+ * and its stroke width. Exported because "does a port dot clear the ring" is
+ * an invariant the two have to agree on, and it is the exact thing that was
+ * wrong before — the ring ran straight through every port.
+ */
+export const PROCESS_RING_INSET = 4;
+export const PROCESS_RING_STROKE = 3;
+
+/** Outermost radius a port ever draws. Not the dot — the widest of the four
+ *  states it can be in, which is the dashed "wiring starts here" ring around a
+ *  picked OUTPUT port (r 9.5, 1.5 stroke). The hovered INPUT dot with its halo
+ *  (6.5 + 1.25 + 1.5) is the runner-up. */
+export const PROCESS_PORT_OUTER_R = Math.max(6.5 + 2.5 / 2 + 1.5, 9.5 + 1.5 / 2);
+
+/** How far a port dot and its halo reach past the block face on each side.
+ *  Derived rather than typed in, because fit-to-content has to frame the ports
+ *  and a hand-copied number here is a number that goes stale the first time
+ *  the dots are resized. */
+export const PROCESS_PORT_OVERHANG = Math.ceil(PROCESS_PORT_GAP + PROCESS_PORT_OUTER_R);
+
+/**
+ * The wire between two port anchors, trimmed to the ports' haloes.
+ *
+ * Two things were wrong with the old path. It ran centre-to-centre, so it
+ * started *inside* the source dot and the arrowhead landed *on* the target
+ * dot — the reason a connector never looked like it touched either node.
+ * And its control offset was `max(28, dx / 2)` for both ends, which for a
+ * target behind the source put the second control point to the LEFT of the
+ * first and folded the curve back through itself.
+ *
+ * Now: trim `PROCESS_PORT_HALO` off each end so the line begins at the rim of
+ * the output dot and the arrow tip touches the rim of the input dot, and scale
+ * the control offset with the run — tight for short hops, a wide loop out and
+ * back when the flow runs right-to-left.
+ */
+export function processWirePath(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): string {
+  const ax = a.x + PROCESS_PORT_HALO;
+  const bx = b.x - PROCESS_PORT_HALO;
+  const dx = bx - ax;
+  const dy = Math.abs(b.y - a.y);
+  const c =
+    dx >= 0
+      ? Math.min(Math.max(dx * 0.45, 18), 140)
+      : Math.min(Math.max(-dx * 0.35 + dy * 0.25 + 44, 60), 200);
+  return `M ${ax} ${a.y} C ${ax + c} ${a.y}, ${bx - c} ${b.y}, ${bx} ${b.y}`;
+}
+
 /** Bounding box of every block on the process canvas, in SVG px. Null when the
  *  twin has no blocks — the caller decides what to frame instead. */
 export function processContentBounds(
@@ -239,11 +338,50 @@ export function processContentBounds(
   if (pos.size === 0) return null;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pos.values()) {
-    minX = Math.min(minX, p.x);
+    minX = Math.min(minX, p.x - PROCESS_PORT_OVERHANG);
     minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x + PROCESS_BLOCK_W);
+    maxX = Math.max(maxX, p.x + PROCESS_BLOCK_W + PROCESS_PORT_OVERHANG);
     // Blocks carry a name label beneath the symbol; leave room for it.
     maxY = Math.max(maxY, p.y + PROCESS_BLOCK_H + 22);
   }
   return { minX, minY, maxX, maxY };
+}
+
+/**
+ * Stamp the CURRENT resolved position onto every block that is still riding
+ * the seed, and return the twin.
+ *
+ * The seed is a function of the whole twin — line membership, floor x, the
+ * connector graph, how many blocks there are. So every structural edit
+ * re-derives it, and every block that had never been hand-placed teleported to
+ * a new slot. Dropping a Source next to an existing Service moved the Service;
+ * wiring two blocks together shuffled the lane. Nothing the user had authored
+ * was wrong — the layout just was not theirs yet.
+ *
+ * Freezing the seed *before* a mutation lands turns "where this block happens
+ * to compute today" into "where this block is", so the only things that ever
+ * move a block are a drag, the Inspector's x / y, and Auto-arrange — which
+ * overwrites these same values on purpose.
+ *
+ * Returns the SAME twin object when every block is already pinned, so the
+ * store's identity checks and React's memo comparisons stay cheap: after the
+ * first structural edit this is a map lookup per workstation and nothing else.
+ */
+export function freezeProcessSeed(twin: Twin): Twin {
+  const unpinned = twin.workstations.filter((w) => !w.block?.processPos);
+  if (unpinned.length === 0) return twin;
+
+  const seed = computeProcessSeedPositions(twin);
+  return {
+    ...twin,
+    workstations: twin.workstations.map((w) => {
+      if (w.block?.processPos) return w;
+      const p = seed.get(w.id) ?? { x: PROCESS_PAD_X, y: PROCESS_PAD_TOP };
+      // `processPos` lives on the block override, so materialise one — pinning
+      // the catalog-inferred kind exactly as `setProcessPositions` does, which
+      // is a no-op for the simulation.
+      const kind = w.block?.kind ?? getBlockSpec(w).kind;
+      return { ...w, block: { ...(w.block ?? { kind }), processPos: { x: p.x, y: p.y } } };
+    }),
+  };
 }

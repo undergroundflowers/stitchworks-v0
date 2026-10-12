@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { buildSwproj, parseSwproj, applySwproj } from './swproj';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { buildSwproj, parseSwproj, applySwproj, archiveAndImportSwproj } from './swproj';
+import { useFactoryLibrary } from './factoryLibrary';
 import { useProject } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import { buildStarterLine } from '../domain/starter-line';
@@ -114,5 +115,77 @@ describe('.swproj format', () => {
     const result = applySwproj(parseSwproj(JSON.parse(JSON.stringify(env))));
     expect(result.ok).toBe(true);
     expect(useTwin.getState().canonical.workstations.length).toBe(demo.workstations.length);
+  });
+});
+
+/**
+ * The Menu's import is a different gesture from Settings' import: Settings
+ * restores OVER the open factory, the Menu opens the file AS a factory and
+ * puts the one you were on into the library. These lock in the part that
+ * makes that safe — the archive happens first, and a file that parses but
+ * won't load leaves the app exactly where it was.
+ */
+describe('archiveAndImportSwproj (Menu import)', () => {
+  function envelopeNamed(name: string) {
+    const project = { ...useProject.getState().exportProject(), meta: { ...useProject.getState().meta, name } };
+    const env = buildSwproj(
+      project,
+      {
+        schemaVersion: TWIN_STORE_SCHEMA_VERSION,
+        canonical: buildStarterLine(name),
+        scenarios: [],
+        activeScenarioId: null,
+      },
+      '2026-01-01T00:00:00.000Z',
+    );
+    return JSON.parse(JSON.stringify(env));
+  }
+
+  beforeEach(() => {
+    useFactoryLibrary.setState({ savedFactories: [] });
+    useProject.getState().rename('Open Factory');
+    useTwin.getState().renameActive('Open Factory');
+  });
+
+  it('opens the file as the active factory and archives the previous one', () => {
+    const result = archiveAndImportSwproj(envelopeNamed('Imported Line'));
+
+    expect(result.ok).toBe(true);
+    expect(result.name).toBe('Imported Line');
+    expect(result.archivedAs).toBe('Open Factory');
+    expect(useProject.getState().meta.name).toBe('Imported Line');
+    expect(useTwin.getState().canonical.name).toBe('Imported Line');
+    expect(useFactoryLibrary.getState().savedFactories.map((f) => f.name)).toEqual(['Open Factory']);
+  });
+
+  it('suffixes a name that collides with a factory already in the library', () => {
+    archiveAndImportSwproj(envelopeNamed('Brandix'));
+    const second = archiveAndImportSwproj(envelopeNamed('Brandix'));
+
+    expect(second.ok).toBe(true);
+    expect(second.name).toBe('Brandix (2)');
+    expect(useFactoryLibrary.getState().savedFactories.map((f) => f.name)).toEqual([
+      'Brandix',
+      'Open Factory',
+    ]);
+  });
+
+  it('rolls back to the open factory when the payload will not load', () => {
+    const env = envelopeNamed('Broken');
+    // A workstation pointing at a line that isn't in the twin — parses fine,
+    // fails validateTwin.
+    env.data.twin.canonical.workstations[0].lineId = 'line-that-does-not-exist';
+
+    const result = archiveAndImportSwproj(env);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Factory layout invalid/);
+    expect(useProject.getState().meta.name).toBe('Open Factory');
+    expect(useFactoryLibrary.getState().savedFactories).toHaveLength(0);
+  });
+
+  it('throws on a file that is not a project at all', () => {
+    expect(() => archiveAndImportSwproj({ hello: 'world' })).toThrow(/Unrecognised/);
+    expect(useProject.getState().meta.name).toBe('Open Factory');
   });
 });

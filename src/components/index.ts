@@ -10,8 +10,11 @@ export { Logo } from './Logo';
 export { Progress } from './Progress';
 export { ToggleGroup } from './ToggleGroup';
 export { HudSelect, type HudSelectOption, type HudSelectProps } from './HudSelect';
+export { NewGarmentTemplateDialog, type NewGarmentTemplateDialogProps } from './NewGarmentTemplateDialog';
 export { Slider } from './Slider';
-export { Yamazumi, autoAssign, type OperatorAssignment } from './Yamazumi';
+export { NumberInput, type NumberInputProps } from './NumberInput';
+export { Yamazumi, type YamazumiProps } from './Yamazumi';
+export { LineBalancePanel } from './LineBalancePanel';
 export { LineScopePicker, type LineScopePickerProps } from './LineScopePicker';
 export {
   SimTransportDock,
@@ -28,14 +31,14 @@ export {
   type StationTimeseriesGridProps,
   type StationMetric,
 } from './StationTimeseriesChart';
-export { TimeChip, TimeDisplay, type TimeKind } from './TimeDisplay';
 export { StageOverlay } from './StageOverlay';
 export { StationGlyph } from './StationGlyph';
 export { BlockParamRow } from './queueParamFields';
 export { StationTypeDialog, type StationTypeDialogProps } from './StationTypeDialog';
 export { ZoomHud } from './ZoomHud';
-export { CanvasLegend } from './CanvasLegend';
+export { CanvasLegend, LegendRow } from './CanvasLegend';
 export { CanvasGrid } from './CanvasGrid';
+export { DataTable, type DataTableColumn, type DataTableProps, type DataTableRowStyle } from './DataTable';
 export { PmlBlockFace, PML_FACE_SIZE, type PmlBlockFaceProps } from './PmlBlockFace';
 export { ViewSwitch } from './ViewSwitch';
 export { useCanvasCamera, type CanvasCameraApi } from './useCanvasCamera';
@@ -54,7 +57,16 @@ export {
 } from './Toast';
 export { ErrorBoundary } from './ErrorBoundary';
 export { Icon, type IconName, type IconProps } from './Icon';
+export { HelpDot } from './HelpDot';
+export { DistPicker, DistShape } from './DistPicker';
 export { Chevron, Caret } from './Chevron';
 export { Sym, FieldLabel, type SymProps, type FieldLabelProps } from './Sym';
 export { MetricLabel } from './Sym';
 export { QueueingReference } from './QueueingReference';
+export {
+  CollapsedRail,
+  PaneCollapseButton,
+  RAIL_W,
+  type CollapsedRailProps,
+  type PaneCollapseButtonProps,
+} from './PaneRail';

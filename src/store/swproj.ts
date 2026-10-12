@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import { useProject, PROJECT_SCHEMA_VERSION, type ProjectState } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
+import { useFactoryLibrary, uniquifyFactoryName } from './factoryLibrary';
 import { normalizeTwin, validateTwin, type Twin, type Scenario } from '../domain/twin';
 
 export const SWPROJ_FORMAT = 'stitchworks-project';
@@ -219,4 +220,51 @@ export function applySwproj(parsed: ParsedSwproj): ApplySwprojResult {
   }
 
   return { ok: true, legacy: parsed.legacy };
+}
+
+/** Outcome of the Menu's "import factory" flow. */
+export interface ImportFactoryResult {
+  ok: boolean;
+  /** Name the imported factory ended up under (suffixed on collision). */
+  name?: string;
+  /** Name the previously-open factory was archived as. */
+  archivedAs?: string;
+  reason?: string;
+  legacy: boolean;
+}
+
+/**
+ * Import a `.swproj` as a NEW factory rather than over the open one.
+ *
+ * Settings' import is an in-place restore: it overwrites the active project +
+ * twin, which is the right thing when you are recovering a backup of the
+ * factory you already have open. The Menu is a library — opening a file there
+ * should behave like `archiveAndStartFresh`, i.e. the factory you were on goes
+ * to the FACTORY LIBRARY and the file becomes the active factory. Same
+ * guarantee the create-new flow gives: nothing you had open is lost.
+ *
+ * Throws (via `parseSwproj`) on a file that isn't a project at all; returns
+ * `ok: false` with a reason when the file parses but its payload won't load.
+ * In that second case the snapshot taken up front is rolled straight back, so
+ * a bad file leaves the app exactly where it was.
+ */
+export function archiveAndImportSwproj(raw: unknown): ImportFactoryResult {
+  const parsed = parseSwproj(raw);
+  const archived = useFactoryLibrary.getState().archiveCurrent();
+  const result = applySwproj(parsed);
+  if (!result.ok) {
+    // `loadFactory` drops the slot it restores from, so the rollback leaves
+    // the library at the size it started at.
+    useFactoryLibrary.getState().loadFactory(archived.id, { archiveFirst: false });
+    return { ok: false, reason: result.reason, legacy: parsed.legacy };
+  }
+  // The file carries its own name, and the commonest import is re-opening a
+  // factory you also have archived — so suffix rather than reject. The active
+  // factory IS the import at this point, which is why it is excluded from the
+  // collision check.
+  const incoming = useProject.getState().meta.name?.trim();
+  const name = uniquifyFactoryName(incoming || 'Imported Factory', { includeActive: false });
+  useProject.getState().rename(name);
+  useTwin.getState().renameActive(name);
+  return { ok: true, name, archivedAs: archived.name, legacy: parsed.legacy };
 }

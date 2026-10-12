@@ -22,6 +22,7 @@ import {
   useMemo,
   useRef,
   useCallback,
+  useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
 } from 'react';
@@ -31,13 +32,16 @@ import { alpha, contrastInk } from '../design/color-utils';
 import {
   Caret,
   Chevron,
+  DistPicker,
   HudSelect,
   Icon,
+  HelpDot,
   StationGlyph,
   BlockParamRow,
   StationTypeDialog,
   CanvasGrid,
   CanvasLegend,
+  LegendRow,
   PmlBlockFace,
   ViewSwitch,
   Sym,
@@ -45,6 +49,10 @@ import {
   ZoomHud,
   useCanvasCamera,
   useConfirm,
+  NumberInput,
+  CollapsedRail,
+  PaneCollapseButton,
+  RAIL_W,
 } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
 import { ServiceQueueParams } from '../components/ServiceQueueParams';
@@ -59,11 +67,12 @@ import {
   FLAT_PROJECTION,
   lerpProjection,
   FLAT_CELL,
-  ISO_FIXTURE_TO_MACHINE_CODE,
   CAM_IDENTITY,
   fitBounds,
   visibleCellRange,
+  fixtureForWorkstation,
   lookupFixture,
+  stationBlockIcon,
   resolveBlockKindForDrop,
   stationMark,
   stationTypeFor,
@@ -85,12 +94,20 @@ import type {
   SewingLine,
   LinePolicy,
 } from '../domain/twin';
-import { defaultPolicyFor, lineSystemBadge, shareDebtForLine, validateTwinWarnings } from '../domain/twin';
+import {
+  DEFAULT_LINE_POLICY,
+  lineSystemBadge,
+  shareDebtForLine,
+  validateTwinWarnings,
+  // The floor extent of a workstation. Shared with LiveSim so a machine
+  // covers the same cells on the Run floor as on the Build floor.
+  wsBaseFootprint,
+  wsFootprint,
+} from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
   apparelRoleFor,
-  inferBlockKindFromCatalog,
   pmlFixtureId,
   PML_BLOCK_LIBRARY,
   PARAM_FIELDS_BY_KIND,
@@ -116,7 +133,8 @@ import {
   type PmlIssue,
 } from '../simulation/pml-engine';
 import { classify } from '../simulation/queueing';
-import { defaultDist } from '../simulation/distributions';
+import { defaultDist, kendallServiceCode, type ServiceDist } from '../simulation/distributions';
+import { morphDist } from '../components/queueParamFields';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import {
   resolveProcessPositions,
@@ -126,6 +144,14 @@ import {
   PROCESS_BLOCK_H,
   PROCESS_PAD_X,
   PROCESS_PAD_TOP,
+  PROCESS_SNAP,
+  PROCESS_PORT_GAP,
+  PROCESS_PORT_R,
+  PROCESS_PORT_HALO,
+  PROCESS_RING_INSET,
+  PROCESS_RING_STROKE,
+  portOffsetY,
+  processWirePath,
   snapProcess,
 } from '../domain/processLayout';
 
@@ -231,31 +257,6 @@ function resolveFixture(catalogId: string): IsoFixture | undefined {
   return lookupFixture(catalogId);
 }
 
-/** Effective footprint for a workstation. Per-ws `size` override wins over
- *  the catalog fixture's defaults, so two SNLS machines can be different
- *  sizes. Values are decimal (no integer rounding).
- *
- *  When the workstation is rotated 90° or 270° on the build plane, the
- *  effective floor occupancy swaps w ↔ d — a 1 × 2 SNLS lying lengthwise
- *  along Y becomes 2 × 1 along X. The selection ring, dept-containment
- *  check, marquee hit-test, and centroid all read this rotated footprint
- *  so they outline the cells the sprite actually covers after rotation.
- *  The raw (unrotated) catalog dims are still available via
- *  `wsBaseFootprint` when a fixture's draw fn needs them. */
-function wsBaseFootprint(ws: Workstation): { w: number; d: number; h: number } {
-  const fix = lookupFixture(ws.catalogId);
-  return {
-    w: ws.size?.w ?? fix?.w ?? 1,
-    d: ws.size?.d ?? fix?.d ?? 1,
-    h: ws.size?.h ?? fix?.h ?? 1,
-  };
-}
-function wsFootprint(ws: Workstation): { w: number; d: number; h: number } {
-  const base = wsBaseFootprint(ws);
-  const turned = ws.rotation === 90 || ws.rotation === 270;
-  return turned ? { w: base.d, d: base.w, h: base.h } : base;
-}
-
 // ============================================================================
 // SHARED STYLE FRAGMENTS
 // ============================================================================
@@ -342,10 +343,6 @@ const PALETTE_MAX = 520;
 const INSPECTOR_MIN = 260;
 const INSPECTOR_MAX = 560;
 const SPLITTER_W = 5;
-/** Width of the thin stub a side panel leaves behind when collapsed. Wide
- *  enough for the chevron + vertical label, narrow enough that the canvas
- *  gets almost the whole window back. */
-const RAIL_W = 26;
 
 // ============================================================================
 // DEEP-LINK INITIAL STATE
@@ -434,7 +431,6 @@ export function BuilderPage() {
   const pasteWorkstations = useTwin((s) => s.pasteWorkstations);
   const setOperation = useTwin((s) => s.setOperation);
   const setResources = useTwin((s) => s.setResources);
-  const setKpiTargets = useTwin((s) => s.setKpiTargets);
   const setKpiObserved = useTwin((s) => s.setKpiObserved);
   const setBlock = useTwin((s) => s.setBlock);
   const addConnector = useTwin((s) => s.addConnector);
@@ -764,15 +760,17 @@ export function BuilderPage() {
    *  canvas user-space matches stage pixels 1:1 — required for the cursor
    *  → world projection to be exact regardless of element aspect ratio. */
   const [stageSize, setStageSize] = useState({ w: 1200, h: 800 });
-  // Side-panel widths. User drags the splitters; values persist in
-  // localStorage so the layout survives reloads.
+  // Side-panel widths. Both open at their minimum: the canvas is the work,
+  // and a pane wide enough to read is wide enough to start with — the user
+  // drags out the width they need for the pane they are actually using.
+  // Dragged values persist in localStorage so that choice survives reloads.
   const [paletteWidth, setPaletteWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('builder.paletteW'));
-    return Number.isFinite(v) && v >= PALETTE_MIN && v <= PALETTE_MAX ? v : 280;
+    return Number.isFinite(v) && v >= PALETTE_MIN && v <= PALETTE_MAX ? v : PALETTE_MIN;
   });
   const [inspectorWidth, setInspectorWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('builder.inspectorW'));
-    return Number.isFinite(v) && v >= INSPECTOR_MIN && v <= INSPECTOR_MAX ? v : 340;
+    return Number.isFinite(v) && v >= INSPECTOR_MIN && v <= INSPECTOR_MAX ? v : INSPECTOR_MIN;
   });
   useEffect(() => { localStorage.setItem('builder.paletteW', String(paletteWidth)); }, [paletteWidth]);
   useEffect(() => { localStorage.setItem('builder.inspectorW', String(inspectorWidth)); }, [inspectorWidth]);
@@ -1046,7 +1044,6 @@ export function BuilderPage() {
       return {
         id: `grp:${group}`,
         label: group,
-        icon: '✎',
         items: types
           .map((t) => resolveFixture(t.id))
           .filter((f): f is IsoFixture => Boolean(f)),
@@ -1624,125 +1621,34 @@ export function BuilderPage() {
           minWidth: 0,
         }}
       >
-        <button onClick={() => navigate('/')} style={btnIcon()} title="Back to menu" aria-label="Back to menu">
-          <Icon name="back" />
-        </button>
-        {/* Title and the full action row (FACTORY picker, SAVE, SAVE AS,
-            DELETE, ✓ READY chip, SIMULATE, BEST) sit on a single
-            horizontal baseline. The READY chip lives between DELETE and
-            SIMULATE so the pre-flight health is read right before the
-            user commits to a sim run. */}
-        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        {/* Three-column toolbar: identity on the left (title + pre-flight
+            health chip), the FACTORY picker centred on the bar, and the
+            action row (SAVE, SAVE AS, DELETE, SIMULATE, BEST) flushed right.
+            The left and right groups both take flex:1 so the centre group
+            lands on the true midpoint of the bar. */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+          <button onClick={() => navigate('/')} style={btnIcon()} title="Back to menu" aria-label="Back to menu">
+            <Icon name="back" />
+          </button>
           <ViewTitle title="Factory Builder" />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
-            <HudSelect
-              value={activeScenarioId ?? '__canonical__'}
-              onChange={(v) => {
-                if (v.startsWith('lib:')) {
-                  loadSavedFactory(v.slice(4));
-                  setSelected(null);
-                  return;
-                }
-                if (v === '__divider_saved__') return;
-                setActiveScenario(v === '__canonical__' ? null : v);
-                setSelected(null);
-              }}
-              variant="light"
-              size="sm"
-              minWidth={280}
-              options={[
-                {
-                  value: '__canonical__',
-                  label: `◆ Canonical · ${projectName || canonical.name}`,
-                },
-                ...scenarios.map((scn) => ({
-                  value: scn.id,
-                  label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
-                  tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
-                })),
-                ...(savedFactories.length > 0
-                  ? [
-                      {
-                        value: '__divider_saved__',
-                        label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
-                        disabled: true,
-                      },
-                      ...[...savedFactories]
-                        .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
-                        .map((f) => ({
-                          value: `lib:${f.id}`,
-                          label: `${f.pinned ? '★' : '📚'} ${f.name}`,
-                          tag: `${f.stationCount} STN`,
-                        })),
-                    ]
-                  : []),
-              ]}
-            />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/* Operations library. The page existed and was reachable by URL
+              only — no surface linked to `/resources`, so the garments, their
+              operation breakdowns, the operator roster and the machine
+              catalog that every station on this floor binds to could be read
+              in the Inspector's pickers and edited nowhere. */}
           <button
-            onClick={onSave}
-            style={{
-              ...btnPrim(),
-              ...btnIcon(),
-              background: savedAt ? SW_COLORS.ok : SW_COLORS.brand,
-              border: 'none',
-              color: SW_COLORS.void,
-              transition: 'background 160ms',
-            }}
-            aria-label="Save"
-            title={
-              savedAt
-                ? `Saved at ${savedAt} — save again`
-                : activeScenarioId === null
-                  ? 'Save the current configuration into the canonical factory'
-                  : 'Save the current configuration into this scenario'
-            }
-          >
-            <Icon name={savedAt ? 'check' : 'save'} />
-          </button>
-          <button
-            onClick={onSaveAsOpen}
+            onClick={() => navigate('/resources?tab=operations')}
             style={btnIcon()}
-            aria-label="Save as new scenario"
-            title={
-              activeScenarioId === null
-                ? 'Save as… — fork the canonical twin into a new scenario'
-                : 'Save as… — fork this scenario into a new branched scenario'
-            }
+            title="Operations library — garments, operation breakdowns, operators, machines"
+            aria-label="Operations library"
           >
-            <Icon name="saveAs" />
+            <Icon name="bulletin" />
           </button>
-          <button
-            onClick={async () => {
-              if (activeScenarioId === null) return;
-              const name = twin.name || 'this scenario';
-              if (await confirm({ title: 'Delete scenario', message: `Delete scenario "${name}"? This cannot be undone.`, confirmLabel: 'Delete', variant: 'danger' })) {
-                deleteScenario(activeScenarioId);
-                setSelected(null);
-              }
-            }}
-            disabled={activeScenarioId === null}
-            style={{
-              ...btnIcon(),
-              color: activeScenarioId === null ? SW_COLORS.muted : SW_COLORS.alarm,
-              borderColor: activeScenarioId === null ? SW_COLORS.line : SW_COLORS.alarm + '60',
-              cursor: activeScenarioId === null ? 'not-allowed' : 'pointer',
-              opacity: activeScenarioId === null ? 0.55 : 1,
-            }}
-            title={
-              activeScenarioId === null
-                ? 'Canonical factory cannot be deleted — switch to a scenario first, or fork via SAVE AS…'
-                : `Delete the active scenario "${twin.name}"`
-            }
-            aria-label="Delete scenario"
-          >
-            <Icon name="trash" />
-          </button>
-          {/* Pre-flight graph health chip — sits between DELETE and
-              SIMULATE so the green / amber / red status is the last
-              thing the user reads before committing to a run. */}
+          {/* Pre-flight graph health chip — reads beside the view title,
+              where the factory's identity is. It reports the health of the
+              graph you have open, not of an action, so it belongs with the
+              name of the thing rather than in the action row on the right —
+              and there it kept moving as SAVE / DELETE / BEST came and went. */}
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setIssuesOpen((v) => !v)}
@@ -1852,6 +1758,127 @@ export function BuilderPage() {
               </div>
             )}
           </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
+            <HudSelect
+              value={activeScenarioId ?? '__canonical__'}
+              onChange={(v) => {
+                if (v.startsWith('lib:')) {
+                  loadSavedFactory(v.slice(4));
+                  setSelected(null);
+                  return;
+                }
+                if (v === '__divider_saved__') return;
+                setActiveScenario(v === '__canonical__' ? null : v);
+                setSelected(null);
+              }}
+              variant="light"
+              size="sm"
+              minWidth={280}
+              options={[
+                {
+                  value: '__canonical__',
+                  label: `◆ Canonical · ${projectName || canonical.name}`,
+                },
+                ...scenarios.map((scn) => ({
+                  value: scn.id,
+                  label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
+                  tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
+                })),
+                ...(savedFactories.length > 0
+                  ? [
+                      {
+                        value: '__divider_saved__',
+                        label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
+                        disabled: true,
+                      },
+                      ...[...savedFactories]
+                        .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+                        .map((f) => ({
+                          value: `lib:${f.id}`,
+                          label: `${f.pinned ? '★' : '📚'} ${f.name}`,
+                          tag: `${f.stationCount} STN`,
+                        })),
+                    ]
+                  : []),
+              ]}
+            />
+          </div>
+        </div>
+
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'flex-end',
+            gap: 12,
+            flexWrap: 'wrap',
+            minWidth: 0,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            onClick={onSave}
+            style={{
+              ...btnPrim(),
+              ...btnIcon(),
+              background: savedAt ? SW_COLORS.ok : SW_COLORS.brand,
+              border: 'none',
+              color: SW_COLORS.void,
+              transition: 'background 160ms',
+            }}
+            aria-label="Save"
+            title={
+              savedAt
+                ? `Saved at ${savedAt} — save again`
+                : activeScenarioId === null
+                  ? 'Save the current configuration into the canonical factory'
+                  : 'Save the current configuration into this scenario'
+            }
+          >
+            <Icon name={savedAt ? 'check' : 'save'} />
+          </button>
+          <button
+            onClick={onSaveAsOpen}
+            style={btnIcon()}
+            aria-label="Save as new scenario"
+            title={
+              activeScenarioId === null
+                ? 'Save as… — fork the canonical twin into a new scenario'
+                : 'Save as… — fork this scenario into a new branched scenario'
+            }
+          >
+            <Icon name="saveAs" />
+          </button>
+          <button
+            onClick={async () => {
+              if (activeScenarioId === null) return;
+              const name = twin.name || 'this scenario';
+              if (await confirm({ title: 'Delete scenario', message: `Delete scenario "${name}"? This cannot be undone.`, confirmLabel: 'Delete', variant: 'danger' })) {
+                deleteScenario(activeScenarioId);
+                setSelected(null);
+              }
+            }}
+            disabled={activeScenarioId === null}
+            style={{
+              ...btnIcon(),
+              color: activeScenarioId === null ? SW_COLORS.muted : SW_COLORS.alarm,
+              borderColor: activeScenarioId === null ? SW_COLORS.line : SW_COLORS.alarm + '60',
+              cursor: activeScenarioId === null ? 'not-allowed' : 'pointer',
+              opacity: activeScenarioId === null ? 0.55 : 1,
+            }}
+            title={
+              activeScenarioId === null
+                ? 'Canonical factory cannot be deleted — switch to a scenario first, or fork via SAVE AS…'
+                : `Delete the active scenario "${twin.name}"`
+            }
+            aria-label="Delete scenario"
+          >
+            <Icon name="trash" />
+          </button>
           {(() => {
             const simulatableCount = twin.workstations.filter(
               (ws) => ws.operation.opId != null,
@@ -1926,9 +1953,6 @@ export function BuilderPage() {
             </button>
           )}
           </div>
-        </div>
-
-        <div style={{ flex: 1 }} />
 
         {/* Undo / redo and the SELECT tool used to live here as toolbar
             chips; they were removed because the keyboard shortcuts
@@ -1937,12 +1961,12 @@ export function BuilderPage() {
             and the tool toggle in the keydown listener — stay wired so
             the features themselves are unchanged. */}
 
-        {/* Selection + clipboard chip — surfaces the number of workstations
-            currently selected (use the SELECT tool's rectangle marquee to
-            pick many at once) and the size of the copy buffer, plus the
-            shortcuts. Hidden when both are empty so the toolbar stays
-            clean at rest. */}
-        {(selectedWsIds.size > 0 || clipboard) && (
+        {/* Clipboard chip — surfaces the size of the copy buffer. The
+            selection count that used to sit alongside it was removed: the
+            canvas already highlights every selected workstation, so the
+            number was redundant chrome in the header. Hidden when the
+            buffer is empty so the toolbar stays clean at rest. */}
+        {clipboard && (
           <div
             title="▭ SELECT marquee · ⇧+Click toggles a station in/out · Drag any selected to move the whole group · ⌘/Ctrl+A select all · ⌘/Ctrl+C copy · ⌘/Ctrl+X cut · ⌘/Ctrl+V paste at cursor · Esc clears"
             style={{
@@ -1960,25 +1984,12 @@ export function BuilderPage() {
               color: SW_COLORS.muted,
             }}
           >
-            {selectedWsIds.size > 0 && (
-              <span>
-                <span style={{ color: SW_COLORS.brand, fontWeight: 900 }}>
-                  {selectedWsIds.size}
-                </span>
-                {' '}SELECTED
+            <span>
+              <span style={{ color: SW_COLORS.bobbin, fontWeight: 900 }}>
+                {clipboard.workstations.length}
               </span>
-            )}
-            {selectedWsIds.size > 0 && clipboard && (
-              <span style={{ opacity: 0.4 }}>·</span>
-            )}
-            {clipboard && (
-              <span>
-                <span style={{ color: SW_COLORS.bobbin, fontWeight: 900 }}>
-                  {clipboard.workstations.length}
-                </span>
-                {' '}ON CLIPBOARD
-              </span>
-            )}
+              {' '}ON CLIPBOARD
+            </span>
           </div>
         )}
 
@@ -2000,6 +2011,7 @@ export function BuilderPage() {
             engine was retired. ▶ SIMULATE (above) is the single entry point
             into /sim, which auto-runs PML on mount and shows the same
             throughput / lead-time numbers in the playback chrome. */}
+        </div>
       </div>
 
 
@@ -2048,7 +2060,6 @@ export function BuilderPage() {
       <StationTypeDialog
         open={typeDialogOpen}
         editing={editingType}
-        groups={Array.from(new Set(stationTypes.map((t) => t.group)))}
         onSave={saveStationType}
         onCancel={() => { setTypeDialogOpen(false); setEditingType(null); }}
       />
@@ -2067,7 +2078,12 @@ export function BuilderPage() {
           onCollapse={() => setPaletteOpen(false)}
         />
       ) : (
-        <CollapsedRail side="left" label="PALETTE" onExpand={() => setPaletteOpen(true)} />
+        <CollapsedRail
+          side="left"
+          label="PALETTE"
+          onExpand={() => setPaletteOpen(true)}
+          style={{ gridColumn: '1', gridRow: '2' }}
+        />
       )}
 
       {/* LEFT SPLITTER (palette ↔ canvas) — only while the palette is open */}
@@ -2367,21 +2383,11 @@ export function BuilderPage() {
           onFit={fitView}
         />
 
-        {/* Bottom-left counter strip */}
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 14,
-            left: 14,
-            display: 'flex',
-            gap: 8,
-            zIndex: 5,
-            alignItems: 'center',
-          }}
-        >
-          <CountChip label="LINES" value={(twin.lines ?? []).length} />
-          <CountChip label="STATIONS" value={twin.workstations.length} />
-        </div>
+        {/* A bottom-left strip used to sit here counting the twin's sewing
+            lines. The number was already the length of the list in the
+            palette on the left, it never changed while you were looking at
+            the floor, and nothing on the canvas needed it — so it was a
+            permanent overlay reporting a fact the page states elsewhere. */}
 
         {/* Bottom-right canvas legend — sits above the zoom controls.
             Explains the connector kinds (flow / operator / material) and the
@@ -2467,11 +2473,13 @@ export function BuilderPage() {
 
         {/* Floor-overlay lens switch — moved here from the inspector so it
             reads as a canvas view-mode control. It drives what every station
-            paints (operation code · worker count · utilisation heat-map); the
-            floor canvases (2D · ISO) render those overlays, so the switch is
-            scoped to them. Sits directly under the canvas-mode toggle; active
-            = ink so it reads distinctly from the brand-green toggle above. */}
-        {canvasMode !== 'process' && (
+            paints (operation code · worker count · utilisation heat-map).
+            Scoped to ISO: that is the view whose station headers carry the
+            lens pill the legend explains, and the 2D plan is read as a
+            layout drawing, not as a data overlay. Sits directly under the
+            canvas-mode toggle; active = ink so it reads distinctly from the
+            brand-green toggle above. */}
+        {canvasMode === 'iso' && (
           <div
             role="tablist"
             style={{
@@ -2550,7 +2558,12 @@ export function BuilderPage() {
 
       {/* RIGHT INSPECTOR — collapses to a click-to-open rail */}
       {!inspectorOpen ? (
-        <CollapsedRail side="right" label="INSPECTOR" onExpand={() => setInspectorOpen(true)} />
+        <CollapsedRail
+          side="right"
+          label="INSPECTOR"
+          onExpand={() => setInspectorOpen(true)}
+          style={{ gridColumn: '5', gridRow: '2' }}
+        />
       ) : (
       <Inspector
         onCollapse={() => setInspectorOpen(false)}
@@ -2564,14 +2577,13 @@ export function BuilderPage() {
         }}
         onSetOperation={setOperation}
         onSetResources={setResources}
-        onSetKpiTargets={setKpiTargets}
         onSetBlock={setBlock}
         onRemoveConnector={removeConnector}
+        onAddConnector={(input) => addConnector({ kind: 'flow', ...input })}
         onAddLine={() => {
           const n = (twin.lines ?? []).length + 1;
           addLine({
             name: `Line ${String.fromCharCode(64 + n)} · new`,
-            productionSystem: 'PBS',
             color: 'blue',
             garmentId: undefined,
           });
@@ -2579,124 +2591,11 @@ export function BuilderPage() {
         onRemoveLine={(id) => removeLine(id)}
         onUpdateLine={(id, patch) => updateLine(id, patch)}
         onAssignLine={(wsId, lineId) => setLineForWorkstations([wsId], lineId)}
+        canvasMode={canvasMode}
+        onSetProcessPos={(wsId, pos) => setProcessPositions([{ wsId, pos }])}
       />
       )}
     </div>
-  );
-}
-
-/**
- * The stub a collapsed side panel leaves in its grid column: a vertical label
- * plus a chevron pointing back toward the canvas edge it came from. The whole
- * strip is the hit target, so re-opening is a single click anywhere on it.
- */
-function CollapsedRail({
-  side,
-  label,
-  onExpand,
-}: {
-  side: 'left' | 'right';
-  label: string;
-  onExpand: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const edge = `1px solid ${SW_COLORS.line}`;
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onExpand}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onExpand();
-        }
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={`Show ${label.toLowerCase()}`}
-      aria-label={`Show ${label.toLowerCase()}`}
-      style={{
-        gridColumn: side === 'left' ? '1' : '5',
-        gridRow: '2',
-        ...(side === 'left' ? { borderRight: edge } : { borderLeft: edge }),
-        background: hover ? SW_COLORS.paperEdge : SW_COLORS.paper,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: 10,
-        padding: '10px 0',
-        cursor: 'pointer',
-        userSelect: 'none',
-        overflow: 'hidden',
-        transition: 'background 120ms ease',
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          fontFamily: SW_FONTS.mono,
-          fontSize: 12,
-          fontWeight: 800,
-          lineHeight: 1,
-          color: hover ? SW_COLORS.brand : SW_COLORS.muted,
-        }}
-      >
-        {side === 'left' ? '»' : '«'}
-      </span>
-      <span
-        style={{
-          writingMode: 'vertical-rl',
-          fontFamily: SW_FONTS.display,
-          fontSize: 10,
-          fontWeight: 900,
-          letterSpacing: '0.18em',
-          color: hover ? SW_COLORS.ink : SW_COLORS.muted,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {label}
-      </span>
-    </div>
-  );
-}
-
-/** The ‹‹ / ›› button a side panel header uses to collapse itself to a rail. */
-function PaneCollapseButton({ side, onClick }: { side: 'left' | 'right'; onClick: () => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={side === 'left' ? 'Collapse palette' : 'Collapse inspector'}
-      aria-label={side === 'left' ? 'Collapse palette' : 'Collapse inspector'}
-      style={{
-        // Square, on the shared header-row unit: the palette « and the
-        // inspector » are the same control mirrored, and both sit level with
-        // the chips beside them.
-        width: SW_CONTROL.icon,
-        height: SW_CONTROL.icon,
-        flex: 'none',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'transparent',
-        border: `1px solid ${hover ? SW_COLORS.ink : SW_COLORS.line}`,
-        borderRadius: SW_RADIUS.sm,
-        cursor: 'pointer',
-        padding: 0,
-        lineHeight: 1,
-        fontFamily: SW_FONTS.mono,
-        fontSize: 15,
-        fontWeight: 800,
-        color: hover ? SW_COLORS.ink : SW_COLORS.muted,
-        transition: `border-color ${SW_MOTION.instant}ms linear, color ${SW_MOTION.instant}ms linear`,
-      }}
-    >
-      {side === 'left' ? '«' : '»'}
-    </button>
   );
 }
 
@@ -2713,7 +2612,6 @@ function PaneCollapseButton({ side, onClick }: { side: 'left' | 'right'; onClick
 interface ApparelSection {
   id: string;
   label: string;
-  icon: string;
   items: IsoFixture[];
   /** Station types in this section, aligned index-for-index with `items`.
    *  Absent on the built-in section. */
@@ -2857,7 +2755,7 @@ function Palette(props: PaletteProps) {
           >
             {props.tab === 'ws' ? 'STN' : 'BLK'}
           </span>
-          <PaneCollapseButton side="left" onClick={props.onCollapse} />
+          <PaneCollapseButton side="left" label="palette" onClick={props.onCollapse} />
         </div>
       </div>
 
@@ -2875,17 +2773,22 @@ function Palette(props: PaletteProps) {
                   type="button"
                   onClick={toggleAllSections}
                   title={allCollapsed ? 'Expand every section' : 'Collapse every section'}
+                  aria-label={allCollapsed ? 'Expand every section' : 'Collapse every section'}
                   style={{
+                    width: SW_CONTROL.chevron,
+                    height: SW_CONTROL.chevron,
+                    flex: 'none',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
                     background: 'transparent',
                     border: 'none',
                     padding: 0,
                     cursor: 'pointer',
-                    ...SW_TYPE.kicker,
-                    fontSize: 9,
                     color: SW_COLORS.muted,
                   }}
                 >
-                  {allCollapsed ? 'EXPAND ALL' : 'COLLAPSE ALL'}
+                  <Icon name={allCollapsed ? 'expandAll' : 'collapseAll'} size={14} />
                 </button>
               )}
             </div>
@@ -2954,7 +2857,6 @@ function Palette(props: PaletteProps) {
                     }}
                   >
                     <Chevron open={open} />
-                    <span style={{ fontSize: 12, color: SW_COLORS.muted, lineHeight: 1 }}>{section.icon}</span>
                     <span style={{ ...sectionLabel, flex: 1 }}>{section.label.toUpperCase()}</span>
                     <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted }}>
                       {section.items.length}
@@ -2983,12 +2885,13 @@ function Palette(props: PaletteProps) {
                               gap: 4,
                             }}
                           >
-                            {/* Anything with a mark shows it — the same thing
-                                it will look like once dropped on the floor.
-                                Fixtures with no mechanism to draw keep the
-                                isometric cuboid, which is what distinguishes a
-                                rack from a trolley. */}
-                            {mark.code || mark.markCode ? (
+                            {/* Anything with a mark — or uploaded plan
+                                artwork — shows it, so the tile is what the
+                                station will look like once dropped on the
+                                floor. Fixtures with no mechanism to draw keep
+                                the isometric cuboid, which is what
+                                distinguishes a rack from a trolley. */}
+                            {mark.code || mark.markCode || mark.art ? (
                               <svg width={56} height={42} style={{ display: 'block' }}>
                                 <StationGlyph {...mark} width={56} height={42} />
                               </svg>
@@ -3776,6 +3679,38 @@ function FlatStationBody({ ws, fixture }: { ws: Workstation; fixture: IsoFixture
   const { w: fw, d: fd } = wsFootprint(ws);
   const W = fw * FLAT_CELL;
   const H = fd * FLAT_CELL;
+  // A logic block has no mechanism to draw, so the plan used to print an
+  // abbreviated label and nothing else — the one view where blocks line up
+  // side by side was the one view that never showed which kind each was.
+  // It draws the same PML glyph the ISO body carries, over the same box.
+  const blockIcon = stationBlockIcon(ws);
+  if (blockIcon) {
+    const tint = PML_CATEGORY_TINT[blockIcon.category] ?? {
+      fill: SW_COLORS.paper,
+      stroke: SW_COLORS.ink,
+    };
+    const size = Math.max(10, Math.min(26, Math.min(W, H) * 0.5));
+    return (
+      <g>
+        <rect
+          x={0.5}
+          y={0.5}
+          width={Math.max(0, W - 1)}
+          height={Math.max(0, H - 1)}
+          rx={2}
+          fill={SW_COLORS.steel}
+          stroke={alpha(SW_COLORS.ink, 0.22)}
+          strokeWidth={1}
+        />
+        <blockIcon.Icon
+          size={size}
+          color={tint.stroke}
+          x={(W - size) / 2}
+          y={(H - size) / 2}
+        />
+      </g>
+    );
+  }
   const mark = stationMark(ws.catalogId);
   // Machines get their family mark and type code; everything else (racks,
   // trolleys, buffers, zones) gets the same box with an abbreviated label,
@@ -3848,7 +3783,10 @@ function WorkstationSprite({
   // Declared before the early return below so hook order stays stable across
   // renders (react-hooks/rules-of-hooks).
   const [hovered, setHovered] = useState(false);
-  const fixture = lookupFixture(ws.catalogId);
+  // `fixtureForWorkstation`, not `lookupFixture`: a logic block draws its LIVE
+  // PML kind, so re-declaring a Service as a Queue in the Inspector changes
+  // what the floor shows. Real equipment resolves identically either way.
+  const fixture = fixtureForWorkstation(ws);
   if (!fixture) return null;
 
   const P = projection.project;
@@ -3944,52 +3882,43 @@ function WorkstationSprite({
         />
       )}
 
-      {/* OPERATIONS lens badge — two-line pill so the user sees BOTH the
-          bulletin code (top, mono) and the operation name (bottom, smaller).
-          Gated on `detailsOpen` so the dense 270-station floor stays
+      {/* OPERATIONS lens callout — the bulletin code and the operation it
+          names. Gated on `detailsOpen` so the dense 270-station floor stays
           readable by default; hover or click a sprite to reveal its
           operation. Full opId still appears on hover via the <title>. */}
-      {lens === 'operations' && detailsOpen && (() => {
-        const code = opMeta.code || '—';
-        const name = opMeta.name || '';
-        const widest = Math.max(code.length, name.length);
-        const pillW = Math.max(34, Math.min(120, widest * 5.6 + 12));
-        const pillH = name ? 22 : 14;
-        const pillY = name ? -15 : -9;
-        return (
-          <g transform="translate(0, -28)">
-            <title>{ws.operation.opId ?? ws.operation.freeText ?? ''}</title>
-            <rect x={-pillW / 2} y={pillY} width={pillW} height={pillH} rx={3} fill={SW_COLORS.ink} fillOpacity={0.88} />
-            <text x={0} y={name ? -5 : 1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
-              {code}
-            </text>
-            {name && (
-              <text x={0} y={4} textAnchor="middle" fontFamily={SW_FONTS.body} fontSize={7} fontWeight={500} fill="#fff" fillOpacity={0.88} style={{ letterSpacing: '0.02em' }}>
-                {name}
-              </text>
-            )}
-          </g>
-        );
-      })()}
-
-      {/* RESOURCES lens badge — worker count */}
-      {lens === 'resources' && ws.resources.workersRequired > 0 && (
-        <g transform="translate(0, -28)">
-          <rect x={-22} y={-9} width={44} height={14} rx={3} fill={SW_COLORS.bobbin} fillOpacity={0.92} />
-          <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
-            ☻ × {ws.resources.workersRequired}
-          </text>
-        </g>
+      {lens === 'operations' && detailsOpen && (
+        <StationCallout
+          code={opMeta.code || '—'}
+          label={opMeta.name || undefined}
+          tone={SW_COLORS.brand}
+          title={ws.operation.opId ?? ws.operation.freeText ?? ''}
+        />
       )}
 
-      {/* KPIS lens badge — utilisation pct or "no run" */}
+      {/* RESOURCES lens callout — worker count */}
+      {lens === 'resources' && ws.resources.workersRequired > 0 && (
+        <StationCallout
+          code="☻"
+          metric={`× ${ws.resources.workersRequired}`}
+          tone={SW_COLORS.bobbin}
+          title={`${ws.resources.workersRequired} worker${ws.resources.workersRequired === 1 ? '' : 's'} required`}
+        />
+      )}
+
+      {/* KPIS lens callout — utilisation, toned by the same thresholds as the
+          heat tint under it, and chipped when the station is the constraint. */}
       {lens === 'kpis' && (
-        <g transform="translate(0, -28)">
-          <rect x={-26} y={-9} width={52} height={14} rx={3} fill={ws.kpiObserved ? SW_COLORS.brandDeep : SW_COLORS.muted} fillOpacity={0.92} />
-          <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
-            {ws.kpiObserved ? `${Math.round(ws.kpiObserved.utilizationPct)}% util` : 'no run'}
-          </text>
-        </g>
+        ws.kpiObserved ? (
+          <StationCallout
+            code="UTIL"
+            metric={`${Math.round(ws.kpiObserved.utilizationPct)}%`}
+            chip={ws.kpiObserved.utilizationPct >= 95 ? 'BOTTLENECK' : undefined}
+            tone={heatColor(ws.kpiObserved.utilizationPct)}
+            title={`${ws.kpiObserved.utilizationPct.toFixed(1)}% utilisation on the last run`}
+          />
+        ) : (
+          <StationCallout code="NO RUN" tone={SW_COLORS.muted} />
+        )
       )}
 
       {/* OPERATOR chip — reveals on hover / selection (any lens). Shows the
@@ -4093,6 +4022,166 @@ function WorkstationSprite({
           </text>
         </g>
       )}
+    </g>
+  );
+}
+
+/**
+ * A station's lens badge, drawn as an anchored callout.
+ *
+ * Every lens used to draw its own flat chip floating 28px above the sprite:
+ * a filled rectangle with one run of text in it, no tie to the tile it
+ * described. On a floor of 270 stations that is a field of loose labels, and
+ * which one belongs to which tile is a guess.
+ *
+ * So a badge is a capsule on a leader line now — the line lands on the sprite,
+ * which is what makes it a label rather than a sticker — and the capsule is
+ * segmented rather than one string: a status ring, a mono code, the plain-
+ * language name, the number, and a chip when something is wrong. Each part is
+ * optional, so the same drawing carries `OP-03 · Placket rolling & mark` and a
+ * bare `☻ × 2` without looking like two different controls.
+ *
+ * Widths are estimated from character counts rather than measured. SVG has no
+ * cheap text metrics, this runs once per visible station per frame, and the
+ * capsule only has to be big enough not to clip — the constants below are the
+ * per-character advances of the two fonts at these sizes.
+ */
+function StationCallout({
+  code,
+  label,
+  metric,
+  chip,
+  tone,
+  title,
+}: {
+  /** Mono, uppercase, always present — the badge's identity. */
+  code: string;
+  /** Plain-language name, quieter, truncated before it dominates. */
+  label?: string;
+  /** The number, in `tone`. */
+  metric?: string;
+  /** Status word, boxed, in `tone`. */
+  chip?: string;
+  tone: string;
+  title?: string;
+}) {
+  const H = 18;
+  const PAD = 7;
+  const GAP = 5;
+  const RING = 3.4;
+  /** Advance per character: mono at 8.5px, body at 8px, chip mono at 7px. */
+  const MONO = 5.3;
+  const BODY = 4.3;
+  const CHIP = 4.4;
+  /** Long operation names would push the capsule past its neighbours. */
+  const shown = label && label.length > 22 ? `${label.slice(0, 21)}…` : label;
+
+  let x = PAD + RING * 2 + GAP;
+  const codeX = x;
+  x += code.length * MONO;
+  const labelX = shown ? x + GAP : x;
+  if (shown) x = labelX + shown.length * BODY;
+  const metricX = metric ? x + GAP : x;
+  if (metric) x = metricX + metric.length * MONO;
+  const chipW = chip ? chip.length * CHIP + 10 : 0;
+  const chipX = chip ? x + GAP : x;
+  if (chip) x = chipX + chipW;
+  const W = x + PAD;
+
+  // The capsule hangs above the sprite with the leader running back down to
+  // it; `LIFT` is the length of that line.
+  const LIFT = 20;
+  const top = -(LIFT + H);
+  const midY = top + H / 2;
+
+  return (
+    // No `pointerEvents: none`: the callout stays part of the station's hit
+    // area, as the flat badges were. Clicking a label selects the station it
+    // labels, and the <title> below still resolves on hover.
+    <g>
+      {title && <title>{title}</title>}
+      <line x1={0} y1={-LIFT} x2={0} y2={0} stroke={tone} strokeOpacity={0.55} strokeWidth={1} />
+      <g transform={`translate(${-W / 2}, 0)`}>
+        <rect
+          x={0}
+          y={top}
+          width={W}
+          height={H}
+          rx={H / 2}
+          fill={SW_COLORS.ink}
+          fillOpacity={0.9}
+          stroke={tone}
+          strokeOpacity={0.55}
+          strokeWidth={1}
+        />
+        {/* Status ring — an outlined circle with a filled core, so the tone
+            reads at a glance without a second text run to carry it. */}
+        <circle cx={PAD + RING} cy={midY} r={RING} fill="none" stroke={tone} strokeWidth={1.3} />
+        <circle cx={PAD + RING} cy={midY} r={RING - 1.9} fill={tone} />
+        <text
+          x={codeX}
+          y={midY + 3}
+          fontFamily={SW_FONTS.mono}
+          fontSize={8.5}
+          fontWeight={800}
+          fill={SW_COLORS.paper}
+          style={{ letterSpacing: '0.06em' }}
+        >
+          {code}
+        </text>
+        {shown && (
+          <text
+            x={labelX}
+            y={midY + 3}
+            fontFamily={SW_FONTS.body}
+            fontSize={8}
+            fontWeight={500}
+            fill={SW_COLORS.paper}
+            fillOpacity={0.62}
+          >
+            {shown}
+          </text>
+        )}
+        {metric && (
+          <text
+            x={metricX}
+            y={midY + 3}
+            fontFamily={SW_FONTS.mono}
+            fontSize={8.5}
+            fontWeight={800}
+            fill={tone}
+          >
+            {metric}
+          </text>
+        )}
+        {chip && (
+          <>
+            <rect
+              x={chipX}
+              y={midY - 6}
+              width={chipW}
+              height={12}
+              rx={3}
+              fill="none"
+              stroke={tone}
+              strokeOpacity={0.8}
+              strokeWidth={1}
+            />
+            <text
+              x={chipX + chipW / 2}
+              y={midY + 3}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.mono}
+              fontSize={7}
+              fontWeight={800}
+              fill={tone}
+              style={{ letterSpacing: '0.08em' }}
+            >
+              {chip}
+            </text>
+          </>
+        )}
+      </g>
     </g>
   );
 }
@@ -4592,8 +4681,8 @@ interface ProcessNode {
   line: SewingLine | undefined;
 }
 
-/** Returns the SVG-space center of a port on a node. Inputs are spread
- *  along the left edge, outputs along the right edge. */
+/** Returns the SVG-space center of a port on a node. Inputs stand off the
+ *  left edge, outputs off the right edge — see `PROCESS_PORT_GAP`. */
 function portPosition(
   node: ProcessNode,
   port: PmlPort,
@@ -4601,12 +4690,27 @@ function portPosition(
 ): { x: number; y: number } {
   const ports = side === 'in' ? node.block.inputs : node.block.outputs;
   const idx = Math.max(0, ports.findIndex((p) => p.id === port.id));
-  const slot = (idx + 1) / (ports.length + 1);
   return {
-    x: side === 'in' ? node.x : node.x + node.w,
-    y: node.y + node.h * slot,
+    x: side === 'in' ? node.x - PROCESS_PORT_GAP : node.x + node.w + PROCESS_PORT_GAP,
+    y: node.y + portOffsetY(idx, ports.length, node.h),
   };
 }
+
+/**
+ * Every stroke colour a PROCESS wire can take. One arrowhead marker is minted
+ * per colour: the canvas used to point a brand-red head at the end of every
+ * wire regardless of the line under it, so a yellow MATERIAL wire ended in a
+ * red arrow.
+ */
+const PROCESS_ARROW_HEX: string[] = Array.from(
+  new Set([
+    ...Object.values(CONNECTOR_HEX),
+    ...Object.values(CARRIER_STYLE).map((s) => s.stroke),
+    SW_COLORS.brand,
+  ]),
+);
+
+const processArrowId = (hex: string) => `builder-process-arrow-${hex.replace(/[^a-zA-Z0-9]/g, '')}`;
 
 function BuilderProcessView({
   twin,
@@ -4966,17 +5070,27 @@ function BuilderProcessView({
         style={{ display: 'block' }}
       >
         <defs>
-          <marker
-            id="builder-process-arrow"
-            viewBox="0 0 10 10"
-            refX={9}
-            refY={5}
-            markerWidth={6}
-            markerHeight={6}
-            orient="auto"
-          >
-            <path d="M0 0 L10 5 L0 10 z" fill={SW_COLORS.brand} />
-          </marker>
+          {/* One head per wire colour, sized in USER SPACE. The default
+              `markerUnits="strokeWidth"` multiplied a 6-unit head by the
+              2.4px flow stroke into a 14px arrowhead on a 56px block — the
+              head read as the subject and the wire as its tail. Fixed user
+              units also keep every kind's head identical instead of scaling
+              with each one's line weight. */}
+          {PROCESS_ARROW_HEX.map((hex) => (
+            <marker
+              key={hex}
+              id={processArrowId(hex)}
+              viewBox="0 0 10 10"
+              refX={10}
+              refY={5}
+              markerWidth={9}
+              markerHeight={9}
+              markerUnits="userSpaceOnUse"
+              orient="auto"
+            >
+              <path d="M0 1.6 L10 5 L0 8.4 z" fill={hex} />
+            </marker>
+          ))}
         </defs>
 
         {/* Background plate. Carries `data-canvas-bg` so the page's single
@@ -5019,18 +5133,23 @@ function BuilderProcessView({
             return false;
           };
           return wires.map(({ c, a, b }) => {
-            const dx = b.x - a.x;
-            const cx1 = a.x + Math.max(28, dx / 2);
-            const cx2 = b.x - Math.max(28, dx / 2);
-            const path = `M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${b.y}, ${b.x} ${b.y}`;
+            const path = processWirePath(a, b);
             const isSel = selectedConnId === c.id;
             const wireOpacity =
               focusActive && !wireFocused(c) ? FOCUS_DIM : 1;
             const fs = flowStyleFor(c);
+            const hex = isSel ? SW_COLORS.brand : fs.stroke;
             return (
               <g
                 key={c.id}
-                style={{ opacity: isSel ? 1 : wireOpacity, transition: 'opacity 160ms' }}
+                // Softening lives HERE, on the group, not as a strokeOpacity
+                // on the line: the arrowhead is a fill and never picked the
+                // stroke's opacity up, so a 0.85 wire always ended in a
+                // full-strength head that read as a separate object.
+                style={{
+                  opacity: (isSel ? 1 : wireOpacity) * 0.92,
+                  transition: 'opacity 160ms',
+                }}
               >
                 {/* Fat transparent hit-area so the thin wire is easy to
                     click-select; the visible stroke stays non-interactive. */}
@@ -5060,11 +5179,11 @@ function BuilderProcessView({
                 <path
                   d={path}
                   fill="none"
-                  stroke={isSel ? SW_COLORS.brand : fs.stroke}
+                  stroke={hex}
                   strokeWidth={fs.width}
                   strokeDasharray={fs.dash ?? undefined}
-                  strokeOpacity={0.85}
-                  markerEnd="url(#builder-process-arrow)"
+                  strokeLinecap="round"
+                  markerEnd={`url(#${processArrowId(hex)})`}
                   pointerEvents="none"
                 />
               </g>
@@ -5082,18 +5201,17 @@ function BuilderProcessView({
           if (!outPort) return null;
           const live = posOf(from.ws.id)!;
           const a = portPosition({ ...from, x: live.x, y: live.y }, outPort, 'out');
-          const bx = pendingWire.x;
-          const by = pendingWire.y;
-          const dx = bx - a.x;
-          const cx1 = a.x + Math.max(28, dx / 2);
-          const cx2 = bx - Math.max(28, dx / 2);
+          // The cursor end gets no halo trim — the wire should reach the
+          // pointer exactly, not stop 8px short of it.
+          const tip = { x: pendingWire.x + PROCESS_PORT_HALO, y: pendingWire.y };
           return (
             <path
-              d={`M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${by}, ${bx} ${by}`}
+              d={processWirePath(a, tip)}
               fill="none"
               stroke={SW_COLORS.brand}
-              strokeWidth={2.5}
+              strokeWidth={2}
               strokeDasharray="5 4"
+              strokeLinecap="round"
               strokeOpacity={0.9}
               pointerEvents="none"
             />
@@ -5150,14 +5268,14 @@ function BuilderProcessView({
                   reads as a ring whatever the symbol's fill colour is. */}
               {(isSelected || bottleneck) && (
                 <rect
-                  x={-4}
-                  y={-4}
-                  width={n.w + 8}
-                  height={n.h + 8}
+                  x={-PROCESS_RING_INSET}
+                  y={-PROCESS_RING_INSET}
+                  width={n.w + PROCESS_RING_INSET * 2}
+                  height={n.h + PROCESS_RING_INSET * 2}
                   rx={14}
                   fill="none"
                   stroke={isSelected ? SW_COLORS.brand : SW_COLORS.alarm}
-                  strokeWidth={3}
+                  strokeWidth={PROCESS_RING_STROKE}
                 />
               )}
               {/* Line tag. This is what replaced the dashed lane bands: the
@@ -5203,17 +5321,24 @@ function BuilderProcessView({
                   </g>
                 );
               })()}
-              {/* Symbol — a solid, category-coloured plate (AnyLogic-style).
-                  `stationMark` decides what sits on it: a real machine shows
-                  its own family mark and type code, exactly as it does on the
-                  2D floor and in the STATIONS palette, so a DNLS is a DNLS in
-                  every tab instead of a generic Service gear here and a seam
-                  diagonal next door. PML fixtures resolve to no mark and fall
-                  back to the kind's glyph. */}
+              {/* Symbol — a solid, category-coloured plate (AnyLogic-style)
+                  carrying the PML **block** glyph.
+                  
+                  It used to carry the *machine* mark instead whenever
+                  `stationMark` resolved one, on the argument that "a DNLS
+                  should be a DNLS in every tab". That argument had the tabs
+                  backwards. PROCESS is the view where a station is a block in
+                  a flow — Source, Queue, Service, Sink — and the block kind is
+                  the one property the canvas exists to show; it is also the
+                  property the Inspector's Kind picker right there edits. The
+                  machine mark answers a question this canvas isn't asking, and
+                  answering it meant a Service block and a Delay block were
+                  indistinguishable as long as both were sewing machines. The
+                  machine identity is still on the 2D floor, in the STATIONS
+                  palette, and in this node's own name label below. */}
               <PmlBlockFace
                 category={n.block.spec.category}
                 Icon={n.block.spec.Icon}
-                mark={stationMark(n.ws.catalogId)}
                 size={n.w}
               />
               {/* Name — centred beneath the symbol, the only text on the node. */}
@@ -5232,8 +5357,7 @@ function BuilderProcessView({
               {/* Input port dots — left edge. Clickable in CONNECT mode
                   once a source has been picked. */}
               {n.block.inputs.map((p, i) => {
-                const slot = (i + 1) / (n.block.inputs.length + 1);
-                const py = n.h * slot;
+                const py = portOffsetY(i, n.block.inputs.length, n.h);
                 // Armed in two-click CONNECT mode (a source is already picked)
                 // OR while dragging a kind-compatible rubber-band wire here.
                 const wireArmed =
@@ -5245,10 +5369,12 @@ function BuilderProcessView({
                 const armed = wireArmed || clickArmed;
                 const isHover =
                   hoverPort?.wsId === n.ws.id && hoverPort?.portId === p.id;
+                const r = isHover ? 6.5 : armed ? 6 : PROCESS_PORT_R;
+                const sw = armed ? 2.5 : 2;
                 return (
                   <g
                     key={`in-${p.id}`}
-                    transform={`translate(0, ${py})`}
+                    transform={`translate(${-PROCESS_PORT_GAP}, ${py})`}
                     style={{ cursor: armed ? 'crosshair' : 'default' }}
                     onMouseDown={(e) => e.stopPropagation()}
                     onMouseEnter={() => {
@@ -5266,19 +5392,26 @@ function BuilderProcessView({
                     {/* Larger transparent hit area so the click/hover target
                         is comfortable even though the visible dot is small. */}
                     <circle cx={0} cy={0} r={12} fill="transparent" />
+                    {/* Paper knockout — see PROCESS_PORT_HALO. */}
+                    <circle cx={0} cy={0} r={r + sw / 2 + 1.5} fill={SW_COLORS.paper} />
                     <circle
                       cx={0}
                       cy={0}
-                      r={isHover ? 7 : armed ? 6 : 5}
+                      r={r}
                       fill={SW_COLORS.paper}
                       stroke={armed ? SW_COLORS.brand : tint.stroke}
-                      strokeWidth={armed ? 2.5 : 2}
+                      strokeWidth={sw}
                     />
                     <circle cx={0} cy={0} r={1.8} fill={armed ? SW_COLORS.brand : tint.stroke} />
                     {n.block.inputs.length > 1 && (
+                      // Outboard of the dot and a few px ABOVE the wire axis.
+                      // Centred over the dot, a label sat on the dot above it
+                      // (SelectOutput's `fail` landed on the `pass` dot); level
+                      // with the dot, it sat under the wire. This clears both.
                       <text
-                        x={9}
-                        y={3}
+                        x={-11}
+                        y={-3.5}
+                        textAnchor="end"
                         fontFamily={SW_FONTS.mono}
                         fontSize={8}
                         fontWeight={700}
@@ -5296,17 +5429,17 @@ function BuilderProcessView({
                   to set the source `(wsId, portId)`. The currently-selected
                   fromPort is highlighted with a brand-coloured halo. */}
               {n.block.outputs.map((p, i) => {
-                const slot = (i + 1) / (n.block.outputs.length + 1);
-                const py = n.h * slot;
+                const py = portOffsetY(i, n.block.outputs.length, n.h);
                 const isFrom =
                   (connect.on &&
                     connect.fromWsId === n.ws.id &&
                     connect.fromPort === p.id) ||
                   (pendingWire?.fromWsId === n.ws.id && pendingWire?.fromPort === p.id);
+                const r = isFrom ? 6 : PROCESS_PORT_R;
                 return (
                   <g
                     key={`out-${p.id}`}
-                    transform={`translate(${n.w}, ${py})`}
+                    transform={`translate(${n.w + PROCESS_PORT_GAP}, ${py})`}
                     style={{ cursor: 'crosshair' }}
                     onMouseDown={(e) => {
                       // Two-click CONNECT mode sets the source on click;
@@ -5321,31 +5454,34 @@ function BuilderProcessView({
                     }}
                   >
                     <circle cx={0} cy={0} r={12} fill="transparent" />
+                    {/* Paper knockout — see PROCESS_PORT_HALO. */}
+                    <circle cx={0} cy={0} r={r + 1 + 1.5} fill={SW_COLORS.paper} />
                     {isFrom && (
                       <circle
                         cx={0}
                         cy={0}
-                        r={9}
+                        r={9.5}
                         fill="none"
                         stroke={SW_COLORS.brand}
-                        strokeWidth={2}
+                        strokeWidth={1.5}
                         strokeDasharray="2 2"
                       />
                     )}
                     <circle
                       cx={0}
                       cy={0}
-                      r={isFrom ? 6 : 5}
+                      r={r}
                       fill={isFrom ? SW_COLORS.brand : tint.stroke}
                       stroke={isFrom ? SW_COLORS.brand : tint.stroke}
                       strokeWidth={2}
                     />
                     <circle cx={0} cy={0} r={1.8} fill="#fff" />
                     {n.block.outputs.length > 1 && (
+                      // Mirror of the input labels — see there.
                       <text
-                        x={-9}
-                        y={3}
-                        textAnchor="end"
+                        x={11}
+                        y={-3.5}
+                        textAnchor="start"
                         fontFamily={SW_FONTS.mono}
                         fontSize={8}
                         fontWeight={700}
@@ -5376,7 +5512,6 @@ function BuilderProcessView({
               <PmlBlockFace
                 category={spec.category}
                 Icon={spec.Icon}
-                mark={stationMark(drop.catalogId)}
                 size={BLOCK_W}
                 ghost
               />
@@ -5417,8 +5552,18 @@ function BuilderProcessView({
     <button
       type="button"
       onClick={() => {
-        const hasAuthored = twin.workstations.some((w) => w.block?.processPos);
-        if (hasAuthored && !arrangeArmed) {
+        // "Would this move anything?", not "does any block carry a
+        // processPos". Every block carries one now — the canvas pins the seed
+        // instead of re-deriving it under the user — so the old test was
+        // always true and a no-op arrange cost two clicks forever.
+        const seededNow = computeProcessSeedPositions(twin);
+        const currentNow = resolveProcessPositions(twin);
+        const wouldMove = twin.workstations.some((w) => {
+          const sp = seededNow.get(w.id);
+          const cp = currentNow.get(w.id);
+          return !!sp && !!cp && (sp.x !== cp.x || sp.y !== cp.y);
+        });
+        if (wouldMove && !arrangeArmed) {
           setArrangeArmed(true);
           if (arrangeTimer.current) window.clearTimeout(arrangeTimer.current);
           arrangeTimer.current = window.setTimeout(() => setArrangeArmed(false), 4000);
@@ -5569,9 +5714,33 @@ function WorkstationAssignmentsView({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <div style={sectionLabel}>Operators on this station</div>
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: rows.length === 0 ? SW_COLORS.muted : SW_COLORS.brand }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+          <div style={sectionLabel}>Operators on this station</div>
+          {/* The three-line "no operator is assigned yet…" paragraph that used
+              to sit under this list said nothing the `uncovered` chip on the
+              right does not, and it said it permanently, in a 260px column.
+              Read once, then pure cost on every visit — so it lives behind
+              the `?` with the rest of the explanation. */}
+          <HelpDot label="How are operators assigned?">
+            An <strong>Assignment</strong> row ties one operator to one station,
+            with a role and a share of the shift. Seeded and imported twins write
+            them automatically; a station you place by hand starts{' '}
+            <strong>uncovered</strong> and needs one.
+            <br />
+            <br />
+            A station can carry several operators (primary + helpers, or a
+            rotation cell), and one operator can cover several stations — that is
+            what <strong>share</strong> below 100 % means. The engine divides the
+            station's cycle by the summed share, so an operator at 50 % doubles
+            the time a piece spends here.
+            <br />
+            <br />
+            This roster is not the same knob as the parallel-channel count the
+            engine runs the station on. Set that on the Line Balance tab.
+          </HelpDot>
+        </div>
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: rows.length === 0 ? SW_COLORS.muted : SW_COLORS.brand, whiteSpace: 'nowrap' }}>
           {summary}
         </div>
       </div>
@@ -5599,13 +5768,7 @@ function WorkstationAssignmentsView({
           <span style={{ fontWeight: 600, color: SW_COLORS.muted }}>operator @ {Math.round(stationShareFrac * 100)}%</span>
         </div>
       )}
-      {rows.length === 0 ? (
-        <div style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.body, padding: '4px 0' }}>
-          No operator is assigned to this workstation yet. Seeded twins
-          assign operators automatically — manually-placed stations need
-          an explicit Assignment row.
-        </div>
-      ) : (
+      {rows.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
           {rows.map((a) => {
             const op = operatorsById.get(a.operatorId);
@@ -5735,27 +5898,36 @@ function WorkstationAssignmentsView({
 }
 
 /**
- * Per-line POLICY editor — exposes the system-aware behaviour knobs that
- * live on `SewingLine.policy`. Unset fields show their `defaultPolicyFor`
- * value as a placeholder so the user sees what the engine will fall back
- * to. Editing a field promotes it to a real override; clearing the input
- * sends `undefined` and the line goes back to using the system default.
+ * Per-line POLICY editor — exposes the behaviour knobs that live on
+ * `SewingLine.policy`. Unset fields show their `DEFAULT_LINE_POLICY` value as
+ * a placeholder so the user sees what the engine will fall back to. Editing a
+ * field promotes it to a real override; clearing the input sends `undefined`
+ * and the line goes back to using the default.
+ *
+ * Everything left here is genuinely line-wide. A "Helpers" select used to sit
+ * alongside these and did not belong: a *station* is what starves, so who
+ * covers it is a per-station call — the app already models that as
+ * `Assignment` rows with `role: 'helper' | 'floater'` against a `wsId`.
  *
  * Rendered inline inside each sewing-line card in the Department inspector.
- * Collapsed by default to keep the line card compact.
  */
 function LinePolicyEditor({
   line,
+  memberIds,
   onUpdateLine,
+  onSetOperation,
 }: {
   line: SewingLine;
+  /** Stations on this line. A policy edit restamps their bundle size — see
+   *  `patch` below. */
+  memberIds: string[];
   onUpdateLine: (
     id: string,
     patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>,
   ) => void;
+  onSetOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const defaults = defaultPolicyFor(line.productionSystem);
+  const defaults = DEFAULT_LINE_POLICY;
   const p: LinePolicy = line.policy ?? {};
 
   // Field is considered "overridden" if the user has set it explicitly.
@@ -5763,11 +5935,7 @@ function LinePolicyEditor({
   const overrideCount =
     (p.bundleSize !== undefined ? 1 : 0) +
     (p.pieceFlow !== undefined ? 1 : 0) +
-    (p.taktSec !== undefined ? 1 : 0) +
-    (p.conveyorSpeed !== undefined ? 1 : 0) +
-    (p.rotationGroupSize !== undefined ? 1 : 0) +
-    (p.maxWipPerStation !== undefined ? 1 : 0) +
-    (p.helperMode !== undefined ? 1 : 0);
+    (p.maxWipPerStation !== undefined ? 1 : 0);
 
   function patch(next: Partial<LinePolicy>) {
     const merged: LinePolicy = { ...p, ...next };
@@ -5777,30 +5945,39 @@ function LinePolicyEditor({
     const cleaned: LinePolicy = {};
     if (merged.bundleSize !== undefined) cleaned.bundleSize = merged.bundleSize;
     if (merged.pieceFlow !== undefined) cleaned.pieceFlow = merged.pieceFlow;
-    if (merged.taktSec !== undefined) cleaned.taktSec = merged.taktSec;
-    if (merged.conveyorSpeed !== undefined) cleaned.conveyorSpeed = merged.conveyorSpeed;
-    if (merged.rotationGroupSize !== undefined) cleaned.rotationGroupSize = merged.rotationGroupSize;
     if (merged.maxWipPerStation !== undefined) cleaned.maxWipPerStation = merged.maxWipPerStation;
-    if (merged.helperMode !== undefined) cleaned.helperMode = merged.helperMode;
     onUpdateLine(line.id, {
       policy: Object.keys(cleaned).length === 0 ? undefined : cleaned,
     });
+    // ── And restamp the line's stations ──────────────────────────────────
+    // How work is batched is the one policy field the engine actually reads,
+    // and it reads it off each STATION (`operation.bundleSize`) — that is
+    // what sets a Service's cycle to `SMV x bundle` and what a Source picks up
+    // as its pieces-per-release. The line seeder stamped that number once, at
+    // creation, and nothing rewrote it afterwards: editing the policy here
+    // changed the badge on the canvas band and the advisor's arithmetic while
+    // the run carried on at whatever bundle the line happened to be born
+    // with. The policy is the control; the station field is where it lands.
+    if (next.pieceFlow === undefined && next.bundleSize === undefined) return;
+    const effective = (merged.pieceFlow ?? defaults.pieceFlow)
+      ? 1
+      : merged.bundleSize ?? defaults.bundleSize;
+    for (const wsId of memberIds) onSetOperation(wsId, { bundleSize: effective });
   }
 
-  // Show only the knobs that are meaningful for this system. Hiding the
-  // dead fields keeps the editor honest — e.g. takt time has no role on a
-  // PBS line, so showing the field would just confuse the user.
-  const sys = line.productionSystem;
-  const showBundle = !defaults.pieceFlow;          // PBS — bundle is THE primitive
-  const showPieceFlow = true;                       // every system has a notion of this
-  const showTakt = sys === 'synchro';
-  const showConveyor = sys === 'synchro' || sys === 'UPS';
-  const showRotation = sys === 'modular';
-  const showWipCap = defaults.pieceFlow;            // piece-flow systems use WIP caps
-  const showHelper = true;
+  // Which fields are live depends on the line's OWN batching choice, not on
+  // a system label. Bundle size is meaningless once pieces flow one at a
+  // time, and a per-station WIP cap is the piece-flow equivalent of the
+  // bundle — so the two swap places as `pieceFlow` is toggled, and the panel
+  // keeps a stable three-field height either way.
+  //
+  // The editor used to gate every field on the production system: takt time
+  // appeared only on `synchro`, conveyor speed on `synchro`/`UPS`, rotation
+  // cell on `modular`. Those three fields are gone with the systems.
+  const effectivePieceFlow = p.pieceFlow ?? defaults.pieceFlow;
 
   // Compact number-input renderer. Empty input ⇒ `undefined` so the field
-  // falls back to the system default.
+  // falls back to the default.
   function numField(
     label: string,
     value: number | undefined,
@@ -5812,15 +5989,14 @@ function LinePolicyEditor({
       <div>
         <label style={{ ...fieldLabel, marginTop: 0 }}>{label}</label>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <input
-            type="number"
-            value={value ?? ''}
+          {/* allowEmpty: clearing the box IS the edit here — it drops the
+              override and the field falls back to the default. */}
+          <NumberInput
+            value={value}
+            allowEmpty
             placeholder={String(placeholder)}
-            onChange={(e) => {
-              const raw = e.target.value;
-              onChange(raw === '' ? undefined : Number(raw));
-            }}
-            style={{ ...inputBase, padding: '3px 6px', fontSize: 11 }}
+            onChange={onChange}
+            style={{ ...inputBase, padding: '3px 6px', fontSize: 11, minWidth: 0 }}
           />
           {unit && (
             <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
@@ -5834,128 +6010,117 @@ function LinePolicyEditor({
 
   return (
     <div style={{ marginTop: 8, borderTop: `1px dashed ${SW_COLORS.line}`, paddingTop: 6 }}>
-      <button
-        onClick={() => setOpen((v) => !v)}
+      {/* Always open. This was a disclosure with a chevron, which hid three or
+          four fields behind a click on a panel that is already a list of
+          fields — the collapse bought nothing and cost the user a step to
+          find the only line-level knobs there are. The header stays as a
+          label, so the override count is still readable at a glance. */}
+      <div
         style={{
-          ...btnSec(),
-          padding: '3px 8px',
+          padding: '3px 0',
           fontSize: 10,
-          background: 'transparent',
-          border: 'none',
+          fontWeight: 700,
           color: overrideCount > 0 ? SW_COLORS.brand : SW_COLORS.muted,
           display: 'flex',
           alignItems: 'center',
           gap: 6,
         }}
-        title="System-specific behaviour knobs"
+        title="Line behaviour knobs"
       >
-        <Chevron open={open} />
         <span>POLICY</span>
         <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
           {overrideCount > 0
             ? `${overrideCount} override${overrideCount === 1 ? '' : 's'}`
-            : `${line.productionSystem.toUpperCase()} defaults`}
+            : 'defaults'}
         </span>
-      </button>
-      {open && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 6,
-            marginTop: 6,
-            paddingLeft: 14,
-          }}
-        >
-          {showBundle &&
-            numField(
-              'Bundle size',
-              p.bundleSize,
-              defaults.bundleSize,
-              'pcs',
-              (v) => patch({ bundleSize: v }),
-            )}
-          {showPieceFlow && (
-            <div>
-              <label style={{ ...fieldLabel, marginTop: 0 }}>Piece flow</label>
-              <select
-                value={
-                  p.pieceFlow === undefined
-                    ? 'default'
-                    : p.pieceFlow
-                      ? 'yes'
-                      : 'no'
-                }
-                onChange={(e) => {
-                  const v = e.target.value;
-                  patch({
-                    pieceFlow:
-                      v === 'default' ? undefined : v === 'yes' ? true : false,
-                  });
-                }}
-                style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
-              >
-                <option value="default">
-                  default · {defaults.pieceFlow ? 'piece' : 'bundle'}
-                </option>
-                <option value="yes">Piece-by-piece</option>
-                <option value="no">Batched (bundle)</option>
-              </select>
-            </div>
-          )}
-          {showTakt &&
-            numField('Takt time', p.taktSec, defaults.taktSec, 'sec', (v) =>
-              patch({ taktSec: v }),
-            )}
-          {showConveyor &&
-            numField(
-              'Conveyor speed',
-              p.conveyorSpeed,
-              defaults.conveyorSpeed,
-              'cells/min',
-              (v) => patch({ conveyorSpeed: v }),
-            )}
-          {showRotation &&
-            numField(
-              'Rotation cell',
-              p.rotationGroupSize,
-              defaults.rotationGroupSize,
-              'stations',
-              (v) => patch({ rotationGroupSize: v }),
-            )}
-          {showWipCap &&
-            numField(
-              'Max WIP/stn',
-              p.maxWipPerStation,
-              defaults.maxWipPerStation,
-              'pcs',
-              (v) => patch({ maxWipPerStation: v }),
-            )}
-          {showHelper && (
-            <div>
-              <label style={{ ...fieldLabel, marginTop: 0 }}>Helpers</label>
-              <select
-                value={p.helperMode ?? 'default'}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  patch({
-                    helperMode:
-                      v === 'default'
-                        ? undefined
-                        : (v as NonNullable<LinePolicy['helperMode']>),
-                  });
-                }}
-                style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
-              >
-                <option value="default">default · {defaults.helperMode}</option>
-                <option value="none">none</option>
-                <option value="adjacent">adjacent</option>
-                <option value="pool">pool</option>
-              </select>
-            </div>
-          )}
-        </div>
-      )}
+      </div>
+      <div
+        style={{
+          display: 'grid',
+          // `minmax(0, 1fr)`, not `1fr`. A bare `1fr` is `minmax(auto, 1fr)`,
+          // so each column is floored at its content's min-content width —
+          // and the widest child here is a HudSelect whose label reads
+          // "Batched (bundle)". The columns grew past the 210px card and the
+          // right-hand control hung out over the panel edge.
+          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+          gap: 6,
+          marginTop: 6,
+        }}
+      >
+          <div>
+            <label style={{ ...fieldLabel, marginTop: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span>Piece flow</span>
+              <HelpDot label="What do the flow types mean?">
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>How work moves down the line</div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>Batched (bundle)</strong> — pieces are tied into
+                  bundles and travel together. A station takes a whole bundle,
+                  works every piece in it, and only then hands it on.
+                </div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>Piece-by-piece</strong> — one piece moves on as soon
+                  as it is finished. <strong>Max WIP/stn</strong> caps how many
+                  may pile up at any one station.
+                </div>
+                <div style={{ fontWeight: 700, marginTop: 8, marginBottom: 4 }}>
+                  What it changes in the numbers
+                </div>
+                <div style={{ marginBottom: 6 }}>
+                  Setting it restamps the bundle size on every station on this
+                  line, and the run reads that station value:
+                </div>
+                <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, marginBottom: 6 }}>
+                  cycle per handoff = SMV × bundle
+                </div>
+                <div>
+                  So a 30-piece bundle makes each station hold work 30× longer
+                  per handoff than piece flow does, and releases it 30 pieces at
+                  a time. Same pieces per hour when nothing is starved — far
+                  longer queues, far more WIP, and a much longer throughput time
+                  for the first garment out.
+                </div>
+              </HelpDot>
+            </label>
+            <HudSelect
+              value={
+                p.pieceFlow === undefined
+                  ? 'default'
+                  : p.pieceFlow
+                    ? 'yes'
+                    : 'no'
+              }
+              onChange={(v) =>
+                patch({
+                  pieceFlow:
+                    v === 'default' ? undefined : v === 'yes' ? true : false,
+                })
+              }
+              variant="light"
+              size="sm"
+              width="100%"
+              options={[
+                { value: 'default', label: `default · ${defaults.pieceFlow ? 'piece' : 'bundle'}` },
+                { value: 'yes', label: 'Piece-by-piece' },
+                { value: 'no', label: 'Batched (bundle)' },
+              ]}
+            />
+          </div>
+          {effectivePieceFlow
+            ? numField(
+                'Max WIP/stn',
+                p.maxWipPerStation,
+                defaults.maxWipPerStation,
+                'pcs',
+                (v) => patch({ maxWipPerStation: v }),
+              )
+            : numField(
+                'Bundle size',
+                p.bundleSize,
+                defaults.bundleSize,
+                'pcs',
+                (v) => patch({ bundleSize: v }),
+              )}
+      </div>
     </div>
   );
 }
@@ -5968,10 +6133,11 @@ interface InspectorProps {
   onRemoveWs: (id: string) => void;
   onSetOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
   onSetResources: (wsId: string, patch: Partial<Workstation['resources']>) => void;
-  onSetKpiTargets: (wsId: string, patch: Partial<Workstation['kpiTargets']>) => void;
   /** Set or clear the workstation's PML block override. */
   onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
   onRemoveConnector: (id: string) => void;
+  /** Wire two stations together from the Inspector's port rows. */
+  onAddConnector: (input: { fromWsId: string; toWsId: string; fromPort?: string; toPort?: string }) => void;
   /** Add a new sewing line to a department. */
   onAddLine: () => void;
   /** Remove a sewing line. */
@@ -5980,6 +6146,14 @@ interface InspectorProps {
   onUpdateLine: (id: string, patch: Partial<Omit<SewingLine, 'id'>>) => void;
   /** Assign / unassign a single workstation to a line. */
   onAssignLine: (wsId: string, lineId: string | null) => void;
+  /** Which canvas the user is looking at. The Placement section reports the
+   *  position on THAT canvas — a station has two independent ones (floor
+   *  cells and PROCESS px) and showing the floor's while the user is staring
+   *  at the PROCESS graph is how the x / y ended up describing nothing on
+   *  screen. */
+  canvasMode: CanvasMode;
+  /** Move the selected block on the PROCESS canvas. */
+  onSetProcessPos: (wsId: string, pos: { x: number; y: number }) => void;
   /** Collapse the pane to its rail. */
   onCollapse: () => void;
 }
@@ -6017,7 +6191,7 @@ function Inspector(props: InspectorProps) {
         }}
       >
         <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.ink }}>Inspector</span>
-        <PaneCollapseButton side="right" onClick={props.onCollapse} />
+        <PaneCollapseButton side="right" label="inspector" onClick={props.onCollapse} />
       </div>
       <InspectorBody {...props} />
     </div>
@@ -6026,6 +6200,13 @@ function Inspector(props: InspectorProps) {
 
 function InspectorBody(props: InspectorProps) {
   const confirm = useConfirm();
+  const navigate = useNavigate();
+  // The factory's name is `project.meta.name` — what the user typed on the
+  // Menu and what the TopBar shows. `twin.name` is the *scenario's* label and
+  // seeds to the literal string "My factory", so this header used to greet
+  // every user by a name none of them had chosen. Fall back to it only when
+  // the project has no name yet.
+  const factoryName = useProject((s) => s.meta.name);
   // Operation binding is picked from the garment's bulletin, not typed. An
   // unbound station falls back to its own line's garment, so a freshly
   // dropped station offers the right ops without the user picking one.
@@ -6047,13 +6228,13 @@ function InspectorBody(props: InspectorProps) {
     const lines = props.twin.lines ?? [];
     return (
       <div style={wrapper}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 12 }}>
-          <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Factory</div>
-          <div style={{ ...SW_TYPE.title, color: SW_COLORS.ink }}>{props.twin.name}</div>
-          <div style={{ display: 'flex', gap: 6, paddingTop: 2 }}>
-            <InspectorChip edge={SW_COLORS.line}>{`${props.twin.workstations.length} STN`}</InspectorChip>
-            <InspectorChip edge={SW_COLORS.line}>{`${lines.length} LINE${lines.length === 1 ? '' : 'S'}`}</InspectorChip>
-          </div>
+        {/* Name only. An "Factory" overline sat above it, restating what the
+            pane header two rows up already says, and a `3 STN · 1 LINE` chip
+            pair sat below — counts the user can read off the floor and off
+            the sewing-line list further down this same panel, so they bought
+            nothing but height at the top of the scroll. */}
+        <div style={{ ...SW_TYPE.title, color: SW_COLORS.ink, marginBottom: 12 }}>
+          {factoryName || props.twin.name}
         </div>
 
         <div style={{ ...SW_TYPE.body, color: SW_COLORS.muted, marginBottom: 12 }}>
@@ -6120,12 +6301,23 @@ function InspectorBody(props: InspectorProps) {
                       ✕
                     </button>
                   </div>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
-                    <InspectorChip edge={SW_COLORS.line}>{line.productionSystem}</InspectorChip>
-                    <InspectorChip edge={SW_COLORS.line}>{`${memberCount} STN`}</InspectorChip>
-                  </div>
+                  {/* The card used to carry a chip row (production system ·
+                      station count) and a DAILY TARGET field with a derived
+                      takt readout under it. The production system is not a
+                      concept the app develops yet, so naming it here asked the
+                      user to reason about something the rest of the UI never
+                      follows through on; the daily target has been removed
+                      from the model entirely — Reports now always reads takt
+                      off the bottleneck. */}
                   <div style={{ marginTop: 8 }}>
-                    <LinePolicyEditor line={line} onUpdateLine={props.onUpdateLine} />
+                    <LinePolicyEditor
+                      line={line}
+                      memberIds={props.twin.workstations
+                        .filter((w) => w.lineId === line.id)
+                        .map((w) => w.id)}
+                      onUpdateLine={props.onUpdateLine}
+                      onSetOperation={props.onSetOperation}
+                    />
                   </div>
                 </div>
               );
@@ -6140,15 +6332,11 @@ function InspectorBody(props: InspectorProps) {
   // Workstation
   const ws = props.twin.workstations.find((w) => w.id === props.selected!.id);
   if (!ws) return <div style={wrapper}>Selection lost.</div>;
-  const fixture = lookupFixture(ws.catalogId);
   // Every line in the factory is assignable — the floor is free space, so a
   // station's line membership is not constrained by where it physically sits.
   const allLines = props.twin.lines ?? [];
-  const wsLine = ws.lineId ? allLines.find((l) => l.id === ws.lineId) ?? null : null;
-  // Header chips + stat tiles — all authoring data (bulletin SMV, staffing),
-  // never sim results; those stay in the Sim view.
-  const machineCode = ISO_FIXTURE_TO_MACHINE_CODE[ws.catalogId];
-  const opMeta = opMetaFor(ws, garments.byId);
+  // Stat tiles — authoring data (bulletin SMV, staffing), never sim results;
+  // those stay in the Sim view.
   const boundOp =
     ws.operation.opId && ws.operation.garmentId
       ? garments.byId[ws.operation.garmentId]?.operations.find((o) => o.id === ws.operation.opId)
@@ -6156,30 +6344,30 @@ function InspectorBody(props: InspectorProps) {
 
   return (
     <div style={wrapper}>
-      {/* Identity masthead — overline kicker, display name, chip row. The
-          name is edited in the Identity group below; this is the read view. */}
+      {/* Masthead — the two disclosure actions on the left, the delete action
+          on the right.
+          It used to lead with a chip row repeating the op code, the machine
+          code and the line name. Every one of those is authored a few rows
+          below in this same panel (Identity → Sewing line, Operation → bound
+          op), so the chips were a read-only echo of controls already on
+          screen — the most expensive real estate in the Inspector spent
+          restating what the user was about to scroll past anyway.
+          The station's sections — Identity, Placement, Process block and the
+          three lenses — are all collapsible, and folding or unfolding the lot
+          was six clicks. The palette has carried the same control over its
+          own sections for a while; this is it, in the other pane. */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
-          <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Workstation</div>
-          <div style={{ ...SW_TYPE.title, color: SW_COLORS.ink, overflowWrap: 'anywhere' }}>
-            {ws.name}
-          </div>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', paddingTop: 2 }}>
-            {ws.operation.opId && (
-              <InspectorChip bg={SW_COLORS.brandLite} fg={SW_COLORS.brandText} edge={SW_COLORS.brandEdge}>
-                {opMeta.code}
-              </InspectorChip>
-            )}
-            {machineCode && <InspectorChip edge={SW_COLORS.line}>{machineCode}</InspectorChip>}
-            {wsLine && (
-              <InspectorChip edge={SW_COLORS.line} swatch={DEPT_COLOR_HEX[wsLine.color]}>
-                {wsLine.name}
-              </InspectorChip>
-            )}
-          </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <InspectorDiscloseAll open={false} />
+          <InspectorDiscloseAll open />
         </div>
-        <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '3px 8px', flex: 'none' }}>
-          ✕ DELETE
+        <button
+          onClick={() => props.onRemoveWs(ws.id)}
+          style={{ ...btnSec(), color: SW_COLORS.alarm, padding: '4px 6px', flex: 'none', display: 'inline-flex', alignItems: 'center' }}
+          title="Delete this station"
+          aria-label="Delete this station"
+        >
+          <Icon name="trash" size={13} />
         </button>
       </div>
 
@@ -6209,104 +6397,136 @@ function InspectorBody(props: InspectorProps) {
         onChange={(e) => props.onUpdateWs(ws.id, { name: e.target.value })}
         style={inputBase}
       />
-      <div style={{ marginTop: 4, fontSize: 11, color: SW_COLORS.muted }}>
-        Fixture: <strong style={{ color: SW_COLORS.muted }}>{fixture?.label ?? ws.catalogId}</strong>
-      </div>
+      <EntityIdRow id={ws.id} />
 
       {/* SEWING LINE — the only grouping a station can belong to. */}
       {allLines.length > 0 && (
         <>
           <div style={{ height: 10 }} />
           <label style={fieldLabel}>Sewing line</label>
-          <select
+          <HudSelect
             value={ws.lineId ?? ''}
-            onChange={(e) =>
-              props.onAssignLine(ws.id, e.target.value === '' ? null : e.target.value)
-            }
-            style={{ ...inputBase, appearance: 'auto' }}
-          >
-            <option value="">— Unassigned (free-standing fixture) —</option>
-            {allLines.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name}
-              </option>
-            ))}
-          </select>
-          {wsLine && (
-            <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: 8,
-                  height: 8,
-                  borderRadius: 2,
-                  background: DEPT_COLOR_HEX[wsLine.color],
-                  marginRight: 6,
-                  verticalAlign: 'middle',
-                }}
-              />
-              {wsLine.productionSystem.toUpperCase()}
-              {wsLine.garmentId ? ` · ${wsLine.garmentId}` : ''}
-            </div>
-          )}
+            onChange={(v) => props.onAssignLine(ws.id, v === '' ? null : v)}
+            variant="light"
+            size="sm"
+            width="100%"
+            options={[
+              { value: '', label: '— Unassigned (free-standing fixture) —' },
+              ...allLines.map((l) => ({
+                value: l.id,
+                label: l.name,
+                leading: (
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 2,
+                      background: DEPT_COLOR_HEX[l.color],
+                      display: 'inline-block',
+                    }}
+                  />
+                ),
+              })),
+            ]}
+          />
+          {/* The picked line used to be echoed underneath as
+              "PBS · tshirt". The production system is not surfaced anywhere
+              the user can act on it, and the garment is the line's own
+              property, edited on the line — so the echo only restated the
+              swatch and label already inside the control above. */}
         </>
       )}
 
       </InspectorGroup>
 
       <InspectorGroup id="ws.placement" title="Placement" defaultOpen={false}>
-      <div style={{ ...sectionLabel, marginBottom: 6 }}>Position (cells)</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-        <NumField label="x" step={0.1} value={ws.position.x} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, x: v } })} />
-        <NumField label="y" step={0.1} value={ws.position.y} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, y: v } })} />
-      </div>
-
+      {/* These two numbers used to be unreadable for two separate reasons.
+          
+          One: the lattice had no reference frame, so every cell looked like
+          every other cell and "x = 7.4" was a figure you could neither verify
+          nor aim at. `<CanvasGrid>` rules the x = 0 / y = 0 axes above the
+          cell tier, marks the origin and ticks both axes, so the numbers here
+          have a counterpart on screen. (A labelled dot on the selected entity
+          used to say the same thing a second time, printed over the drawing;
+          the axes carry it alone now.)
+          
+          Two: a station carries TWO positions — where the machine stands on
+          the floor (`ws.position`, cells) and where its block reads best in
+          the flow (`block.processPos`, world px) — and this section always
+          showed the floor one. Select a block on the PROCESS canvas and the
+          x / y described a place you were not looking at. It now reports
+          whichever canvas is in view, converted to cells either way so both
+          agree with the axis ticks under them. */}
       {(() => {
-        // Effective size = per-ws override ?? catalogue default. Inspector
-        // edits always write the override so the workstation diverges from
-        // the catalogue size. Decimal stepping (0.1) lets the user dial in
-        // sub-cell dimensions.
-        const eff = {
-          w: ws.size?.w ?? fixture?.w ?? 1,
-          d: ws.size?.d ?? fixture?.d ?? 1,
-          h: ws.size?.h ?? fixture?.h ?? 1,
+        const onProcess = props.canvasMode === 'process';
+        // Effective position, not just the authored one: a block with no
+        // `processPos` still sits somewhere — on the flow-ordered serpentine
+        // seed — and that is where the marker draws it, so a blank field
+        // here would disagree with the canvas.
+        const procPx =
+          resolveProcessPositions(props.twin).get(ws.id) ??
+          { x: PROCESS_PAD_X, y: PROCESS_PAD_TOP };
+        const cell = onProcess
+          ? { x: procPx.x / FLAT_CELL, y: procPx.y / FLAT_CELL }
+          : ws.position;
+        const setAxis = (axis: 'x' | 'y', v: number) => {
+          if (onProcess) {
+            const next = { ...procPx, [axis]: v * FLAT_CELL };
+            props.onSetProcessPos(ws.id, { x: snapProcess(next.x), y: snapProcess(next.y) });
+          } else {
+            props.onUpdateWs(ws.id, { position: { ...ws.position, [axis]: v } });
+          }
         };
-        const writeSize = (patch: Partial<{ w: number; d: number; h: number }>) =>
-          props.onUpdateWs(ws.id, { size: { ...eff, ...patch } });
         return (
           <>
-            <div style={{ height: 12 }} />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <div style={sectionLabel}>Size (cells)</div>
-              {ws.size && (
-                <button
-                  onClick={() => props.onUpdateWs(ws.id, { size: undefined })}
-                  style={{ ...btnSec(), padding: '2px 7px', fontSize: 9 }}
-                  title="Restore the catalogue's default size"
-                >
-                  RESET
-                </button>
-              )}
+            <div style={{ ...sectionLabel, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>{onProcess ? 'Position on PROCESS (cells)' : 'Position on floor (cells)'}</span>
+              <HelpDot label="What are these measured from?">
+                Cells from the canvas origin — the <strong>0,0</strong> dot where
+                the two brighter axis rules cross. x runs right, y runs down.
+                Selecting a station marks it on the canvas with a dot carrying
+                these same two numbers, so you can always see which square
+                they belong to.
+                <div style={{ marginTop: 8, color: SW_COLORS.muted }}>
+                  A station has one position per canvas: where the machine
+                  stands on the <strong>floor</strong>, and where its block sits
+                  in the <strong>PROCESS</strong> graph. These fields edit
+                  whichever canvas you are on — currently{' '}
+                  <strong>{onProcess ? 'PROCESS' : 'the floor'}</strong>.
+                </div>
+              </HelpDot>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-              <NumField label="w" step={0.1} value={eff.w} onChange={(v) => writeSize({ w: v })} />
-              <NumField label="d" step={0.1} value={eff.d} onChange={(v) => writeSize({ d: v })} />
-              <NumField label="h" step={0.1} value={eff.h} onChange={(v) => writeSize({ h: v })} />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              {/* PROCESS placement is quantised to `PROCESS_SNAP` (a quarter
+                  cell), so the step matches what a drag can actually land on
+                  and the arrows never propose a position the canvas would
+                  round away. */}
+              <NumField
+                label="x"
+                step={onProcess ? PROCESS_SNAP / FLAT_CELL : 0.1}
+                value={cell.x}
+                onChange={(v) => setAxis('x', v)}
+              />
+              <NumField
+                label="y"
+                step={onProcess ? PROCESS_SNAP / FLAT_CELL : 0.1}
+                value={cell.y}
+                onChange={(v) => setAxis('y', v)}
+              />
             </div>
           </>
         );
       })()}
+
       </InspectorGroup>
 
-      <InspectorGroup
-        id="ws.block"
-        title="Process block"
-        defaultOpen={false}
-        forceOpen={getBlockSpec(ws).overridden}
-      >
+      <InspectorGroup id="ws.block" title="Process block" defaultOpen={false}>
         <BlockSection
           ws={ws}
+          twin={props.twin}
           onSetBlock={props.onSetBlock}
+          onAddConnector={props.onAddConnector}
+          onRemoveConnector={props.onRemoveConnector}
         />
       </InspectorGroup>
 
@@ -6332,40 +6552,86 @@ function InspectorBody(props: InspectorProps) {
           return (
             <>
               <label style={fieldLabel}>Garment</label>
-              <select
-                value={garmentId}
-                onChange={(e) =>
+              <HudSelect
+                value={garmentId ?? ''}
+                onChange={(v) =>
                   // Ops are garment-scoped, so switching garment invalidates
                   // whatever op was bound.
-                  props.onSetOperation(ws.id, { garmentId: e.target.value, opId: null })
+                  props.onSetOperation(ws.id, { garmentId: v, opId: null })
                 }
-                style={inputBase}
-              >
-                {garments.all.map((g) => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-                {!garment && <option value={garmentId}>{garmentId} (unknown)</option>}
-              </select>
+                variant="light"
+                size="sm"
+                width="100%"
+                options={[
+                  ...garments.all.map((g) => ({
+                    value: g.id,
+                    label: g.name,
+                    meta: `${g.operations.length} ops`,
+                  })),
+                  ...(garment ? [] : [{ value: garmentId ?? '', label: `${garmentId} (unknown)` }]),
+                ]}
+              />
+              {/* Where the two lists above come FROM, and how to change them.
+                  This section reads a garment's operation bulletin and binds
+                  one row of it to the station, but it is read-only: the SMVs,
+                  the machine codes and the op list itself are authored on the
+                  Operations library — a page nothing in the app linked to, so
+                  a user who wanted to add a garment or fix an SMV had no way
+                  in and no reason to believe the feature existed. */}
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(
+                      `/resources?tab=operations${garmentId ? `&garment=${encodeURIComponent(garmentId)}` : ''}`,
+                    )
+                  }
+                  style={{ ...btnSec(), flex: 1, padding: '3px 6px', fontSize: 10 }}
+                  title={
+                    garment
+                      ? `Open "${garment.name}" in the Operations library — ${garment.operations.length} operations, their SMVs and machines`
+                      : 'Open the Operations library'
+                  }
+                >
+                  EDIT BULLETIN →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/resources?tab=operations&new=1')}
+                  style={{ ...btnSec(), padding: '3px 8px', fontSize: 10 }}
+                  title="Add a garment — paste or import its operation breakdown"
+                >
+                  + GARMENT
+                </button>
+              </div>
               <div style={{ height: 8 }} />
               <label style={fieldLabel}>Operation</label>
-              <select
+              <HudSelect
                 value={ws.operation.opId ?? ''}
-                onChange={(e) =>
+                onChange={(v) =>
                   props.onSetOperation(ws.id, {
-                    opId: e.target.value || null,
+                    opId: v || null,
                     garmentId,
                   })
                 }
-                style={inputBase}
-              >
-                <option value="">— not bound —</option>
-                {orphanOpId && <option value={orphanOpId}>{orphanOpId} (not in bulletin)</option>}
-                {ops.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {(o.code ? o.code + ' · ' : '') + o.name + ' · ' + o.smv.toFixed(2)}
-                  </option>
-                ))}
-              </select>
+                variant="light"
+                size="sm"
+                width="100%"
+                options={[
+                  { value: '', label: '— not bound —' },
+                  ...(orphanOpId
+                    ? [{ value: orphanOpId, label: `${orphanOpId} (not in bulletin)` }]
+                    : []),
+                  // SMV is the number the user is choosing between, so it goes
+                  // in the meta slot rather than trailing the name — it stays
+                  // right-aligned down the list instead of ragged.
+                  ...ops.map((o) => ({
+                    value: o.id,
+                    label: (o.code ? `${o.code} · ` : '') + o.name,
+                    meta: `${o.smv.toFixed(2)} min`,
+                  })),
+                ]}
+              />
               <div style={{ height: 8 }} />
             </>
           );
@@ -6396,89 +6662,56 @@ function InspectorBody(props: InspectorProps) {
         />
       </LensSection>
 
-      <LensSection id="ws.targets" title="KPI targets" active={props.lens === 'kpis'}>
-        <NumField
-          label={<>Capacity / hr <Sym quantity="mu" bracketed color={SW_COLORS.brandText} /></>}
-          value={ws.kpiTargets.capacityPerHr ?? 0}
-          onChange={(v) => props.onSetKpiTargets(ws.id, { capacityPerHr: v })}
-        />
-        <div style={{ height: 8 }} />
-        <NumField
-          label="Efficiency %"
-          value={ws.kpiTargets.efficiencyPct ?? 0}
-          onChange={(v) => props.onSetKpiTargets(ws.id, { efficiencyPct: v })}
-        />
-        <div style={{ height: 8 }} />
-        <NumField
-          label={<>Utilisation % <Sym quantity="rho" bracketed color={SW_COLORS.brandText} /></>}
-          value={ws.kpiTargets.utilizationPct ?? 0}
-          onChange={(v) => props.onSetKpiTargets(ws.id, { utilizationPct: v })}
-        />
-        {ws.kpiObserved ? (
-          <InspectorGroup id="ws.observed" title="Observed (last run)" defaultOpen={false}>
-            <div style={{ padding: 10, background: SW_COLORS.paperDeep, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}>
-              <ObservedRow
-                label={<>Capacity / hr <Sym quantity="mu" bracketed color={SW_COLORS.brandText} /></>}
-                value={ws.kpiObserved.capacityPerHr.toFixed(0)}
-              />
-              <ObservedRow label="Efficiency %" value={ws.kpiObserved.efficiencyPct.toFixed(1)} />
-              <ObservedRow
-                label={<>Utilisation % <Sym quantity="rho" bracketed color={SW_COLORS.brandText} /></>}
-                value={ws.kpiObserved.utilizationPct.toFixed(1)}
-              />
-              {ws.kpiObserved.bottleneck && (
-                <div style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: SW_COLORS.alarm }}>
-                  ◆ Bottleneck in last run
-                </div>
-              )}
-            </div>
-          </InspectorGroup>
-        ) : (
-          <div style={{ marginTop: 8, fontSize: 11, color: SW_COLORS.muted }}>
-            No simulated values yet — run the sim to populate observed KPIs.
-          </div>
-        )}
-      </LensSection>
-
-      <InspectorGroup id="ws.flow" title="Flow connections" defaultOpen={false}>
-        <FlowSection
-          ws={ws}
-          twin={props.twin}
-          onRemoveConnector={props.onRemoveConnector}
-        />
-      </InspectorGroup>
+      {/* KPI targets and the last run's observed numbers used to sit here, as
+          the third lens section. They have moved to RUN's per-station drawer.
+          A target is a claim about how the line PERFORMS, not about what it
+          is made of — and it was authored two surfaces away from the only
+          numbers that can tell you whether it was met, so nothing on this
+          panel could ever say whether 178 pcs/hr was ambitious or already
+          beaten. Setting it beside the measurement is the whole point of
+          having one. */}
     </div>
   );
 }
 
-/** PROCESS BLOCK panel — lets the user inspect and override the PML block
- *  kind for the selected workstation. The default is inferred from the
- *  fixture's `catalogId` (e.g. a sewing machine → Service, a buffer pad →
- *  Queue); the user can override per-station to model non-default
- *  semantics (a generic table tagged as a Hold or Match block). */
+/** PROCESS BLOCK panel — lets the user read and change the PML block kind
+ *  for the selected workstation.
+ *
+ *  A station opens on the kind its station type implies (a sewing machine →
+ *  Service, a buffer pad → Queue) and the picker then shows one thing: the
+ *  kind this block IS. There is no auto / override pair. The panel used to
+ *  carry an AUTO-or-OVERRIDE badge, a RESET, and an "Auto · <kind>" entry
+ *  above the real kinds — three controls for a distinction the user never
+ *  had to make, since the answer to "what kind is this block?" is the same
+ *  either way. Picking a kind now simply sets it. */
 function BlockSection({
   ws,
+  twin,
   onSetBlock,
+  onAddConnector,
+  onRemoveConnector,
 }: {
   ws: Workstation;
+  twin: ReturnType<typeof selectActiveTwin>;
   onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
+  onAddConnector: (input: { fromWsId: string; toWsId: string; fromPort?: string; toPort?: string }) => void;
+  onRemoveConnector: (id: string) => void;
 }) {
   const block = getBlockSpec(ws);
-  const defaultKind = inferBlockKindFromCatalog(ws.catalogId);
   const role = apparelRoleFor(ws);
 
-  const onPickKind = (next: PmlBlockKind | 'auto') => {
-    if (next === 'auto') {
-      onSetBlock(ws.id, null);
-      return;
-    }
-    if (next === defaultKind) {
-      // Picking the catalog default explicitly = drop the override; same
-      // outcome as 'auto', but the dropdown reflects the user's intent.
-      onSetBlock(ws.id, null);
-      return;
-    }
-    onSetBlock(ws.id, { kind: next });
+  /** Set the block kind. Everything else the block carries — its ports, its
+   *  authored params, and its position on the PROCESS canvas — rides along,
+   *  since `setBlock` replaces the whole record. */
+  const onPickKind = (next: PmlBlockKind) => {
+    if (next === block.kind) return;
+    onSetBlock(ws.id, {
+      kind: next,
+      inputs: ws.block?.inputs,
+      outputs: ws.block?.outputs,
+      params: ws.block?.params,
+      processPos: ws.block?.processPos,
+    });
   };
 
   // Tint to match the PROCESS view category palette so the section visually
@@ -6490,122 +6723,119 @@ function BlockSection({
 
   return (
     <div>
-      {/* Section title comes from the wrapping InspectorGroup; only the
-          override RESET action renders here. */}
-      {block.overridden && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button
-            onClick={() => onSetBlock(ws.id, null)}
-            style={{ ...btnSec(), padding: '2px 7px', fontSize: 9 }}
-            title="Drop the override and fall back to the catalog-default block kind"
-          >
-            RESET
-          </button>
-        </div>
-      )}
-
-      {/* Header chip: glyph · kind · role */}
-      <div
-        style={{
-          marginTop: 6,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '8px 10px',
-          background: catTint.fill,
-          border: `1px solid ${catTint.stroke}`,
-          borderLeft: `4px solid ${catTint.stroke}`,
-          borderRadius: 6,
-        }}
-      >
-        <div
-          style={{
-            width: 26,
-            height: 26,
-            display: 'grid',
-            placeItems: 'center',
-            background: catTint.stroke,
-            color: SW_COLORS.paper,
-            borderRadius: 4,
+      {/* Header chip: glyph · kind · role — AND the kind picker.
+          These were two controls stacked on top of each other: a chip that
+          named the block's kind, and a `Kind` dropdown directly beneath it
+          whose only job was to change the thing the chip was naming. The chip
+          IS the picker now — it says what the block is and changing it is
+          where you say what it should be instead.
+          The section title comes from the wrapping InspectorGroup. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <HudSelect
+          value={block.kind}
+          onChange={(v) => onPickKind(v as PmlBlockKind)}
+          variant="light"
+          width="100%"
+          title="What this block is to the simulation — pick another kind to change it"
+          triggerStyle={{
+            padding: '8px 10px',
+            background: catTint.fill,
+            border: `1px solid ${catTint.stroke}`,
+            borderLeft: `4px solid ${catTint.stroke}`,
+            borderRadius: 6,
           }}
-        >
-          <block.spec.Icon size={16} color={contrastInk(catTint.stroke)} title={block.spec.label} />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-              color: SW_COLORS.ink,
-            }}
-          >
-            {block.spec.label.toUpperCase()}
-            <span
-              style={{
-                marginLeft: 6,
-                fontSize: 9,
-                fontWeight: 700,
-                color: block.overridden ? SW_COLORS.alarm : SW_COLORS.muted,
-              }}
-            >
-              {block.overridden ? 'OVERRIDE' : 'AUTO'}
+          triggerRender={() => (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+              <span
+                style={{
+                  width: 26,
+                  height: 26,
+                  flex: 'none',
+                  display: 'grid',
+                  placeItems: 'center',
+                  background: catTint.stroke,
+                  color: SW_COLORS.paper,
+                  borderRadius: 4,
+                }}
+              >
+                <block.spec.Icon size={16} color={contrastInk(catTint.stroke)} title={block.spec.label} />
+              </span>
+              <span style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 11,
+                    fontWeight: 900,
+                    letterSpacing: '0.08em',
+                    color: SW_COLORS.ink,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {block.spec.label.toUpperCase()}
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: SW_COLORS.muted,
+                    fontWeight: 700,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {role}
+                </span>
+              </span>
             </span>
-          </div>
-          <div style={{ fontSize: 11, color: SW_COLORS.muted, fontWeight: 700 }}>
-            {role}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 6, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4 }}>
-        {block.spec.blurb}
-      </div>
-
-      {/* Kind picker */}
-      <div style={{ height: 8 }} />
-      <label style={fieldLabel}>Kind</label>
-      <HudSelect
-        value={block.overridden ? block.kind : 'auto'}
-        onChange={(v) => onPickKind(v as PmlBlockKind | 'auto')}
-        variant="light"
-        size="sm"
-        mono
-        width="100%"
-        options={[
-          {
-            value: 'auto',
-            label: `Auto · ${PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)`,
-            leading: (() => {
-              const AutoIcon = PML_BLOCK_LIBRARY[defaultKind].Icon;
-              return <AutoIcon size={14} color={SW_COLORS.muted} />;
-            })(),
-          },
-          ...SELECTABLE_BLOCK_KINDS.map((k) => {
+          )}
+          options={SELECTABLE_BLOCK_KINDS.map((k) => {
             const spec = PML_BLOCK_LIBRARY[k];
             const tint = PML_CATEGORY_TINT[spec.category] ?? { stroke: SW_COLORS.ink, fill: SW_COLORS.paper };
             return {
               value: k,
               label: spec.label,
               leading: <spec.Icon size={14} color={tint.stroke} />,
-              tag: k === defaultKind ? 'DEFAULT' : undefined,
             };
-          }),
-        ]}
-      />
+          })}
+        />
+        {/* What this block kind does. The blurb used to print underneath the
+            chip as a permanent line of prose — read once, then three lines of
+            rent in the narrowest column in the app. Behind the `?` it is
+            still one click away. It sits beside the chip rather than inside
+            it now: the chip is a button, and a button cannot contain one. */}
+        <HelpDot label={`What is a ${block.spec.label} block?`}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>{block.spec.label}</div>
+          {block.spec.blurb}
+        </HelpDot>
+      </div>
 
-      {/* Port summary */}
+      {/* Ports — and the connections on them. Stacked, not side by side:
+          each row now carries a station list and a picker, which has no room
+          to breathe in half of a 260px pane. */}
       <div style={{ height: 10 }} />
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 8,
-        }}
-      >
-        <PortList side="in"  label="Inputs"  ports={block.inputs}  tint={catTint} />
-        <PortList side="out" label="Outputs" ports={block.outputs} tint={catTint} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <PortList
+          side="in"
+          label="Inputs"
+          ports={block.inputs}
+          tint={catTint}
+          ws={ws}
+          twin={twin}
+          onAddConnector={onAddConnector}
+          onRemoveConnector={onRemoveConnector}
+        />
+        <PortList
+          side="out"
+          label="Outputs"
+          ports={block.outputs}
+          tint={catTint}
+          ws={ws}
+          twin={twin}
+          onAddConnector={onAddConnector}
+          onRemoveConnector={onRemoveConnector}
+        />
       </div>
 
       {/* Authored sim parameters — only shown when the block kind has any. */}
@@ -6650,10 +6880,9 @@ function BlockParamFields({
   const resolved = getBlockParams(ws);
   const authored = ws.block?.params ?? {};
 
-  /** Persist a single param edit. Always materialises a `block` override
-   *  (with the current kind) so simply setting a param implicitly opts
-   *  into the override — the user doesn't need to flip the kind picker
-   *  first. */
+  /** Persist a single param edit. `setBlock` replaces the whole block
+   *  record, so the kind, the ports and the PROCESS-canvas position are all
+   *  passed back through alongside the edited param. */
   const setParam = (id: ParamFieldSpec['id'], rawValue: number) => {
     // Pass% is shown as 0..100 in the UI but stored as 0..1.
     const stored = id === 'passProb' ? rawValue / 100 : rawValue;
@@ -6663,27 +6892,8 @@ function BlockParamFields({
       inputs: ws.block?.inputs,
       outputs: ws.block?.outputs,
       params: nextParams,
+      processPos: ws.block?.processPos,
     });
-  };
-
-  const clearParam = (id: ParamFieldSpec['id']) => {
-    const next: PmlBlockParams = { ...authored };
-    delete next[id];
-    const hasAny = Object.keys(next).length > 0;
-    // If no overrides remain AND the kind matches the catalog default,
-    // drop the whole block override so the workstation goes back to AUTO.
-    const isAuto = !block.overridden && !hasAny;
-    onSetBlock(
-      ws.id,
-      isAuto
-        ? null
-        : {
-            kind: block.kind,
-            inputs: ws.block?.inputs,
-            outputs: ws.block?.outputs,
-            params: hasAny ? next : undefined,
-          },
-    );
   };
 
   return (
@@ -6707,9 +6917,7 @@ function BlockParamFields({
             key={f.id}
             field={f}
             value={f.resolveDefault(resolved)}
-            isAuthored={authored[f.id] !== undefined}
             onSet={(v) => setParam(f.id, v)}
-            onClear={() => clearParam(f.id)}
           />
         ))}
       </div>
@@ -6741,19 +6949,27 @@ function ArrivalProcessField({
   if (block.kind !== 'Source') return null;
   const params = getBlockParams(ws);
   const ratePerHr = Math.max(1e-6, params.sourceRatePerHr);
-  const poisson = params.arrivalDist?.kind === 'exp';
+  const meanGapMin = 60 / ratePerHr;
+  // The Source's inter-arrival distribution — the `a` slot of a/b/c:d/e. An
+  // absent dist is the engine's deterministic fallback (a bundle exactly every
+  // 60/λ min), so we surface that as an explicit D here and let the picker
+  // round-trip every kind the engine can sample.
+  const arrival: ServiceDist = params.arrivalDist ?? { kind: 'det', value: meanGapMin };
+  const code = kendallServiceCode(arrival);
 
-  const setArrival = (next: 'M' | 'D') => {
+  const setArrival = (kind: ServiceDist['kind']) => {
+    // Morph rather than replace: the mean of the gaps stays pinned to 60/λ —
+    // the RATE field above is the single control for HOW OFTEN bundles arrive —
+    // while only the SHAPE of the gaps changes with the picked distribution.
     onSetBlock(ws.id, {
       kind: block.kind,
       inputs: ws.block?.inputs,
       outputs: ws.block?.outputs,
       params: {
         ...(ws.block?.params ?? {}),
-        // Exponential gaps at mean 60/λ minutes IS the Poisson process; the
-        // deterministic path is the engine's own fallback, so D clears it.
-        arrivalDist: next === 'M' ? { kind: 'exp', mean: 60 / ratePerHr } : undefined,
+        arrivalDist: morphDist(arrival, kind, meanGapMin),
       },
+      processPos: ws.block?.processPos,
     });
   };
 
@@ -6764,22 +6980,13 @@ function ArrivalProcessField({
           sets the `a` slot of a/b/c:d/e — the shape of the gaps, not the rate —
           and repeating λ on both would read as two controls for one quantity. */}
       <label style={fieldLabel}>Arrival process · Kendall a</label>
-      <HudSelect
-        value={poisson ? 'M' : 'D'}
-        onChange={(v) => setArrival(v as 'M' | 'D')}
-        variant="light"
-        size="sm"
-        mono
-        width="100%"
-        options={[
-          { value: 'M', label: 'Poisson · exponential gaps (M)', tag: 'TEXTBOOK' },
-          { value: 'D', label: 'Fixed interval · every 60/λ min (D)' },
-        ]}
-      />
+      <DistPicker dist={arrival} fallbackMean={meanGapMin} onChange={setArrival} />
       <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, lineHeight: 1.4 }}>
-        {poisson
+        {code === 'M'
           ? `Bundles arrive randomly at a mean ${ratePerHr.toFixed(0)}/hr — the M the queueing classification assumes.`
-          : `Bundles arrive exactly every ${(60 / ratePerHr).toFixed(2)} min. That is a D arrival process, so the M in the classification is not accurate.`}
+          : code === 'D'
+            ? `Bundles arrive exactly every ${meanGapMin.toFixed(2)} min. That is a D arrival process, so the M in the classification is not accurate.`
+            : `Gaps follow the chosen distribution at a mean ${ratePerHr.toFixed(0)}/hr — a ${code} arrival process. The closed-form numbers assume M, so treat them as an approximation.`}
       </div>
     </>
   );
@@ -6843,19 +7050,97 @@ function KendallReadout({ ws, kind }: { ws: Workstation; kind: PmlBlockKind }) {
   );
 }
 
-/** Compact list of named ports — one chip per port. Used by BlockSection
- *  for the Inputs / Outputs preview. */
+/**
+ * The block's ports, each one a live connection point.
+ *
+ * These rows used to be a read-only summary: a dot and the word "in", which
+ * told the user a port existed and nothing about what — if anything — was
+ * wired to it. Every wire had to be drawn on the canvas with the CONNECT tool,
+ * so the Inspector could show you a block's ports and its connections in two
+ * different places and never relate the two.
+ *
+ * Now a port lists the stations attached to it and carries the picker that
+ * attaches another. An OUTPUT port wires to the target's first input, an INPUT
+ * port from the source's first output — the specific-port case (a Select's
+ * pass/fail legs) is still authored on the PROCESS canvas, where you can see
+ * which leg you are grabbing.
+ *
+ * Resource ports are excluded from the picker: they draw on a ResourcePool,
+ * not on another station, so there is nothing on the floor to point them at.
+ */
 function PortList({
   side,
   label,
   ports,
   tint,
+  ws,
+  twin,
+  onAddConnector,
+  onRemoveConnector,
 }: {
   side: 'in' | 'out';
   label: string;
   ports: PmlPort[];
   tint: { fill: string; stroke: string };
+  ws: Workstation;
+  twin: ReturnType<typeof selectActiveTwin>;
+  onAddConnector: (input: { fromWsId: string; toWsId: string; fromPort?: string; toPort?: string }) => void;
+  onRemoveConnector: (id: string) => void;
 }) {
+  const connectors = twin.connectors ?? [];
+  const byId = new Map(twin.workstations.map((w) => [w.id, w]));
+
+  /** Which port a connector end sits on, resolving the "first port" default
+   *  the same way the renderers and the engine do. */
+  const endPort = (c: Connector, at: 'in' | 'out'): string | undefined => {
+    const owner = byId.get(at === 'in' ? c.toWsId : c.fromWsId);
+    if (!owner) return undefined;
+    const spec = getBlockSpec(owner);
+    const list = at === 'in' ? spec.inputs : spec.outputs;
+    const explicit = at === 'in' ? c.toPort : c.fromPort;
+    return explicit ?? list[0]?.id;
+  };
+
+  const wiredTo = (portId: string) =>
+    connectors.filter((c) =>
+      side === 'in'
+        ? c.toWsId === ws.id && endPort(c, 'in') === portId
+        : c.fromWsId === ws.id && endPort(c, 'out') === portId,
+    );
+
+  /** Stations this port can reach: anything but self, and only those with a
+   *  port on the far side to land on. */
+  const candidates = (portId: string) => {
+    const taken = new Set(wiredTo(portId).map((c) => (side === 'in' ? c.fromWsId : c.toWsId)));
+    return twin.workstations
+      .filter((w) => w.id !== ws.id && !taken.has(w.id))
+      .filter((w) => {
+        const spec = getBlockSpec(w);
+        return (side === 'in' ? spec.outputs : spec.inputs).length > 0;
+      });
+  };
+
+  const connect = (portId: string, otherId: string) => {
+    const other = byId.get(otherId);
+    if (!other) return;
+    const otherSpec = getBlockSpec(other);
+    if (side === 'in') {
+      onAddConnector({
+        fromWsId: otherId,
+        toWsId: ws.id,
+        fromPort: otherSpec.outputs[0]?.id,
+        toPort: portId,
+      });
+    } else {
+      onAddConnector({
+        fromWsId: ws.id,
+        toWsId: otherId,
+        fromPort: portId,
+        toPort: otherSpec.inputs[0]?.id,
+      });
+    }
+  };
+
   return (
     <div>
       <div
@@ -6884,185 +7169,102 @@ function PortList({
           none
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {ports.map((p) => (
-            <div
-              key={p.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '4px 6px',
-                background: SW_COLORS.paper,
-                border: `1px solid ${SW_COLORS.line}`,
-                borderRadius: 3,
-                fontSize: 11,
-              }}
-            >
-              <span
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {ports.map((p) => {
+            const wires = wiredTo(p.id);
+            const open = candidates(p.id);
+            return (
+              <div
+                key={p.id}
                 style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: side === 'in' ? SW_COLORS.paper : tint.stroke,
-                  border: `2px solid ${tint.stroke}`,
-                  flexShrink: 0,
+                  padding: '5px 6px',
+                  background: SW_COLORS.paper,
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: 3,
                 }}
-              />
-              <strong style={{ color: SW_COLORS.ink, fontFamily: SW_FONTS.mono }}>{p.label}</strong>
-              {p.kind === 'resource' && (
-                <span style={{ marginLeft: 'auto', fontSize: 9, color: SW_COLORS.muted, fontWeight: 700 }}>
-                  RES
-                </span>
-              )}
-            </div>
-          ))}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: side === 'in' ? SW_COLORS.paper : tint.stroke,
+                      border: `2px solid ${tint.stroke}`,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <strong style={{ color: SW_COLORS.ink, fontFamily: SW_FONTS.mono }}>{p.label}</strong>
+                  <span style={{ marginLeft: 'auto', fontSize: 9, color: SW_COLORS.muted, fontWeight: 700 }}>
+                    {p.kind === 'resource' ? 'RES' : wires.length || ''}
+                  </span>
+                </div>
+
+                {wires.map((c) => {
+                  const otherId = side === 'in' ? c.fromWsId : c.toWsId;
+                  return (
+                    <div
+                      key={c.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        marginTop: 4,
+                        fontSize: 10,
+                        color: SW_COLORS.muted,
+                      }}
+                    >
+                      <span style={{ color: CONNECTOR_HEX[c.kind], fontWeight: 800, flex: 'none' }}>
+                        {side === 'in' ? '←' : '→'}
+                      </span>
+                      <span
+                        title={byId.get(otherId)?.name ?? otherId}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          color: SW_COLORS.ink,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {byId.get(otherId)?.name ?? '— deleted'}
+                      </span>
+                      <button
+                        onClick={() => onRemoveConnector(c.id)}
+                        title="Disconnect"
+                        style={{ ...btnSec(), padding: '0 5px', fontSize: 9, color: SW_COLORS.alarm, flex: 'none' }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {p.kind !== 'resource' && open.length > 0 && (
+                  <div style={{ marginTop: 5 }}>
+                    <HudSelect
+                      // Never holds a value: picking is the action, and the
+                      // wire it creates is listed above rather than left
+                      // sitting in the trigger as if it were a setting.
+                      value=""
+                      placeholder={side === 'in' ? '+ from…' : '+ to…'}
+                      onChange={(id) => connect(p.id, id)}
+                      variant="light"
+                      size="sm"
+                      width="100%"
+                      options={open.map((w) => ({
+                        value: w.id,
+                        label: w.name,
+                        meta: getBlockSpec(w).spec.label,
+                      }))}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-      )}
-    </div>
-  );
-}
-
-/** Flow-connections panel — lists every connector touching the selected
- *  workstation (incoming + outgoing) and lets the user delete them inline. */
-function FlowSection({
-  ws,
-  twin,
-  onRemoveConnector,
-}: {
-  ws: Workstation;
-  twin: ReturnType<typeof selectActiveTwin>;
-  onRemoveConnector: (id: string) => void;
-}) {
-  const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
-  const all = twin.connectors ?? [];
-  const incoming = all.filter((c) => c.toWsId === ws.id);
-  const outgoing = all.filter((c) => c.fromWsId === ws.id);
-
-  /** Render the port label for an endpoint. Falls back to the block's
-   *  first port when the connector doesn't pin a specific port. */
-  const portLabelFor = (
-    targetWsId: string,
-    portId: string | undefined,
-    side: 'in' | 'out',
-  ): string => {
-    const target = wsById.get(targetWsId);
-    if (!target) return portId ?? '?';
-    const block = getBlockSpec(target);
-    const list = side === 'in' ? block.inputs : block.outputs;
-    if (portId) {
-      return list.find((p) => p.id === portId)?.label ?? portId;
-    }
-    return list[0]?.label ?? (side === 'in' ? 'in' : 'out');
-  };
-
-  const row = (c: Connector, mode: 'in' | 'out') => {
-    const otherId = mode === 'in' ? c.fromWsId : c.toWsId;
-    const other = wsById.get(otherId);
-    // For an INCOMING wire on `ws`: we are the target → our port is the
-    // INPUT side, peer's port is the OUTPUT side. And vice-versa.
-    const myPort =
-      mode === 'in'
-        ? portLabelFor(ws.id, c.toPort, 'in')
-        : portLabelFor(ws.id, c.fromPort, 'out');
-    const otherPort =
-      mode === 'in'
-        ? portLabelFor(otherId, c.fromPort, 'out')
-        : portLabelFor(otherId, c.toPort, 'in');
-    return (
-      <div
-        key={c.id}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '5px 7px',
-          marginTop: 4,
-          background: SW_COLORS.paper,
-          border: `1px solid ${SW_COLORS.line}`,
-          borderLeft: `3px solid ${CONNECTOR_HEX[c.kind]}`,
-          borderRadius: 4,
-          fontSize: 11,
-        }}
-      >
-        <span
-          style={{
-            fontFamily: SW_FONTS.mono,
-            fontSize: 9,
-            fontWeight: 800,
-            color: CONNECTOR_HEX[c.kind],
-            letterSpacing: '0.06em',
-            minWidth: 56,
-          }}
-        >
-          {mode === 'in' ? '←' : '→'} {CONNECTOR_LABEL[c.kind]}
-        </span>
-        <span
-          style={{
-            flex: 1,
-            color: SW_COLORS.muted,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-          title={`${mode === 'in' ? otherPort : myPort} → ${mode === 'in' ? myPort : otherPort}\n${other?.name ?? otherId}`}
-        >
-          <span
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 9,
-              fontWeight: 800,
-              color: SW_COLORS.muted,
-              marginRight: 6,
-            }}
-          >
-            {mode === 'in' ? `${otherPort}→${myPort}` : `${myPort}→${otherPort}`}
-          </span>
-          {other?.name ?? '— deleted'}
-        </span>
-        <button
-          onClick={() => onRemoveConnector(c.id)}
-          style={{
-            ...btnSec(),
-            padding: '2px 6px',
-            fontSize: 9,
-            color: SW_COLORS.alarm,
-          }}
-          title="Remove this connector"
-        >
-          ✕
-        </button>
-      </div>
-    );
-  };
-
-  return (
-    <div
-      style={{
-        padding: 10,
-        background: SW_COLORS.paperDeep,
-        borderRadius: 6,
-        border: `1px solid ${SW_COLORS.line}`,
-      }}
-    >
-      {incoming.length === 0 && outgoing.length === 0 && (
-        <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 4 }}>
-          No connectors yet — turn on{' '}
-          <strong style={{ color: SW_COLORS.brand }}>➜ CONNECT</strong> in the
-          toolbar, then click this station and another.
-        </div>
-      )}
-      {incoming.length > 0 && (
-        <>
-          <div style={{ ...fieldLabel, marginTop: 6 }}>Incoming · {incoming.length}</div>
-          {incoming.map((c) => row(c, 'in'))}
-        </>
-      )}
-      {outgoing.length > 0 && (
-        <>
-          <div style={{ ...fieldLabel, marginTop: 8 }}>Outgoing · {outgoing.length}</div>
-          {outgoing.map((c) => row(c, 'out'))}
-        </>
       )}
     </div>
   );
@@ -7083,65 +7285,140 @@ function readGroupPrefs(): Record<string, boolean> {
   }
 }
 
-function writeGroupPref(id: string, open: boolean, defaultOpen: boolean) {
+/* The prefs are held in one module-level record with a subscriber list rather
+ * than a `useState` per group. COLLAPSE ALL / EXPAND ALL has to move every
+ * section at once, and with the state living inside each disclosure there was
+ * nothing a single button could write to. `useSyncExternalStore` keeps the
+ * disclosures reading the same record the buttons write. */
+let groupPrefs: Record<string, boolean> = readGroupPrefs();
+const groupPrefListeners = new Set<() => void>();
+/** id → the group's own default, registered on mount. COLLAPSE ALL needs the
+ *  default to know whether an explicit value is worth storing. */
+const groupDefaults = new Map<string, boolean>();
+
+function persistGroupPrefs() {
   try {
-    const prefs = readGroupPrefs();
-    if (open === defaultOpen) delete prefs[id];
-    else prefs[id] = open;
-    if (Object.keys(prefs).length === 0) localStorage.removeItem(INSPECTOR_GROUPS_KEY);
-    else localStorage.setItem(INSPECTOR_GROUPS_KEY, JSON.stringify(prefs));
+    if (Object.keys(groupPrefs).length === 0) localStorage.removeItem(INSPECTOR_GROUPS_KEY);
+    else localStorage.setItem(INSPECTOR_GROUPS_KEY, JSON.stringify(groupPrefs));
   } catch {
     /* storage unavailable (private mode) — state stays session-local */
   }
 }
 
+function emitGroupPrefs() {
+  for (const fn of groupPrefListeners) fn();
+}
+
+function subscribeGroupPrefs(fn: () => void): () => void {
+  groupPrefListeners.add(fn);
+  return () => groupPrefListeners.delete(fn);
+}
+
+function setGroupPref(id: string, open: boolean, defaultOpen: boolean) {
+  const next = { ...groupPrefs };
+  // An explicit value equal to the default is just the default — dropping it
+  // keeps a never-touched panel out of storage entirely.
+  if (open === defaultOpen) delete next[id];
+  else next[id] = open;
+  groupPrefs = next;
+  persistGroupPrefs();
+  emitGroupPrefs();
+}
+
+/** Open or close every registered Inspector section at once. */
+function setAllInspectorGroups(open: boolean) {
+  const next: Record<string, boolean> = { ...groupPrefs };
+  for (const [id, defaultOpen] of groupDefaults) {
+    if (open === defaultOpen) delete next[id];
+    else next[id] = open;
+  }
+  groupPrefs = next;
+  persistGroupPrefs();
+  emitGroupPrefs();
+}
+
 function useInspectorGroupPref(id: string, defaultOpen: boolean): [boolean, () => void] {
-  const [open, setOpen] = useState<boolean>(() => readGroupPrefs()[id] ?? defaultOpen);
+  // Registering here rather than in a static list is what keeps COLLAPSE ALL
+  // honest: it moves exactly the sections currently on screen, so it can
+  // never leave a group the Inspector is not showing in a state the user
+  // never asked for.
+  useEffect(() => {
+    groupDefaults.set(id, defaultOpen);
+    return () => {
+      groupDefaults.delete(id);
+    };
+  }, [id, defaultOpen]);
+  const open = useSyncExternalStore(
+    subscribeGroupPrefs,
+    () => groupPrefs[id] ?? defaultOpen,
+  );
   const toggle = useCallback(() => {
-    setOpen((prev) => {
-      const next = !prev;
-      writeGroupPref(id, next, defaultOpen);
-      return next;
-    });
+    setGroupPref(id, !(groupPrefs[id] ?? defaultOpen), defaultOpen);
   }, [id, defaultOpen]);
   return [open, toggle];
 }
 
+/** COLLAPSE ALL / EXPAND ALL — one button per direction rather than the
+ *  palette's single flip-flop, because the Inspector's sections do not open
+ *  and close together: three default open, three default closed, so there is
+ *  no "all collapsed" state for a single toggle to read its direction from. */
+function InspectorDiscloseAll({ open }: { open: boolean }) {
+  const label = open ? 'Expand all sections' : 'Collapse all sections';
+  return (
+    <button
+      type="button"
+      onClick={() => setAllInspectorGroups(open)}
+      title={label}
+      aria-label={label}
+      style={{
+        width: SW_CONTROL.chevron,
+        height: SW_CONTROL.chevron,
+        flex: 'none',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: SW_COLORS.muted,
+      }}
+    >
+      <Icon name={open ? 'expandAll' : 'collapseAll'} size={14} />
+    </button>
+  );
+}
+
 /** Collapsible parameter group for the Inspector. Progressive disclosure:
  *  identity-level groups default open, secondary detail defaults closed.
- *  `forceOpen` pins the group open (e.g. an overridden process block must
- *  stay visible) and wins over a persisted closed preference. */
+ *  Every group is user-collapsible; nothing pins one open behind the user's
+ *  back (the process block used to, whenever it carried an override). */
 function InspectorGroup({
   id,
   title,
   defaultOpen,
   right,
-  forceOpen,
   children,
 }: {
   id: string;
   title: string;
   defaultOpen: boolean;
   right?: ReactNode;
-  forceOpen?: boolean;
   children: ReactNode;
 }) {
-  const [open, toggle] = useInspectorGroupPref(id, defaultOpen);
-  const isOpen = forceOpen || open;
+  const [isOpen, toggle] = useInspectorGroupPref(id, defaultOpen);
   return (
     <div style={{ marginTop: 12 }}>
       <div
         role="button"
         aria-expanded={isOpen}
-        onClick={() => {
-          if (!forceOpen) toggle();
-        }}
-        title={forceOpen ? 'Pinned open while this station carries an override' : isOpen ? 'Collapse' : 'Expand'}
+        onClick={toggle}
+        title={isOpen ? 'Collapse' : 'Expand'}
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          cursor: forceOpen ? 'default' : 'pointer',
+          cursor: 'pointer',
           userSelect: 'none',
         }}
       >
@@ -7203,69 +7480,80 @@ function NumField({ label, value, onChange, step }: { label: ReactNode; value: n
   return (
     <div>
       <label style={fieldLabel}>{label}</label>
-      <input
-        type="number"
+      {/* `NumberInput`, not a raw `type="number"`: these fields are edited by
+          backspacing over the current number, and `Number('')` is 0, so the
+          old handler committed a 0 the instant the box went empty and the
+          last digit could never be deleted. */}
+      <NumberInput
         value={value}
         step={step ?? 1}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (!Number.isNaN(v)) onChange(v);
-        }}
+        onChange={(v) => onChange(v ?? 0)}
         style={inputBase}
       />
     </div>
   );
 }
 
-function ObservedRow({ label, value }: { label: ReactNode; value: string }) {
+/**
+ * The selected station's entity id, click-to-copy.
+ *
+ * A station is ONE record across every view: the sprite on the floor, the
+ * symbol on the PROCESS canvas and the row in a report are the same
+ * `Workstation`, and this is its handle. The two canvases place it
+ * independently on purpose — the floor holds where the machine physically
+ * stands, PROCESS holds where the block reads best in the flow — so the id is
+ * what tells the user that a block over here is the machine over there.
+ */
+function EntityIdRow({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    // Dwell, not a transition — long enough to read the confirmation, short
+    // enough that the label is back to COPY before the next station.
+    const t = setTimeout(() => setCopied(false), 1400);
+    return () => clearTimeout(t);
+  }, [copied]);
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '3px 0', color: SW_COLORS.muted }}>
-      <span>{label}</span>
-      <strong style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.ink }}>{value}</strong>
-    </div>
-  );
-}
-
-/** Small uppercase-mono chip for the inspector masthead — op code, machine
- *  code, line membership. Optional 8px square swatch for hue-keyed chips. */
-function InspectorChip({
-  children,
-  bg,
-  fg,
-  edge,
-  swatch,
-}: {
-  children: ReactNode;
-  bg?: string;
-  fg?: string;
-  edge?: string;
-  swatch?: string;
-}) {
-  return (
-    <span
+    <button
+      type="button"
+      title="Entity id — the same id on the floor, in PROCESS and in exports. Click to copy."
+      onClick={() => {
+        // Clipboard is permissioned and absent over plain http on a LAN
+        // address; the id stays selectable either way, so a refusal is not
+        // worth an error state.
+        navigator.clipboard?.writeText(id).then(() => setCopied(true)).catch(() => {});
+      }}
       style={{
-        ...SW_TYPE.micro,
-        fontSize: 10,
-        letterSpacing: '0.1em',
-        padding: '3px 7px',
-        borderRadius: 4,
-        background: bg ?? SW_COLORS.paperDeep,
-        color: fg ?? SW_COLORS.muted,
-        border: `1px solid ${edge ?? 'transparent'}`,
-        display: 'inline-flex',
+        marginTop: 4,
+        padding: 0,
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        display: 'flex',
         alignItems: 'center',
         gap: 6,
-        maxWidth: 180,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
+        maxWidth: '100%',
+        fontSize: 11,
+        color: SW_COLORS.muted,
+        textAlign: 'left',
       }}
     >
-      {swatch && (
-        <span style={{ width: 8, height: 8, borderRadius: 2, background: swatch, flex: 'none' }} />
-      )}
-      {children}
-    </span>
+      <span style={{ flex: 'none' }}>ID:</span>
+      <span
+        style={{
+          fontFamily: SW_FONTS.mono,
+          color: SW_COLORS.ink,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {id}
+      </span>
+      <span style={{ flex: 'none', ...SW_TYPE.micro, fontSize: 9, color: copied ? SW_COLORS.ok : SW_COLORS.muted }}>
+        {copied ? 'COPIED' : 'COPY'}
+      </span>
+    </button>
   );
 }
 
@@ -7304,81 +7592,80 @@ function InspectorStat({ label, value, unit, tone }: { label: ReactNode; value: 
 /** Quiet square button for the zoom HUD — transparent at rest, steel on
  *  hover, numeric glyph. The HUD slab supplies the border and ground. */
 
-function CountChip({ label, value }: { label: string; value: number }) {
-  return (
-    <div
-      style={{
-        background: alpha(SW_COLORS.steel, 0.95),
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-        border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: SW_RADIUS.sm + 2,
-        padding: '6px 10px',
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 8,
-      }}
-    >
-      <span style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>{label}</span>
-      <strong style={{ ...SW_TYPE.numeric, color: SW_COLORS.ink }}>{value}</strong>
-    </div>
-  );
-}
-
 /**
- * Bottom-right reference panel on the iso canvas. Explains the connector
- * kinds (flow / operator / material), the carrier letter badges painted at
- * a flow connector's midpoint (B/P/H/T), and the per-lens header pill that
- * floats above each workstation. The row matching the active lens is
- * highlighted; the other lens rows are dimmed so the legend doubles as
- * "here's what the other lenses would show".
+ * Bottom-right reference panel on the build canvases. Keys the connector
+ * kinds (flow / operator / material), the carrier letter badges painted at a
+ * flow connector's midpoint (B/P/H/T), and — on the floor views only — the
+ * per-lens header pill that floats above each workstation.
+ *
+ * One entry per row. This used to be two horizontal bands of swatch-and-noun
+ * with seven entries crammed between them; see `LegendRow` for why that
+ * stopped being a key and started being a word search.
  *
  * Swatches mirror CONNECTOR_HEX, the dash rules in flowStyleFor(), and
  * CARRIER_STYLE exactly so a line on the canvas matches the corresponding
- * legend row without translation. Pointer events are off so the panel
- * never steals clicks from the canvas underneath.
+ * legend row without translation.
  */
 function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode }) {
   const lensRows: { key: Lens; bg: string; label: string; meaning: string }[] = [
-    { key: 'operations', bg: SW_COLORS.ink,       label: 'op-code', meaning: 'operation' },
-    { key: 'resources',  bg: SW_COLORS.bobbin,    label: '☻ × N',   meaning: 'workers' },
-    { key: 'kpis',       bg: SW_COLORS.brandDeep, label: 'NN%',     meaning: 'utilisation' },
+    { key: 'operations', bg: SW_COLORS.ink,       label: 'op-code', meaning: 'which operation the station runs' },
+    { key: 'resources',  bg: SW_COLORS.bobbin,    label: '☻ × N',   meaning: 'how many operators are on it' },
+    { key: 'kpis',       bg: SW_COLORS.brandDeep, label: 'NN%',     meaning: 'how hard it is being worked' },
   ];
+  const row = lensRows.find((r) => r.key === lens)!;
   return (
-    <CanvasLegend label={canvasMode === 'process' ? 'PROCESS' : canvasMode === 'iso' ? 'ISO' : '2D'}>
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 4,
-          fontFamily: SW_FONTS.mono,
-          fontSize: 9,
-          color: SW_COLORS.muted,
-          letterSpacing: '0.03em',
-        }}
-      >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <LegendLine color={SW_COLORS.brand}  width={2.4} label="flow" />
-        <LegendLine color={SW_COLORS.bobbin} width={1.8} dash="6 4" label="operator" />
-        <LegendLine color={SW_COLORS.thread} width={1.8} dash="6 4" label="material" />
-      </div>
+    <CanvasLegend
+      label={canvasMode === 'process' ? 'PROCESS' : canvasMode === 'iso' ? 'ISO' : '2D'}
+      width={224}
+    >
+      {/* Connector kinds — what a line between two stations means. */}
+      <LegendRow
+        glyph={<FlowGlyph color={SW_COLORS.brand} width={2.4} />}
+        label="flow"
+        hint="Where the garment goes next."
+      />
+      <LegendRow
+        glyph={<FlowGlyph color={SW_COLORS.bobbin} width={1.8} dash="6 4" />}
+        label="operator"
+        hint="An operator covering more than one station."
+      />
+      <LegendRow
+        glyph={<FlowGlyph color={SW_COLORS.thread} width={1.8} dash="6 4" />}
+        label="material"
+        hint="Fabric or trim feeding in from a store."
+      />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-        <CarrierChip letter="B" color={SW_COLORS.brand} width={2.6}            meaning="bundle" />
-        <CarrierChip letter="P" color={SW_COLORS.steel} width={1.6}            meaning="piece" />
-        <CarrierChip letter="H" color={SW_COLORS.brand} width={2.0} dash="1 4" meaning="hanger" />
-        <CarrierChip letter="T" color={SW_COLORS.ink}   width={2.0} dash="8 4" meaning="takt" />
-      </div>
+      {/* Carriers — the badge on a flow connector says how work travels
+          along it, which is the difference between a bundle system and a
+          one-piece line. */}
+      <LegendRow
+        glyph={<CarrierGlyph letter="B" color={SW_COLORS.brand} width={2.6} />}
+        label="B · bundle"
+        hint="Pieces move tied together, a bundle at a time."
+      />
+      <LegendRow
+        glyph={<CarrierGlyph letter="P" color={SW_COLORS.steel} width={1.6} />}
+        label="P · piece"
+        hint="One piece is passed on as soon as it is done."
+      />
+      <LegendRow
+        glyph={<CarrierGlyph letter="H" color={SW_COLORS.brand} width={2.0} dash="1 4" />}
+        label="H · hanger"
+        hint="Pieces ride an overhead rail between stations."
+      />
+      <LegendRow
+        glyph={<CarrierGlyph letter="T" color={SW_COLORS.ink} width={2.0} dash="8 4" />}
+        label="T · takt"
+        hint="The line moves every station on one fixed beat."
+      />
 
       {/* Station-header pill — shows ONLY the overlay the active lens paints
-       *  above each station sprite (op-code · worker count · utilisation), so
-       *  the legend describes what's actually on the floor instead of listing
-       *  all three at once. Floor views (2D · ISO) only: the PROCESS canvas
-       *  draws no per-station pills, so this row is omitted there. */}
-      {canvasMode !== 'process' && (() => {
-        const row = lensRows.find((r) => r.key === lens)!;
-        return (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+       *  above each station sprite, so the legend describes what is actually
+       *  on the floor instead of listing all three at once. Floor views
+       *  (2D · ISO) only: the PROCESS canvas draws no per-station pills. */}
+      {canvasMode !== 'process' && (
+        <LegendRow
+          glyph={
             <span
               style={{
                 background: row.bg,
@@ -7389,92 +7676,75 @@ function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode })
                 padding: '2px 6px',
                 borderRadius: 3,
                 letterSpacing: '0.04em',
+                whiteSpace: 'nowrap',
               }}
             >
               {row.label}
             </span>
-            <span style={{ color: SW_COLORS.muted, fontSize: 9 }}>
-              {`station header · ${row.meaning}`}
-            </span>
-          </div>
-        );
-      })()}
-      </div>
+          }
+          label="station header"
+          hint={`The pill above each station — ${row.meaning}.`}
+        />
+      )}
     </CanvasLegend>
   );
 }
 
-function LegendLine({
-  color,
-  width,
-  dash,
-  label,
-}: {
-  color: string;
-  width: number;
-  dash?: string;
-  label: string;
-}) {
+/** A length of connector, drawn exactly as the canvas draws it. */
+function FlowGlyph({ color, width, dash }: { color: string; width: number; dash?: string }) {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-      <svg width={22} height={6} aria-hidden>
-        <line
-          x1={1}
-          y1={3}
-          x2={21}
-          y2={3}
-          stroke={color}
-          strokeWidth={width}
-          strokeDasharray={dash}
-          strokeLinecap="round"
-        />
-      </svg>
-      {label}
-    </span>
+    <svg width={22} height={6} aria-hidden>
+      <line
+        x1={1}
+        y1={3}
+        x2={21}
+        y2={3}
+        stroke={color}
+        strokeWidth={width}
+        strokeDasharray={dash}
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
-function CarrierChip({
+/** A connector with its carrier badge at the midpoint — same as on the floor. */
+function CarrierGlyph({
   letter,
   color,
   width,
   dash,
-  meaning,
 }: {
   letter: string;
   color: string;
   width: number;
   dash?: string;
-  meaning: string;
 }) {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-      <svg width={30} height={14} aria-hidden>
-        <line
-          x1={1}
-          y1={7}
-          x2={29}
-          y2={7}
-          stroke={color}
-          strokeWidth={width}
-          strokeDasharray={dash}
-          strokeLinecap="round"
-        />
-        <circle cx={15} cy={7} r={6} fill={SW_COLORS.paper} stroke={color} strokeWidth={1} />
-        <text
-          x={15}
-          y={10}
-          textAnchor="middle"
-          fontFamily={SW_FONTS.mono}
-          fontSize={8}
-          fontWeight={800}
-          fill={color}
-        >
-          {letter}
-        </text>
-      </svg>
-      {meaning}
-    </span>
+    <svg width={30} height={14} aria-hidden>
+      <line
+        x1={1}
+        y1={7}
+        x2={29}
+        y2={7}
+        stroke={color}
+        strokeWidth={width}
+        strokeDasharray={dash}
+        strokeLinecap="round"
+      />
+      <circle cx={15} cy={7} r={6} fill={SW_COLORS.paper} stroke={color} strokeWidth={1} />
+      <text
+        x={15}
+        y={10}
+        textAnchor="middle"
+        fontFamily={SW_FONTS.mono}
+        fontSize={8}
+        fontWeight={800}
+        fill={color}
+      >
+        {letter}
+      </text>
+    </svg>
   );
 }
 

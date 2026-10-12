@@ -1,85 +1,50 @@
 /**
- * Balance advisor — pure logic that turns the live Yamazumi state into a
- * prioritised list of "what to fix" suggestions for the Reports balance tab.
+ * Balance advisor — turns one line's balance reading into a prioritised list
+ * of things the user can actually do about it.
  *
- * Inputs come from the same numbers the metrics tier already computes (LBR,
- * LBE, optimum manning, balance loss, smoothness), plus the per-station
- * breakdown so we can name the offending op when suggesting a split.
+ * It takes the `LineBalance` object whole rather than a hand-copied bag of
+ * numbers, so the WHAT-TO-FIX rows and the metric tiles are reading the same
+ * arithmetic by construction. The previous version accepted eleven loose
+ * scalars and the caller passed a *different* takt to the advisor than the one
+ * it printed on the tiles.
  *
- * Rules order matters: the highest-severity item should appear first so a
- * scan-reader sees the action they must take, not just background advice.
- * Each suggestion carries:
- *   • severity — drives the colour and ordering.
- *   • title    — one short line the user can read at a glance.
- *   • detail   — the diagnostic numbers behind the title.
- *   • action   — a concrete next step (verb-led).
+ * ── Rules that used to be here and no longer are ──────────────────────────
+ * Three of the old rules could not fire, and one fired with wrong advice:
  *
- * Pure logic. Safe to call from React render, the engine, or a selfcheck.
+ *   • "Line is infeasible at takt" gated on LBE > 100. The caller defined takt
+ *     AS the bottleneck, which makes LBE ≡ LBR ≤ 100 — unreachable.
+ *   • "Need N more operators to meet takt" gated on ⌈ΣSAM ÷ bottleneck⌉ >
+ *     operators. The max of a set is never below its mean, so that is also
+ *     unreachable. Both now hang off a real takt and return nothing without
+ *     one.
+ *   • "N operators above theoretical floor → redeploy them" fired on pure
+ *     imbalance, and redeploying operators off an unbalanced line makes the
+ *     bottleneck worse, not better. It now says what is actually true: the
+ *     imbalance is *costing* those channels, and a rebalance is what frees
+ *     them.
+ *   • Two actions told the user to "try COMSOAL or GA from the balancer
+ *     picker". There has never been a balancer picker in the UI.
+ *
+ * Pure logic. Safe to call from React render or a test.
  */
 
-import type { Operation } from './operations';
-
-/** A station with both its load and the operations stacked on it.
- *  The advisor needs the op breakdown so it can name the heaviest op when
- *  suggesting a split, not just point at "station 3". */
-export interface StationBreakdown {
-  /** Operator id or station label, used in the suggestion copy. */
-  id: string;
-  /** Operations on this station — ordered by SMV desc is convenient for
-   *  the heaviest-op suggestion but not required. */
-  operations: Operation[];
-  /** Effective SMV sum after skill / share-fraction adjustments. The
-   *  advisor uses this rather than recomputing from operations[] so the
-   *  caller stays the source of truth for what "loaded" means. */
-  effectiveLoadMin: number;
-}
-
-export interface BalanceAdvisorInput {
-  /** Per-station breakdown with op stacks. Sorted in operator order. */
-  stations: StationBreakdown[];
-  /** Total bulletin SAM (sum of operation SMVs) in minutes. */
-  totalSam: number;
-  /** Operators currently on the line. Same as stations.length when one
-   *  operator per station; kept separate so a future shared-station case
-   *  reads naturally. */
-  operators: number;
-  /** Takt the line must hit, in minutes / piece. */
-  taktMin: number;
-  /** Did the takt come from a committed order or from the bottleneck
-   *  fallback? Drives the "commit an order" info item. */
-  taktSource: 'order' | 'bottleneck';
-  /** Current bottleneck SMV (slowest station, post-balance). */
-  bottleneckSmv: number;
-  /** LBR % — the fairness metric. */
-  lbr: number;
-  /** LBE % — capacity-vs-takt metric. */
-  lbe: number;
-  /** Optimum manning — the theoretical headcount at takt. */
-  optimumManning: number;
-  /** Balance loss % — complement of LBR, more intuitive to call out
-   *  directly in copy ("38 % of paid minutes are idle"). */
-  balanceLoss: number;
-  /** Smoothness index — variance of station loads, 0 = flat, ~0.25
-   *  = visibly uneven on a real bulletin. */
-  smoothness: number;
-  /** Did the user override the auto-assignment? If true we suggest
-   *  reverting to RPW for a fresh take instead of touting balancers. */
-  hasManualOverride: boolean;
-  /** Bulletin name, for friendly copy ("the T-shirt bulletin"). */
-  bulletinName?: string;
-}
+import type { BalanceStation, LineBalance, TaktReading } from './line-balance';
 
 export type SuggestionSeverity = 'critical' | 'warn' | 'opportunity' | 'info';
 
 export interface BalanceSuggestion {
-  /** Stable id so React keys are predictable and rules can be referenced
-   *  in tests / docs without depending on the user-visible title string. */
+  /** Stable id so React keys are predictable and rules can be referenced in
+   *  tests without depending on the user-visible title string. */
   id: string;
   severity: SuggestionSeverity;
   title: string;
+  /** The diagnostic numbers behind the title. */
   detail: string;
-  /** Verb-led next step, kept under ~140 chars so the row stays compact. */
+  /** Verb-led next step, naming a control that exists. */
   action: string;
+  /** Workstation the row is about, when it is about one. Lets the UI
+   *  highlight the offending bar instead of making the user find it. */
+  wsId?: string;
 }
 
 /** Severity rank for sorting — critical first, info last. */
@@ -90,190 +55,232 @@ const SEVERITY_RANK: Record<SuggestionSeverity, number> = {
   info: 3,
 };
 
+/** Balance loss above this is the textbook "poor balance" threshold. */
+const POOR_BALANCE_PCT = 25;
+/** Smoothness above this reads as a visibly bumpy chart. */
+const BUMPY_SI = 0.2;
+
+const min3 = (v: number) => v.toFixed(3);
+
+/** "OPR-04 · Side seam" — enough for the reader to find the bar. */
+function label(st: BalanceStation): string {
+  return `${st.name} (${st.op.code ?? st.op.name})`;
+}
+
+export interface BalanceAdvisorInput {
+  balance: LineBalance;
+  /** Present only once the user has stated what the line must ship. */
+  takt?: TaktReading | null;
+}
+
 /**
- * Run every rule against the input and return the resulting suggestions
- * sorted by severity (critical → info). Rules that do not fire return
- * nothing; the rule order below is only the *evaluation* order, the
- * final sort makes the output deterministic regardless.
+ * Run every rule and return the survivors sorted critical → info.
  *
- * The advisor is intentionally non-prescriptive about which action the
- * user should take when multiple are available — it surfaces every
- * mismatch it can see and lets the IE choose.
+ * Non-prescriptive on purpose: where more than one fix is available the row
+ * lists them and lets the IE choose. What it will not do is name a control
+ * that does not exist, or fire a rule whose condition is unreachable.
  */
 export function suggestBalanceActions(input: BalanceAdvisorInput): BalanceSuggestion[] {
+  const bal = input.balance;
+  const takt = input.takt ?? null;
   const out: BalanceSuggestion[] = [];
 
-  // ── Heaviest op + bottleneck station identification ─────────────────────
-  // Used by several rules below. Done once up front so each rule can lean
-  // on the same data without re-scanning the station array.
-  const sortedByLoad = [...input.stations].sort(
-    (a, b) => b.effectiveLoadMin - a.effectiveLoadMin,
-  );
-  const bottleneckStation = sortedByLoad[0];
-  const heaviestOpOnBottleneck = bottleneckStation?.operations.reduce<Operation | null>(
-    (best, op) => (best == null || op.smv > best.smv ? op : best),
-    null,
-  );
-  const avgLoad =
-    input.stations.length > 0
-      ? input.stations.reduce((s, st) => s + st.effectiveLoadMin, 0) / input.stations.length
-      : 0;
+  if (bal.stations.length === 0) {
+    return [
+      {
+        id: 'no-stations',
+        severity: 'info',
+        title: 'Nothing to balance on this line yet',
+        detail:
+          bal.excluded.length > 0
+            ? `${bal.excluded.length} workstation${bal.excluded.length === 1 ? '' : 's'} sit on this line but none of them carry an operation.`
+            : 'This line has no workstations on it.',
+        action:
+          'Open BUILD, drop stations onto the line, and bind each one to an operation from the bulletin.',
+      },
+    ];
+  }
 
-  // ── 1. CRITICAL — Infeasible at takt (LBE > 100) ───────────────────────
-  // The slowest station can't keep up with takt no matter how cleanly we
-  // re-pack the others. This is the failure case the user must resolve
-  // before any other suggestion matters.
-  if (input.lbe > 100 + 0.01) {
-    const exceedMin = Math.max(0, input.bottleneckSmv - input.taktMin);
+  const bottleneck = bal.bottleneck!;
+  const avgCycle =
+    bal.stations.reduce((s, st) => s + st.cycleMin, 0) / bal.stations.length;
+
+  // ── 1. CRITICAL — cannot hit the stated target, and no repack will help ──
+  // Σ work content already exceeds what the crew can deliver in a shift, so
+  // this is a headcount problem, not a distribution problem.
+  if (takt && takt.requiredChannels > bal.servers) {
+    const gap = takt.requiredChannels - bal.servers;
     out.push({
-      id: 'lbe-infeasible',
+      id: 'takt-understaffed',
       severity: 'critical',
-      title: 'Line is infeasible at takt',
+      title: `${gap} more operator${gap === 1 ? '' : 's'} needed to hit ${takt.targetPieces} pcs`,
       detail:
-        `Bottleneck ${input.bottleneckSmv.toFixed(3)} min/pc exceeds takt ` +
-        `${input.taktMin.toFixed(3)} min/pc by ${exceedMin.toFixed(3)} min. ` +
-        `LBE reads ${input.lbe.toFixed(1)} %; the line will fall behind demand every cycle.`,
-      action:
-        heaviestOpOnBottleneck
-          ? `Split "${heaviestOpOnBottleneck.name}" (${heaviestOpOnBottleneck.smv.toFixed(3)} min) across two stations, OR add operators until manning ≥ ${input.optimumManning}, OR negotiate a longer deadline.`
-          : `Add operators until manning ≥ ${input.optimumManning}, OR sub-divide the slowest station's heaviest op, OR negotiate a longer deadline.`,
+        `Takt is ${min3(takt.taktMin)} min/pc (${takt.shiftMin} min ÷ ${takt.targetPieces} pcs). ` +
+        `One piece costs the crew ${min3(bal.workContentMin)} operator-minutes, so even a perfectly ` +
+        `flat line needs ⌈${min3(bal.workContentMin)} ÷ ${min3(takt.taktMin)}⌉ = ${takt.requiredChannels} channels; ` +
+        `this line runs ${bal.servers}. At its current pace it ships ${takt.achievablePieces} pcs.`,
+      action: `Add ${gap} operator${gap === 1 ? '' : 's'}, OR run overtime, OR agree a target at or below ${takt.achievablePieces} pcs.`,
     });
   }
 
-  // ── 2. CRITICAL — Understaffed for takt ────────────────────────────────
-  // Optimum manning is the floor a perfectly-balanced line would land at.
-  // If we don't even meet that, no amount of rebalancing can save us.
-  // Skip when the LBE-infeasible rule already fired (same root cause,
-  // duplicate copy adds noise).
-  if (input.optimumManning > input.operators && input.lbe <= 100) {
-    const gap = input.optimumManning - input.operators;
+  // ── 2. CRITICAL — target is reachable, but the pile-up blocks it ─────────
+  // The crew is big enough; the work is in the wrong place. This is the case
+  // rebalancing genuinely solves, so it gets its own row and its own copy.
+  if (takt && !takt.feasible && takt.requiredChannels <= bal.servers) {
+    const over = bal.bottleneckMin - takt.taktMin;
     out.push({
-      id: 'manning-understaffed',
+      id: 'takt-bottleneck-blocks',
       severity: 'critical',
-      title: `Need ${gap} more operator${gap === 1 ? '' : 's'} to meet takt`,
+      title: `${label(bottleneck)} is ${min3(over)} min/pc slower than takt`,
       detail:
-        `Optimum manning is ${input.optimumManning} (= ⌈ΣSAM ${input.totalSam.toFixed(2)} min ÷ takt ${input.taktMin.toFixed(3)} min⌉) ` +
-        `but the line is staffed for ${input.operators}. Even a perfect rebalance leaves the bottleneck above takt.`,
-      action: `Add ${gap} operator${gap === 1 ? '' : 's'}, OR run a second shift, OR reduce demand until takt ≥ ΣSAM/${input.operators} = ${(input.totalSam / Math.max(1, input.operators)).toFixed(3)} min.`,
+        `Takt ${min3(takt.taktMin)} min/pc, bottleneck ${min3(bal.bottleneckMin)} min/pc. ` +
+        `The crew is large enough — ${takt.requiredChannels} channels would do it and you have ${bal.servers} — ` +
+        `so this is a distribution problem, not a headcount one. The line ships ${takt.achievablePieces} of ${takt.targetPieces} pcs.`,
+      action: `Add a channel at ${label(bottleneck)} until its cycle drops under ${min3(takt.taktMin)} min, OR split "${bottleneck.op.name}" across two stations.`,
+      wsId: bottleneck.wsId,
     });
   }
 
-  // ── 3. WARN — Poor balance (BL > 25 %) ─────────────────────────────────
-  // Classic textbook threshold. 25 % balance loss means a quarter of every
-  // operator-paid minute is idle slack.
-  if (input.balanceLoss > 25) {
+  // ── 3. CRITICAL — the bottleneck is a shared operator ───────────────────
+  // A station whose operator is only there part of the shift runs at 1/share
+  // speed. When that station is also the pacer, the whole line is being held
+  // back by a staffing decision, and the Builder has a one-click reverse.
+  if (bottleneck.shareFrac < 1) {
+    const mult = 1 / bottleneck.shareFrac;
+    out.push({
+      id: 'bottleneck-shared-operator',
+      severity: 'critical',
+      title: `The pacing station only has its operator ${Math.round(bottleneck.shareFrac * 100)} % of the shift`,
+      detail:
+        `${label(bottleneck)} has a nominal SMV of ${min3(bottleneck.nominalMin)} min, but a shared operator ` +
+        `multiplies its cycle by ${mult.toFixed(2)}× to ${min3(bottleneck.cycleMin)} min/pc. ` +
+        `That single decision is what caps the line at ${bal.capacityPerHr.toFixed(0)} pcs/hr.`,
+      action: `Open BUILD, select ${bottleneck.name}, and use RESTORE OWN OPERATOR — or share a slack station instead of the pacer.`,
+      wsId: bottleneck.wsId,
+    });
+  }
+
+  // ── 4. WARN — poor balance ──────────────────────────────────────────────
+  if (bal.balanceLossPct > POOR_BALANCE_PCT) {
+    const idlePerPiece = (bal.balanceLossPct / 100) * bal.servers * bal.bottleneckMin;
     out.push({
       id: 'balance-loss-high',
       severity: 'warn',
-      title: `${input.balanceLoss.toFixed(1)} % of paid operator-minutes are idle`,
+      title: `${bal.balanceLossPct.toFixed(1)} % of paid channel-minutes are idle`,
       detail:
-        `LBR is ${input.lbr.toFixed(1)} %; on a ${input.operators}-operator line that's ` +
-        `≈ ${((input.balanceLoss / 100) * input.operators * input.bottleneckSmv).toFixed(2)} idle minutes per piece across the crew. ` +
-        `Smoothness index ${input.smoothness.toFixed(3)} (lower is flatter).`,
-      action: input.hasManualOverride
-        ? 'Click "Reset to auto" to re-run RPW from scratch — your manual override may be carrying historic slack.'
-        : 'Try a different balancer (COMSOAL or GA) from the balancer picker, OR drag the heaviest segment off the bottleneck operator manually.',
+        `Every piece occupies ${bal.servers} channels for ${min3(bal.bottleneckMin)} min ` +
+        `(= ${min3(bal.servers * bal.bottleneckMin)} channel-minutes) but only consumes ` +
+        `${min3(bal.workContentMin)} of them, so ${min3(idlePerPiece)} min per piece is waiting. ` +
+        `Smoothness index ${bal.smoothness.toFixed(3)} — lower is flatter.`,
+      action: `Pull the tallest bars down: add a channel at ${label(bottleneck)}, or move work to a station under the ${min3(bal.pitchMin)} min pitch line.`,
+      wsId: bottleneck.wsId,
     });
   }
 
-  // ── 4. WARN — Single station dominates ─────────────────────────────────
-  // When the bottleneck is more than ~30 % above the average, one station
-  // is doing the lion's share and the rest of the line carries the idle.
-  // Suggest splitting the heaviest op on it.
-  if (
-    bottleneckStation &&
-    avgLoad > 0 &&
-    bottleneckStation.effectiveLoadMin > avgLoad * 1.3 &&
-    heaviestOpOnBottleneck
-  ) {
-    const overshoot =
-      ((bottleneckStation.effectiveLoadMin - avgLoad) / avgLoad) * 100;
+  // ── 5. WARN — one station towers over the rest ──────────────────────────
+  if (avgCycle > 0 && bottleneck.cycleMin > avgCycle * 1.3) {
+    const overshoot = ((bottleneck.cycleMin - avgCycle) / avgCycle) * 100;
     out.push({
       id: 'bottleneck-domination',
       severity: 'warn',
-      title: `Station ${bottleneckStation.id} carries ${overshoot.toFixed(0)} % more than average`,
+      title: `${label(bottleneck)} runs ${overshoot.toFixed(0)} % above the line average`,
       detail:
-        `Load ${bottleneckStation.effectiveLoadMin.toFixed(3)} min vs line average ${avgLoad.toFixed(3)} min. ` +
-        `Heaviest op there: "${heaviestOpOnBottleneck.name}" at ${heaviestOpOnBottleneck.smv.toFixed(3)} min.`,
-      action: `Either split "${heaviestOpOnBottleneck.name}" into two sub-ops, OR move a lighter op off ${bottleneckStation.id} onto a faster station.`,
+        `${min3(bottleneck.cycleMin)} min/pc against an average of ${min3(avgCycle)} min/pc across ${bal.stations.length} stations. ` +
+        `A second channel here would take it to ${min3(bottleneck.workContentMin / (bottleneck.servers + 1))} min/pc.`,
+      action: `Double up on ${bottleneck.name} (c = ${bottleneck.servers} → ${bottleneck.servers + 1}), OR split "${bottleneck.op.name}" (${min3(bottleneck.nominalMin)} min) across two stations.`,
+      wsId: bottleneck.wsId,
     });
   }
 
-  // ── 5. WARN — High smoothness index ────────────────────────────────────
-  // SI > 0.20 is empirically the "visibly bumpy Yamazumi" threshold. We
-  // skip this rule when balance loss has already fired (same diagnosis
-  // from a different angle — don't say it twice).
-  if (input.smoothness > 0.2 && input.balanceLoss <= 25) {
+  // ── 6. WARN — uneven without being badly balanced ───────────────────────
+  // Skipped when rule 4 already fired: same diagnosis from another angle.
+  if (bal.smoothness > BUMPY_SI && bal.balanceLossPct <= POOR_BALANCE_PCT) {
     out.push({
       id: 'smoothness-high',
       severity: 'warn',
-      title: `Station loads are uneven (SI ${input.smoothness.toFixed(3)})`,
+      title: `Station loads are uneven (SI ${bal.smoothness.toFixed(3)})`,
       detail:
-        `LBR ${input.lbr.toFixed(1)} % looks acceptable, but the variance behind it is high — some operators are well-loaded and others aren't. ` +
-        `Smoothness improves when adjacent stations are within ~10 % of each other.`,
-      action: 'Re-run balancer with COMSOAL (stochastic, 200 iterations) or GA for a smoother pack.',
+        `Balance loss is an acceptable ${bal.balanceLossPct.toFixed(1)} %, but the spread behind it is wide — ` +
+        `some stations sit well under the ${min3(bal.pitchMin)} min pitch while others crowd the ` +
+        `${min3(bal.bottleneckMin)} min bottleneck.`,
+      action: 'Level the tallest two or three bars first — smoothness responds to the extremes, not the middle.',
     });
   }
 
-  // ── 6. OPPORTUNITY — Significantly over-staffed vs theoretical floor ──
-  // Three operators or more above optimum manning is when it stops being
-  // "carry a buffer" and starts being a redeployable headcount surplus.
-  if (input.operators - input.optimumManning >= 3 && input.optimumManning > 0) {
-    const surplus = input.operators - input.optimumManning;
+  // ── 7. OPPORTUNITY — channels the imbalance is costing ──────────────────
+  // Deliberately NOT "you are over-staffed, redeploy them". Taking operators
+  // off an unbalanced line moves the bottleneck up. The surplus is real only
+  // AFTER the repack, and the copy has to say so in that order.
+  const surplus = bal.servers - bal.channelsToHoldPace;
+  if (surplus >= 2 && bal.channelsToHoldPace > 0) {
     out.push({
-      id: 'manning-overstaffed',
+      id: 'imbalance-channel-cost',
       severity: 'opportunity',
-      title: `${surplus} operators above theoretical floor`,
+      title: `Imbalance is costing ${surplus} channel${surplus === 1 ? '' : 's'}`,
       detail:
-        `Optimum manning is ${input.optimumManning} but the line runs ${input.operators}. ` +
-        `Either the bulletin is loose vs takt (extra capacity available) or the balance is dropping pieces an extra operator could absorb.`,
-      action: `Either redeploy ${surplus} operators to another line, OR take on a second style on this line, OR tighten takt to absorb the surplus.`,
+        `A perfectly flat line would hold the same ${bal.capacityPerHr.toFixed(0)} pcs/hr with ` +
+        `⌈${min3(bal.workContentMin)} ÷ ${min3(bal.bottleneckMin)}⌉ = ${bal.channelsToHoldPace} channels; this one uses ${bal.servers}. ` +
+        `The difference is idle time, not spare capacity.`,
+      action: `Rebalance first, then redeploy the ${surplus} channel${surplus === 1 ? '' : 's'} the repack frees. Pulling them out now would slow the line.`,
     });
   }
 
-  // ── 7. INFO — No committed order, takt is bottleneck-paced ─────────────
-  // LBE collapses to LBR in this case — worth telling the user once.
-  if (input.taktSource === 'bottleneck') {
+  // ── 8. WARN — Builder staffing disagrees with what the engine runs ──────
+  // `workersRequired` / assignment rows are what Builder shows on the tile;
+  // Kendall's c is what the engine parallelises on. When they disagree the
+  // user is reading a headcount the run never used.
+  const mismatched = bal.stations.filter((st) => st.staffed !== st.servers);
+  if (mismatched.length > 0) {
+    const worst = mismatched[0];
     out.push({
-      id: 'takt-no-order',
-      severity: 'info',
-      title: 'No committed order — takt is bottleneck-paced',
+      id: 'staffing-vs-channels',
+      severity: 'warn',
+      title: `${mismatched.length} station${mismatched.length === 1 ? '' : 's'} staffed differently from the channels the run uses`,
       detail:
-        `Without a demand signal, takt falls back to the bottleneck SMV (${input.bottleneckSmv.toFixed(3)} min). ` +
-        'LBE will read the same as LBR until a demand-driven takt arrives.',
-      action: 'Commit an order in the Orders wizard — qty / deadlineDays drives takt = SHIFT_MIN / demand.',
+        `${label(worst)} is staffed for ${worst.staffed} operator${worst.staffed === 1 ? '' : 's'} in BUILD but runs ${worst.servers} parallel channel${worst.servers === 1 ? '' : 's'} in the engine` +
+        (mismatched.length > 1 ? `, and ${mismatched.length - 1} other station${mismatched.length === 2 ? ' does' : 's do'} the same.` : '.') +
+        ' Every bar on this chart is drawn from the channel count, because that is what paces the line.',
+      action: 'Set the channel count on the station itself (the ± control below the bar) so the roster and the run agree.',
+      wsId: worst.wsId,
     });
   }
 
-  // ── 8. INFO — Manual override in use ───────────────────────────────────
-  if (input.hasManualOverride && input.balanceLoss <= 25) {
+  // ── 9. INFO — stations on the line that carry no pace ───────────────────
+  const unbound = bal.excluded.filter((e) => e.reason !== 'infrastructure');
+  if (unbound.length > 0) {
     out.push({
-      id: 'manual-override',
-      severity: 'info',
-      title: 'Manual Yamazumi override in use',
+      id: 'stations-excluded',
+      severity: 'warn',
+      title: `${unbound.length} station${unbound.length === 1 ? '' : 's'} on this line are not in the balance`,
       detail:
-        'You\'ve hand-tuned the assignment; the auto-balancer (RPW) is not running on every change. ' +
-        'That\'s fine when you\'re finalising a known-good plan.',
-      action: 'Click "Reset to auto" if you want to compare against a fresh RPW pack.',
+        unbound
+          .slice(0, 4)
+          .map((e) =>
+            e.reason === 'no-operation'
+              ? `${e.name} — no operation bound`
+              : e.reason === 'unknown-operation'
+                ? `${e.name} — op "${e.detail}" is not in this bulletin`
+                : `${e.name} — the line has no garment`,
+          )
+          .join(' · ') + (unbound.length > 4 ? ` · +${unbound.length - 4} more` : ''),
+      action: 'Bind each one to an operation in BUILD, or move it off this line — an unbound station occupies floor space and contributes no capacity.',
+      wsId: unbound[0].wsId,
     });
   }
 
-  // ── 9. INFO — Healthy line (only when nothing else fires) ──────────────
-  // Suppresses the "all clear" line when any actionable rule already
-  // surfaced. We want a positive signal *only* when the page is genuinely
-  // free of issues.
+  // ── 10. INFO — nothing else fired ───────────────────────────────────────
   if (out.length === 0) {
     out.push({
       id: 'healthy',
       severity: 'info',
       title: 'Balance is healthy',
       detail:
-        `LBR ${input.lbr.toFixed(1)} %, LBE ${input.lbe.toFixed(1)} %, manning at ${input.optimumManning}/${input.operators}. ` +
-        'No structural rebalancing required.',
-      action: 'Keep this layout. Consider committing it as a saved scenario for downstream comparison.',
+        `Balance loss ${bal.balanceLossPct.toFixed(1)} %, smoothness ${bal.smoothness.toFixed(3)}, ` +
+        `${bal.servers} channels holding ${bal.capacityPerHr.toFixed(0)} pcs/hr` +
+        (takt ? ` against a takt of ${min3(takt.taktMin)} min/pc.` : '.'),
+      action: 'Keep this layout. Save it as a scenario so a later change has something to be compared against.',
     });
   }
 
-  // Final sort — severity rank then evaluation order (stable).
   return out.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 }

@@ -11,13 +11,11 @@ export {
   type ProjectState,
   type ProjectMeta,
   type SkillMatrix,
-  type YamazumiAssignment,
   type Scenario,
   type ScenarioKpis,
   type Floor,
   type Line,
   type FactoryStructure,
-  type OrderDraft,
 } from './project';
 export {
   useFactoryLibrary,
@@ -32,8 +30,10 @@ export {
   applySwproj,
   parseSwproj,
   buildSwproj,
+  archiveAndImportSwproj,
   type SwprojEnvelope,
   type ParsedSwproj,
   type ApplySwprojResult,
+  type ImportFactoryResult,
   type TwinExport,
 } from './swproj';

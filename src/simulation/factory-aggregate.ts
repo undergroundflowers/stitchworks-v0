@@ -133,25 +133,6 @@ export function aggregateFactoryKpis(
     mean: sumMean((l) => l.agg.demandTaktGap),
     std: sumStd((l) => l.agg.demandTaktGap),
   };
-  // Changeover minutes — extensive across lines.
-  const totalChangeoverMin = {
-    mean: sumMean((l) => l.agg.totalChangeoverMin),
-    std: sumStd((l) => l.agg.totalChangeoverMin),
-  };
-  // Per-order completion times — union across lines. An order should
-  // belong to exactly one line in a well-formed setup, so the union is
-  // trivial; if two lines somehow both report the same order, the
-  // earlier-finishing entry wins.
-  const perOrderCompletionTime: Record<string, { mean: number; std: number }> = {};
-  for (const l of lines) {
-    for (const [orderId, stat] of Object.entries(l.agg.perOrderCompletionTime)) {
-      const existing = perOrderCompletionTime[orderId];
-      if (!existing || stat.mean < existing.mean) {
-        perOrderCompletionTime[orderId] = stat;
-      }
-    }
-  }
-
   return {
     n: Math.min(...lines.map((l) => l.agg.n)),
     producedPieces,
@@ -167,8 +148,6 @@ export function aggregateFactoryKpis(
     offStandardLossPct,
     labourProductivity,
     demandTaktGap,
-    totalChangeoverMin,
-    perOrderCompletionTime,
     bottleneckOpName: slowest?.agg.bottleneckOpName ?? '—',
     bottleneckQueue: slowest?.agg.bottleneckQueue ?? 0,
     replications: [],
@@ -195,8 +174,6 @@ function emptyAgg(): AggregateKpis {
     offStandardLossPct: zero,
     labourProductivity: zero,
     demandTaktGap: zero,
-    totalChangeoverMin: zero,
-    perOrderCompletionTime: {},
     bottleneckOpName: '—',
     bottleneckQueue: 0,
     replications: [],

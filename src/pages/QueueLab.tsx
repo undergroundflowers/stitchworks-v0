@@ -17,10 +17,12 @@
  * unreachable node to diagnose, and the schematic can lay itself out.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
+  Icon,
+  type IconName,
   EmptyState,
   HudSelect,
   QueueingReference,
@@ -29,25 +31,27 @@ import {
   Sym,
   Tag,
   ToggleGroup,
+  DistPicker,
   ViewTitle,
   useConfirm,
+  CollapsedRail,
+  PaneCollapseButton,
+  RAIL_W,
 } from '../components';
 import {
   CapacityField,
   DISCIPLINE_OPTIONS,
-  DIST_OPTIONS,
   DistParamInputs,
   DropdownField,
   NumberField,
   morphDist,
   patchDist,
-  type DistKind,
   type DistParams,
 } from '../components/queueParamFields';
 import { FieldLabel } from '../components/Sym';
 import { LabSchematic, LabSchematicLegend } from '../components/lab/LabSchematic';
 import { LabSweep } from '../components/lab/LabSweep';
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
+import { SW_COLORS, SW_CONTROL, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { QUANTITY, glossOf, type QuantityId } from '../simulation/notation';
 import { solveNetwork, type NetworkSolution, type QueueNode } from '../simulation/network';
@@ -55,9 +59,6 @@ import { meanOf, type QueueDiscipline } from '../simulation';
 import { workingFor, trafficEquationFor, type Working } from '../domain/lab-working';
 import { useLab } from '../store/lab';
 import { isSeedSystem } from '../domain/lab-systems';
-import { useLineSim } from '../simulation/useLineSim';
-import { serversFor, systemCapacityFor, disciplineFor } from '../simulation';
-import { useTwin } from '../store/twin';
 
 type ResultScope = 'stage' | 'network';
 
@@ -82,6 +83,31 @@ export function QueueLabPage() {
   const multi = (system?.nodes.length ?? 0) > 1;
   const effectiveScope: ResultScope = multi ? scope : 'stage';
 
+  // Both rails fold to a RAIL_W stub, exactly as the Builder's palette and
+  // inspector do, so the bench can be taken nearly full-width when you are
+  // reading a schematic rather than editing one.
+  const [systemsOpen, setSystemsOpen] = useState(true);
+  const [paramsOpen, setParamsOpen] = useState(true);
+
+  // [ / ] toggle the rails — the same Figma convention the Builder uses, so
+  // one pair of keys works on both three-column surfaces.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const tag = (e.target as Element | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === '[') {
+        e.preventDefault();
+        setSystemsOpen((o) => !o);
+      } else if (e.key === ']') {
+        e.preventDefault();
+        setParamsOpen((o) => !o);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     /* The route shell clips its child, so the horizontal scroll has to be
        owned here rather than by loosening an overflow every page shares. */
@@ -90,18 +116,24 @@ export function QueueLabPage() {
       style={{
         height: '100%',
         display: 'grid',
-        gridTemplateColumns: '278px 1fr 352px',
+        gridTemplateColumns: `${systemsOpen ? 278 : RAIL_W}px 1fr ${paramsOpen ? 352 : RAIL_W}px`,
         background: SW_COLORS.paperDeep,
         fontFamily: SW_FONTS.body,
         minHeight: 0,
         // Stitchworks is a desktop app with a 1024px floor and no responsive
         // reflow. Below the floor the two fixed rails would eat the whole width
         // and squeeze the bench to a column one word wide, so the grid holds
-        // its intended proportions and the window scrolls instead.
-        minWidth: 1024,
+        // its intended proportions and the window scrolls instead. A collapsed
+        // rail gives its width back to the floor rather than to the bench, so
+        // folding one away is a real gain at any window size.
+        minWidth: 1024 - (systemsOpen ? 0 : 278 - RAIL_W) - (paramsOpen ? 0 : 352 - RAIL_W),
       }}
     >
-      <SystemsRail />
+      {systemsOpen ? (
+        <SystemsRail onCollapse={() => setSystemsOpen(false)} />
+      ) : (
+        <CollapsedRail side="left" label="SYSTEMS" onExpand={() => setSystemsOpen(true)} />
+      )}
 
       <main style={{ minWidth: 0, overflowY: 'auto', padding: '18px 22px 40px' }}>
         {!system ? (
@@ -125,7 +157,16 @@ export function QueueLabPage() {
         )}
       </main>
 
-      <ParametersRail system={system} node={node} solution={solution} />
+      {paramsOpen ? (
+        <ParametersRail
+          system={system}
+          node={node}
+          solution={solution}
+          onCollapse={() => setParamsOpen(false)}
+        />
+      ) : (
+        <CollapsedRail side="right" label="PARAMETERS" onExpand={() => setParamsOpen(true)} />
+      )}
     </div>
     </div>
   );
@@ -135,7 +176,7 @@ export function QueueLabPage() {
 //  LEFT — the collection
 // ─────────────────────────────────────────────────────────────────────────
 
-function SystemsRail() {
+function SystemsRail({ onCollapse }: { onCollapse: () => void }) {
   const systems = useLab((s) => s.systems);
   const activeId = useLab((s) => s.activeId);
   const lab = useLab();
@@ -146,16 +187,87 @@ function SystemsRail() {
       style={{
         borderRight: `1px solid ${SW_COLORS.line}`,
         background: SW_COLORS.paper,
-        overflowY: 'auto',
-        padding: '14px 12px 24px',
+        // The rail is a fixed header over a scrolling list, not one long
+        // scrolling column: the actions belong to the collection as a whole,
+        // so they stay put while you scroll through it.
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
         minWidth: 0,
       }}
     >
-      <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted, marginBottom: 8 }}>
-        Systems
+      {/* Header + actions. The four actions used to sit in a wrapping row of
+          labelled buttons BELOW the list, which put them at an offset that
+          moved every time a system was added and, on a long list, off the
+          bottom of the rail entirely. Icon-only and pinned to the header,
+          they are always in the same place and always visible — and they now
+          match how every other action in the app is drawn. */}
+      <div
+        style={{
+          flex: '0 0 auto',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          padding: '14px 12px 8px',
+          background: SW_COLORS.paper,
+          borderBottom: `1px solid ${SW_COLORS.line}`,
+        }}
+      >
+        <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Systems</div>
+        <div style={{ display: 'flex', gap: 2 }}>
+          <RailAction icon="plus" label="New system" onClick={() => lab.createSystem()} />
+          <RailAction
+            icon="duplicate"
+            label="Duplicate this system"
+            disabled={!activeId}
+            onClick={() => activeId && lab.duplicateSystem(activeId)}
+          />
+          <RailAction
+            icon="reset"
+            label="Reset this system to its textbook values"
+            disabled={!activeId || !isSeedSystem(activeId)}
+            onClick={() => activeId && lab.resetSeeded(activeId)}
+          />
+          <RailAction
+            icon="trash"
+            label="Delete this system"
+            danger
+            disabled={!activeId || systems.length <= 1}
+            onClick={async () => {
+              if (!activeId) return;
+              const s = systems.find((x) => x.id === activeId);
+              if (
+                await confirm({
+                  title: 'Delete system',
+                  message: `Delete "${s?.name}"? This cannot be undone.`,
+                  confirmLabel: 'Delete',
+                  variant: 'danger',
+                })
+              ) {
+                lab.deleteSystem(activeId);
+              }
+            }}
+          />
+          {/* Separated from the four list actions by a hairline: collapsing
+              the rail acts on the rail, not on the selected system, and the
+              trash sits close enough that the two want telling apart. */}
+          <div style={{ width: 1, alignSelf: 'stretch', margin: '0 4px', background: SW_COLORS.line }} />
+          <PaneCollapseButton side="left" label="systems" onClick={onCollapse} />
+        </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          padding: '10px 12px 24px',
+        }}
+      >
         {systems.map((s) => {
           const active = s.id === activeId;
           return (
@@ -197,134 +309,64 @@ function SystemsRail() {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-        <Button size="sm" variant="secondary" onClick={() => lab.createSystem()}>
-          + New
-        </Button>
-        {activeId && (
-          <Button size="sm" variant="secondary" onClick={() => lab.duplicateSystem(activeId)}>
-            Duplicate
-          </Button>
-        )}
-        {activeId && isSeedSystem(activeId) && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => lab.resetSeeded(activeId)}
-          >
-            Reset
-          </Button>
-        )}
-        {activeId && systems.length > 1 && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={async () => {
-              const s = systems.find((x) => x.id === activeId);
-              if (
-                await confirm({
-                  title: 'Delete system',
-                  message: `Delete "${s?.name}"? This cannot be undone.`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                })
-              ) {
-                lab.deleteSystem(activeId);
-              }
-            }}
-          >
-            Delete
-          </Button>
-        )}
-      </div>
-
-      <ImportFromFloor />
     </aside>
   );
 }
 
 /**
- * One-way import from the factory.
+ * One icon-only action in the Systems rail header.
  *
- * Every parameter is resolved through the ENGINE's own functions rather than
- * read off the workstation record, so the system that lands on the bench is
- * the one the simulator would actually run. λ is the only measured value; the
- * rest are authored, so a station can be pulled before any run exists and the
- * chip says which fallback was used.
+ * The actions are shown disabled rather than hidden. The old row rendered
+ * each button only when it applied, so the set changed width and membership
+ * as you clicked around the list and there was no way to learn that "reset"
+ * exists at all until you happened to select a seeded system. A greyed icon
+ * with a tooltip says both that the action exists and why it is not available.
  */
-function ImportFromFloor() {
-  const lab = useLab();
-  const twin = useTwin((s) => s.canonical);
-  const { state } = useLineSim();
-  const [pick, setPick] = useState<string>('');
-
-  const stations = twin?.workstations ?? [];
-  if (stations.length === 0) return null;
-
-  const options = stations.map((ws) => ({ value: ws.id, label: ws.name }));
-
-  const pull = () => {
-    const ws = stations.find((w) => w.id === pick) ?? stations[0];
-    if (!ws) return;
-    const observed = state.stations.find((s) => s.wsId === ws.id);
-    const cap = systemCapacityFor(ws);
-    // λ is the one measured quantity. With no run to read it from, fall back to
-    // the station's own service rate — which makes ρ = 1 and is at least an
-    // honest starting point rather than a fabricated load.
-    const dist = observed?.serviceDist ?? { kind: 'exp' as const, mean: 6 };
-    const mu = 60 / Math.max(1e-9, meanOf(dist));
-    const lambda = observed && observed.lambda > 0 ? observed.lambda : mu;
-
-    const node: QueueNode = {
-      id: `n-${ws.id}`,
-      name: ws.name,
-      externalArrivalPerHr: lambda,
-      serviceDist: dist,
-      servers: serversFor(ws),
-      capacity: cap,
-      discipline: disciplineFor(ws),
-    };
-    lab.addSystem({
-      id: `imp-${ws.id}-${Math.random().toString(36).slice(2, 6)}`,
-      name: `${ws.name} (from floor)`,
-      blurb:
-        observed && observed.lambda > 0
-          ? 'Pulled from a run. Nothing you change here goes back to the floor.'
-          : 'Pulled before any run, so λ was set to μ. Nothing here goes back to the floor.',
-      nodes: [node],
-      edges: [],
-    });
-  };
-
+function RailAction({
+  icon,
+  label,
+  onClick,
+  disabled,
+  danger,
+}: {
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const active = hover && !disabled;
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
-        marginTop: 18,
-        paddingTop: 14,
-        borderTop: `1px solid ${SW_COLORS.line}`,
+        width: SW_CONTROL.chevron,
+        height: SW_CONTROL.chevron,
+        display: 'grid',
+        placeItems: 'center',
+        padding: 0,
+        borderRadius: SW_RADIUS.sm,
+        border: '1px solid transparent',
+        background: active ? SW_COLORS.paperDeep : 'transparent',
+        color: disabled
+          ? SW_COLORS.faint
+          : active
+            ? danger
+              ? SW_COLORS.alarm
+              : SW_COLORS.ink
+            : SW_COLORS.muted,
+        cursor: disabled ? 'default' : 'pointer',
       }}
     >
-      <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted, marginBottom: 8 }}>
-        Pull from the floor
-      </div>
-      <HudSelect
-        value={pick || options[0]?.value}
-        onChange={setPick}
-        variant="light"
-        size="sm"
-        width="100%"
-        options={options}
-      />
-      <div style={{ marginTop: 6 }}>
-        <Button size="sm" variant="secondary" full onClick={pull}>
-          ↓ Pull onto the bench
-        </Button>
-      </div>
-      <div style={{ marginTop: 6, fontSize: 10.5, color: SW_COLORS.muted, lineHeight: 1.45 }}>
-        Copies c, N, the discipline and the service distribution as the engine resolves
-        them. One way — nothing you change in the Lab reaches your factory.
-      </div>
-    </div>
+      <Icon name={icon} size={13} />
+    </button>
   );
 }
 
@@ -506,7 +548,38 @@ function Bench({
   );
 }
 
-/** The measures for one stage: verdict tiles, then the full table with working. */
+/**
+ * Every measure the closed form gives for a single stage, in reading order:
+ * the four you form a verdict from, then the rest of the solution.
+ */
+const STAGE_MEASURES: QuantityId[] = [
+  'rho', 'Lq', 'Wq', 'L', 'W', 'D', 'P0', 'pWait', 'pNoWait', 'lambdaEff', 'pBalk',
+];
+const MEASURE_COLS = 4;
+
+/**
+ * The measures for one stage — every one of them a tile.
+ *
+ * This was four headline tiles above a table of the other eleven, which said
+ * by its layout that the four were the answer and the rest were footnotes.
+ * They are all the same kind of thing: one closed-form number about this
+ * stage. So they are all drawn the same way.
+ *
+ * The working did not go anywhere — it moved. Point at a tile and its
+ * derivation appears under that tile's row, in a strip that hugs its own
+ * working and may run the full width of the grid, which is the only place
+ * wide enough for a line like P₀ = 1 / [ Σₙ₌₀ᶜ⁻¹ … ] to print without
+ * wrapping into porridge. Clicking
+ * pins it so it survives the pointer leaving; Escape or a second click
+ * releases it.
+ *
+ * ── Why the strip floats instead of sitting in the flow ────────────────────
+ * In the flow it would push every row below it down. Then moving the pointer
+ * from a row-1 tile down onto a row-2 tile removes the row-1 strip, row 2
+ * jumps up under the cursor, the pointer lands back on row 1, the strip
+ * returns, and the grid oscillates. Absolutely positioned, nothing below it
+ * ever moves, so hover cannot fight itself.
+ */
 function StageResults({
   node,
   solved,
@@ -523,116 +596,172 @@ function StageResults({
         ? SW_COLORS.warn
         : SW_COLORS.ok;
 
-  const ROWS: QuantityId[] = [
-    'rho', 'P0', 'Lq', 'L', 'Wq', 'W', 'D', 'pWait', 'pNoWait', 'lambdaEff', 'pBalk',
-  ];
+  const [hovered, setHovered] = useState<QuantityId | null>(null);
+  const [pinned, setPinned] = useState<QuantityId | null>(null);
+  const open = hovered ?? pinned;
+
+  /* Leaving a tile is deferred by a beat so the pointer can cross the 6px gap
+     into the strip without the strip vanishing under it mid-travel. */
+  const closeTimer = useRef<number | null>(null);
+  const hold = () => {
+    if (closeTimer.current !== null) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+  const show = (id: QuantityId) => {
+    hold();
+    setHovered(id);
+  };
+  const release = () => {
+    hold();
+    closeTimer.current = window.setTimeout(() => setHovered(null), 120);
+  };
+  useEffect(() => () => {
+    if (closeTimer.current !== null) clearTimeout(closeTimer.current);
+  }, []);
+
+  const input = { notation: solved.notation, kpis: k, lambda: solved.lambda, mu };
+  const openWorking = open ? workingFor(open, input) : null;
+  const openRow = open ? Math.floor(STAGE_MEASURES.indexOf(open) / MEASURE_COLS) : -1;
+
+  const rows: QuantityId[][] = [];
+  for (let i = 0; i < STAGE_MEASURES.length; i += MEASURE_COLS) {
+    rows.push(STAGE_MEASURES.slice(i, i + MEASURE_COLS));
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-        {/* Symbols go through <Sym>: these labels are uppercased in CSS, which
-            renders a bare ρ as Ρ and a bare Lq as LQ. */}
-        <Stat label={<StatLabel name="Utilisation" q="rho" />} value={fmt(k.rho, 3)} color={rhoTone} big />
-        <Stat label={<StatLabel name="Queue length" q="Lq" />} value={fmt(k.Lq, 2)} unit="waiting" big />
-        <Stat label={<StatLabel name="Queue wait" q="Wq" />} value={fmt(k.Wq * 60, 1)} unit="min" big />
-        <Stat label={<StatLabel name="In system" q="L" />} value={fmt(k.L, 2)} unit="units" big />
-      </div>
-
-      <div
-        style={{
-          border: `1px solid ${SW_COLORS.line}`,
-          borderRadius: SW_RADIUS.sm,
-          overflow: 'hidden',
-        }}
-      >
-        {ROWS.map((id, i) => (
-          <MeasureRow
-            key={id}
-            id={id}
-            value={valueFor(id, k)}
-            working={workingFor(id, { notation: solved.notation, kpis: k, lambda: solved.lambda, mu })}
-            alt={i % 2 === 1}
-          />
-        ))}
-      </div>
+    <div
+      style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setPinned(null);
+      }}
+    >
+      {rows.map((row, r) => (
+        <div
+          key={r}
+          style={{
+            position: 'relative',
+            display: 'grid',
+            gridTemplateColumns: `repeat(${MEASURE_COLS}, 1fr)`,
+            gap: 10,
+          }}
+        >
+          {row.map((id) => {
+            const q = QUANTITY[id];
+            const working = workingFor(id, input);
+            return (
+              /* The wrapper carries the pointer and focus events so `Stat`
+                 stays a tile and does not grow a handler for every way of
+                 pointing at one. `display: grid` so the tile still fills the
+                 cell and the row's tiles stay the same height. */
+              <div
+                key={id}
+                style={{ display: 'grid' }}
+                onMouseEnter={() => working && show(id)}
+                onMouseLeave={release}
+                onFocus={() => working && show(id)}
+                onBlur={release}
+              >
+                {/* Symbols go through <Sym>: tile labels are uppercased in
+                    CSS, which renders a bare ρ as Ρ and a bare Lq as LQ. */}
+                <Stat
+                  label={<StatLabel name={q.name} q={id} />}
+                  title={working ? `${glossOf(id)}\n\nClick to keep the working open.` : glossOf(id)}
+                  value={valueFor(id, k)}
+                  unit={q.unit}
+                  color={id === 'rho' ? rhoTone : undefined}
+                  onClick={working ? () => setPinned((p) => (p === id ? null : id)) : undefined}
+                  expanded={open === id}
+                />
+              </div>
+            );
+          })}
+          {openWorking && openRow === r && (
+            <WorkingStrip
+              id={open!}
+              working={openWorking}
+              pinned={pinned === open}
+              onMouseEnter={hold}
+              onMouseLeave={release}
+            />
+          )}
+        </div>
+      ))}
     </div>
   );
 }
 
-/** One measure: symbol, name, value, and the derivation on demand. */
-function MeasureRow({
+/** One measure's derivation, floating under the row of tiles it belongs to. */
+function WorkingStrip({
   id,
-  value,
   working,
-  alt,
+  pinned,
+  onMouseEnter,
+  onMouseLeave,
 }: {
   id: QuantityId;
-  value: string;
-  working: Working | null;
-  alt: boolean;
+  working: Working;
+  pinned: boolean;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const q = QUANTITY[id];
   return (
-    <div style={{ background: alt ? SW_COLORS.paperDeep : SW_COLORS.paper }}>
-      <button
-        onClick={() => working && setOpen((v) => !v)}
-        title={glossOf(id)}
-        style={{
-          width: '100%',
-          display: 'grid',
-          gridTemplateColumns: '18px 1.5fr 1fr',
-          gap: 10,
-          alignItems: 'baseline',
-          padding: '9px 12px',
-          background: 'none',
-          border: 'none',
-          cursor: working ? 'pointer' : 'default',
-          textAlign: 'left',
-          color: SW_COLORS.ink,
-          fontFamily: SW_FONTS.body,
-        }}
-      >
-        <span style={{ color: SW_COLORS.muted, fontSize: 10 }}>{working ? (open ? '▾' : '▸') : ''}</span>
-        <span style={{ fontSize: 12.5 }}>
-          <Sym quantity={id} color={SW_COLORS.brandText} />
-          <span style={{ marginLeft: 8, fontWeight: 500 }}>{q.name}</span>
-          {q.unit && (
-            <span style={{ marginLeft: 5, color: SW_COLORS.muted, fontSize: 11 }}>{q.unit}</span>
-          )}
-        </span>
-        <span
-          style={{
-            textAlign: 'right',
-            fontFamily: SW_FONTS.mono,
-            fontSize: 13,
-            fontWeight: 700,
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          {value}
-        </span>
-      </button>
-
-      {open && working && (
+    <div
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: 'calc(100% + 6px)',
+        zIndex: 5,
+        /* Hugs its own working. A strip stretched to the grid is mostly empty
+           paper for a line like L = λW, so it sizes to content and only grows
+           as wide as the grid when a line like P₀ = 1 / [ Σₙ₌₀ᶜ⁻¹ … ] needs
+           the room. */
+        width: 'max-content',
+        maxWidth: '100%',
+        /* Transparent to the pointer until it is pinned. Hovering a tile
+           overlays this on the row below, and a strip that swallowed clicks
+           and hovers would hide the very tiles you are reaching for. Pinned,
+           it becomes solid so the formula can be selected and copied. */
+        pointerEvents: pinned ? 'auto' : 'none',
+        border: `1px solid ${SW_COLORS.brandEdge}`,
+        borderRadius: SW_RADIUS.md,
+        background: SW_COLORS.paperEdge,
+        boxShadow: SW_SHADOWS.float,
+        padding: '10px 14px 11px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>
+          {QUANTITY[id].name} <Sym quantity={id} color={SW_COLORS.brandText} />
+        </div>
+        {pinned && (
+          <div style={{ ...SW_TYPE.overline, color: SW_COLORS.faint }}>Pinned · esc</div>
+        )}
+      </div>
+      {/* Capped so a prose sentence wraps instead of setting the box's
+          width — the formula decides how wide the strip is, not the gloss. */}
+      <div style={{ ...SW_TYPE.caption, color: SW_COLORS.muted, margin: '5px 0 7px', maxWidth: '52ch' }}>
+        {glossOf(id)}
+      </div>
+      {working.unavailable ? (
+        <div style={{ ...SW_TYPE.caption, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+          {working.unavailable}
+        </div>
+      ) : (
         <div
           style={{
-            padding: '2px 12px 12px 40px',
             fontFamily: SW_FONTS.mono,
-            fontSize: 11.5,
-            color: SW_COLORS.muted,
+            fontSize: 12,
             lineHeight: 1.75,
+            color: SW_COLORS.muted,
           }}
         >
-          {working.unavailable ? (
-            <div style={{ fontFamily: SW_FONTS.body, lineHeight: 1.5 }}>{working.unavailable}</div>
-          ) : (
-            <>
-              <div style={{ color: SW_COLORS.ink }}>{working.symbolic}</div>
-              {working.substituted && <div>= {working.substituted}</div>}
-              <div style={{ color: SW_COLORS.brandText, fontWeight: 700 }}>= {working.result}</div>
-            </>
-          )}
+          <div style={{ color: SW_COLORS.ink }}>{working.symbolic}</div>
+          {working.substituted && <div>= {working.substituted}</div>}
+          <div style={{ color: SW_COLORS.brandText, fontWeight: 700 }}>= {working.result}</div>
         </div>
       )}
     </div>
@@ -832,17 +961,19 @@ function ParametersRail({
   system,
   node,
   solution,
+  onCollapse,
 }: {
   system: { id: string; nodes: QueueNode[] } | null;
   node: QueueNode | null;
   solution: NetworkSolution | null;
+  onCollapse: () => void;
 }) {
   const lab = useLab();
 
   if (!system || !node) {
     return (
       <aside style={railStyle}>
-        <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>Parameters</div>
+        <RailHeader title="Parameters" onCollapse={onCollapse} />
       </aside>
     );
   }
@@ -853,9 +984,7 @@ function ParametersRail({
 
   return (
     <aside style={railStyle}>
-      <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted, marginBottom: 6 }}>
-        Stage
-      </div>
+      <RailHeader title="Stage" onCollapse={onCollapse} />
       <input
         value={node.name}
         onChange={(e) => patch({ name: e.target.value })}
@@ -890,9 +1019,8 @@ function ParametersRail({
       </Group>
 
       <Group title="Service">
-        <ToggleGroup<DistKind>
-          value={node.serviceDist.kind as DistKind}
-          options={DIST_OPTIONS}
+        <DistPicker
+          dist={node.serviceDist}
           onChange={(kind) => patch({ serviceDist: morphDist(node.serviceDist, kind, meanOf(node.serviceDist)) })}
         />
         <div style={{ height: 8 }} />
@@ -1050,6 +1178,29 @@ function StatLabel({ name, q }: { name: string; q: QuantityId }) {
   );
 }
 
+/**
+ * The parameters rail's top row: what the rail is showing, plus the » that
+ * folds it away. The rail scrolls as one column rather than having a pinned
+ * header — there is nothing below the fold worth pinning past — so this rides
+ * with the content.
+ */
+function RailHeader({ title, onCollapse }: { title: string; onCollapse: () => void }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        marginBottom: 6,
+      }}
+    >
+      <div style={{ ...SW_TYPE.overline, color: SW_COLORS.muted }}>{title}</div>
+      <PaneCollapseButton side="right" label="parameters" onClick={onCollapse} />
+    </div>
+  );
+}
+
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section style={{ marginTop: 16 }}>
@@ -1067,18 +1218,23 @@ const railStyle: React.CSSProperties = {
   minWidth: 0,
 };
 
+/**
+ * The number alone. The unit is NOT baked in here — every tile takes it from
+ * `QUANTITY[id].unit`, so a measure is named and dimensioned in exactly one
+ * place and the numerals stay in the display face while the unit stays small.
+ */
 function valueFor(id: QuantityId, k: NetworkSolution['nodes'][number]['kpis']): string {
   switch (id) {
     case 'rho': return fmt(k.rho, 3);
     case 'P0': return pct(k.P0);
-    case 'Lq': return fmt(k.Lq, 3);
-    case 'L': return fmt(k.L, 3);
-    case 'Wq': return `${fmt(k.Wq * 60, 2)} min`;
-    case 'W': return `${fmt(k.W * 60, 2)} min`;
-    case 'D': return fmt(k.D, 3);
+    case 'Lq': return fmt(k.Lq, 2);
+    case 'L': return fmt(k.L, 2);
+    case 'Wq': return fmt(k.Wq * 60, 1);
+    case 'W': return fmt(k.W * 60, 1);
+    case 'D': return fmt(k.D, 2);
     case 'pWait': return pct(k.pWait);
     case 'pNoWait': return pct(k.pNoWait);
-    case 'lambdaEff': return `${fmt(k.lambdaEff, 2)} /hr`;
+    case 'lambdaEff': return fmt(k.lambdaEff, 2);
     case 'pBalk': return pct(k.pBalk);
     default: return '—';
   }

@@ -39,8 +39,6 @@ import {
   type Connector,
   type ConnectorKind,
   type SewingLine,
-  type ProductionSystemKey,
-  type Order,
   type Assignment,
   type Operator,
   newAssignmentId,
@@ -59,6 +57,7 @@ import {
 } from '../domain/twin';
 import type { PmlBlockOverride, PmlBlockParams } from '../domain/pml';
 import { getBlockSpec } from '../domain/pml';
+import { freezeProcessSeed, PROCESS_CLONE_OFFSET } from '../domain/processLayout';
 
 /**
  * v6 — the queueing pivot changed what `Workstation.kpiObserved.utilizationPct`
@@ -69,7 +68,13 @@ import { getBlockSpec } from '../domain/pml';
  * rather than letting a stale 4 % sit next to a fresh 83 % in the Inspector.
  * They are re-derived by the next run.
  */
-export const TWIN_STORE_SCHEMA_VERSION = 8 as const;
+/**
+ * v9 — the per-line `demandPerDay` target was removed from the model. Like the
+ * v7 department retirement, the bump exists only to force every persisted twin
+ * back through `normalizeTwin`, which now strips the key. Without it a saved
+ * factory keeps carrying a target nothing reads.
+ */
+export const TWIN_STORE_SCHEMA_VERSION = 9 as const;
 
 /** Maximum number of pre-mutation snapshots kept in the undo stack.
  *  Each snapshot is a structural clone of the full twin tree, so the cap
@@ -215,17 +220,6 @@ export interface TwinState {
   /** Remove a connector by id. */
   removeConnector: (id: string) => void;
 
-  // ── Order CRUD (P4) ──────────────────────────────────────────────────────
-  /** Append an Order to the active twin's `orders[]`. When `lineId` is
-   *  given AND that line exists, also push the order id onto the line's
-   *  `orderSequence` so the engine emits it. When `lineId` is missing the
-   *  order is stored unassigned — the IE can wire it up later by editing
-   *  `assignedLineId` / `orderSequence`. Returns the persisted order id. */
-  addOrderToActiveTwin: (
-    order: Omit<Order, 'id' | 'createdAt'> & { id?: string; createdAt?: string },
-    lineId?: string,
-  ) => string;
-
   // ── Lens-attribute writes (sugar over updateWorkstation) ─────────────────
   setOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
   setResources: (wsId: string, patch: Partial<Workstation['resources']>) => void;
@@ -326,10 +320,25 @@ function applyActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
 
 /** Update the currently-active twin (canonical or scenario fork) via a
  *  pure mapper. Bumps `modifiedAt` automatically and pushes the
- *  pre-mutation state onto the undo stack (clearing the redo stack). */
+ *  pre-mutation state onto the undo stack (clearing the redo stack).
+ *
+ *  Every authoring mutation runs through here, which is why the PROCESS
+ *  layout freeze lives here too: `freezeProcessSeed` pins each block that is
+ *  still riding the auto-layout seed to where it is *right now*, before `fn`
+ *  gets to change the inputs that seed is derived from. Without it, dropping a
+ *  block, drawing a connector or nudging a station on the floor re-derived the
+ *  seed for the whole twin and every un-placed block jumped — the user added a
+ *  Source and watched an unrelated Service slide across the canvas.
+ *
+ *  Freezing BEFORE `fn` rather than after is the whole trick: after would pin
+ *  the post-mutation seed, i.e. the positions the block had already moved to.
+ *  It folds into this same `set()`, so it costs no extra undo step, and it is
+ *  identity-stable once every block is pinned. Sim-side writes go through
+ *  `applyActive` directly and are deliberately not frozen — they cannot move a
+ *  block, and they must not write authored layout. */
 function updateActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
   const snap = snapshotOf(s);
-  const next = applyActive(s, fn);
+  const next = applyActive(s, (twin) => fn(freezeProcessSeed(twin)));
   const past = [...s.past, snap];
   if (past.length > MAX_HISTORY) past.splice(0, past.length - MAX_HISTORY);
   return { ...next, past, future: [] };
@@ -346,6 +355,21 @@ function patchWorkstation<S extends TwinState>(
     ...twin,
     workstations: twin.workstations.map((w) => (w.id === wsId ? fn(w) : w)),
   }));
+}
+
+/** Step a cloned block's PROCESS position off its original. Returns the
+ *  override untouched when there is no authored position to move. */
+function offsetClonedProcessPos(
+  block: PmlBlockOverride | undefined,
+): PmlBlockOverride | undefined {
+  if (!block?.processPos) return block;
+  return {
+    ...block,
+    processPos: {
+      x: block.processPos.x + PROCESS_CLONE_OFFSET,
+      y: block.processPos.y + PROCESS_CLONE_OFFSET,
+    },
+  };
 }
 
 // ============================================================================
@@ -673,6 +697,10 @@ export const useTwin = create<TwinState>()(
                 ...src,
                 id: newId,
                 position: { x: src.position.x + 1, y: src.position.y + 1 },
+                // The floor copy steps one cell; the PROCESS copy has to step
+                // too, or it lands exactly on the original and the diagram
+                // shows one block where there are now two.
+                block: offsetClonedProcessPos(src.block),
                 props: { ...src.props },
                 operation: { ...src.operation },
                 resources: {
@@ -719,7 +747,11 @@ export const useTwin = create<TwinState>()(
             kpiTargets: { ...snap.kpiTargets },
             kpiObserved: undefined,
             size: snap.size ? { ...snap.size } : undefined,
-            block: snap.block ? { ...snap.block, params: { ...snap.block.params } } : undefined,
+            // Same nudge as duplicate: the cluster keeps its internal shape
+            // but lands beside the originals rather than on top of them.
+            block: offsetClonedProcessPos(
+              snap.block ? { ...snap.block, params: { ...snap.block.params } } : undefined,
+            ),
           });
         }
         const newConnectors: Connector[] = [];
@@ -804,33 +836,6 @@ export const useTwin = create<TwinState>()(
             connectors: (twin.connectors ?? []).filter((c) => c.id !== id),
           })),
         ),
-
-      // ── Order CRUD (P4) ─────────────────────────────────────────────────
-      addOrderToActiveTwin: (input, lineId) => {
-        const orderId =
-          input.id
-          ?? `ord-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
-        const order: Order = {
-          ...input,
-          id: orderId,
-          createdAt: input.createdAt ?? new Date().toISOString(),
-          assignedLineId: lineId ?? input.assignedLineId,
-        };
-        set((s) =>
-          updateActive(s, (twin) => {
-            const orders = [...(twin.orders ?? []), order];
-            const lines = lineId
-              ? (twin.lines ?? []).map((l) =>
-                  l.id === lineId
-                    ? { ...l, orderSequence: [...(l.orderSequence ?? []), orderId] }
-                    : l,
-                )
-              : twin.lines;
-            return { ...twin, orders, lines };
-          }),
-        );
-        return orderId;
-      },
 
       // ── Lens-attribute sugar ───────────────────────────────────────────────
       setOperation: (wsId, patch) =>
@@ -1239,4 +1244,4 @@ export function selectLine(s: TwinState, lineId: string): SewingLine | undefined
 }
 
 // Re-export the colour-key + line types so callers don't have to dig into domain/twin.
-export type { EntityColorKey, SewingLine, ProductionSystemKey };
+export type { EntityColorKey, SewingLine };

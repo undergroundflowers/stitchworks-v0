@@ -22,16 +22,22 @@ import {
   ISO_FIXTURE_TO_MACHINE_CODE,
   LEGACY_CATALOG_ID,
   fixtureForStationType,
+  withPmlKind,
   type IsoFixture,
 } from './iso';
 import type { GlyphFamily } from './machine-glyphs';
 import type { MachineCode } from './machines';
+import type { StationArt } from './station-art';
 import { isStationTypeId, type StationType } from './stationTypes';
 import {
+  PML_BLOCK_LIBRARY,
+  getBlockKind,
   inferBlockKindFromCatalog,
   pmlKindFromFixtureId,
+  type BlockSubject,
   type PmlBlockKind,
 } from './pml';
+import type { PmlIconComponent } from '../assets/pml-icons';
 
 let types: StationType[] = [];
 let fixtures = new Map<string, IsoFixture>();
@@ -42,6 +48,10 @@ let fixtures = new Map<string, IsoFixture>();
 export function setStationTypes(next: StationType[]): void {
   types = next;
   fixtures = new Map(next.map((t) => [t.id, fixtureForStationType(t)]));
+  // The kind-reskin cache keys on the catalog id, and an authored type's own
+  // drawing can change under a stable id — drop it with the fixtures it was
+  // derived from.
+  reskinned.clear();
 }
 
 /** The authored type behind a catalog id, or undefined for a built-in. */
@@ -84,16 +94,94 @@ export function stationMark(catalogId: string): {
   code?: MachineCode;
   family?: GlyphFamily;
   markCode?: string;
+  art?: StationArt;
 } {
   const type = stationTypeFor(catalogId);
   if (type) {
     // A `block` type is a logic block: its identity is the PML icon on the
     // ISO body, and stamping a stroke mark on the plan would claim a
     // mechanism it does not have.
-    return type.form === 'block' ? {} : { family: type.glyph, markCode: type.code };
+    const isBlock = type.form === 'block';
+    // Uploaded plan artwork replaces the stroke mark — including for a block,
+    // where the user has now said explicitly what it should look like. The
+    // type code stays: it is the label, not the mark.
+    if (type.planArt) return { art: type.planArt, markCode: isBlock ? undefined : type.code };
+    return isBlock ? {} : { family: type.glyph, markCode: type.code };
   }
   const code = ISO_FIXTURE_TO_MACHINE_CODE[catalogId];
   return code ? { code } : {};
+}
+
+// ============================================================================
+// LOGIC BLOCKS — the fixtures whose drawing IS their block kind
+// ============================================================================
+//
+// A sewing machine is drawn as the machine it is, whatever the simulation runs
+// it as. A logic block has no machine: a Source, a Queue and a Sink are the
+// same empty volume, and the only thing telling them apart in any view is the
+// PML glyph on top. So for those — and only those — the drawing has to follow
+// the workstation's LIVE block kind rather than the catalog id it was dropped
+// from, or re-declaring a block's kind in the Inspector leaves the floor
+// showing the kind it used to be.
+
+/** True when the fixture has no equipment to depict and draws its PML kind
+ *  instead — a `pml_*` primitive, or an authored type whose form is `block`
+ *  and which carries no uploaded isometric artwork of its own. */
+function isLogicBlock(catalogId: string, fixture: IsoFixture): boolean {
+  const type = stationTypeFor(catalogId);
+  if (type) return type.form === 'block' && !type.isoArt;
+  return fixture.cat === 'pml';
+}
+
+/** The kind a logic-block fixture draws before any override — what the
+ *  catalog id (or the authored type) says it is. */
+function baseKindOf(catalogId: string): PmlBlockKind | undefined {
+  return stationTypeFor(catalogId)?.kind ?? pmlKindFromFixtureId(catalogId) ?? undefined;
+}
+
+// Re-skinned fixtures are memoised per (catalogId, kind): `withPmlKind` builds
+// a fresh draw closure, and this resolves once per station per frame.
+const reskinned = new Map<string, IsoFixture>();
+
+/**
+ * The fixture that draws a particular workstation — `lookupFixture` plus the
+ * block-kind override for logic blocks.
+ *
+ * Every canvas that DRAWS a station should call this; `lookupFixture` remains
+ * the right call for anything that only needs the footprint (`w`/`d`/`h`),
+ * which a kind change never moves.
+ */
+export function fixtureForWorkstation(
+  ws: BlockSubject & { catalogId: string },
+): IsoFixture | undefined {
+  const base = lookupFixture(ws.catalogId);
+  if (!base || !isLogicBlock(ws.catalogId, base)) return base;
+  const kind = getBlockKind(ws);
+  if (kind === baseKindOf(ws.catalogId)) return base;
+  const key = `${ws.catalogId}|${kind}`;
+  let skin = reskinned.get(key);
+  if (!skin) {
+    skin = withPmlKind(base, kind);
+    reskinned.set(key, skin);
+  }
+  return skin;
+}
+
+/**
+ * The PML glyph a workstation draws in the top-down plan, or undefined when
+ * it is real equipment and draws a machine mark instead.
+ *
+ * The 2D plan used to fall back to an abbreviated label for every logic
+ * block, so the one view where blocks are easiest to compare side by side was
+ * the one view that never drew the kind at all.
+ */
+export function stationBlockIcon(
+  ws: BlockSubject & { catalogId: string },
+): { Icon: PmlIconComponent; category: string } | undefined {
+  const base = lookupFixture(ws.catalogId);
+  if (!base || !isLogicBlock(ws.catalogId, base)) return undefined;
+  const spec = PML_BLOCK_LIBRARY[getBlockKind(ws)];
+  return { Icon: spec.Icon, category: spec.category };
 }
 
 /**

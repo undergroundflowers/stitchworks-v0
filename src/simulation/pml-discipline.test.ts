@@ -18,8 +18,15 @@ import { describe, it, expect } from 'vitest';
 import { runPmlSim, disciplineFor, serversFor } from './pml-engine';
 import { buildGarmentTwin } from '../domain/reference-twin';
 import { GARMENT_TEMPLATES } from '../domain/garments';
-import { getBlockKind } from '../domain/pml';
-import type { Twin, Workstation } from '../domain/twin';
+import { getBlockKind, pmlFixtureId } from '../domain/pml';
+import {
+  makeWorkstation,
+  newConnectorId,
+  newTwinId,
+  TWIN_SCHEMA_VERSION,
+  type Twin,
+  type Workstation,
+} from '../domain/twin';
 import type { PmlBlockParams } from '../domain/pml';
 import type { QueueDiscipline } from './queueing';
 
@@ -208,5 +215,126 @@ describe('authored queueing params reach the engine, not just the built-in catal
     const w = twin.workstations.find((x) => getBlockKind(x) === 'Service');
     expect(w).toBeDefined();
     expect(disciplineFor(w!)).toBe(disciplineFor(w!, undefined));
+  });
+});
+
+/**
+ * Priority ranks bundles by the `sourcePriority` of the Source that released
+ * them — 1 = highest, FIFO within a class.
+ *
+ * It used to rank by the `priority` field of the production Order a bundle
+ * belonged to. When orders were removed the rank had nothing left to read, so
+ * the knob moved onto the Source: what makes a bundle urgent is where it came
+ * from. That only bites where two Sources feed one station, which is exactly
+ * the fixture below.
+ */
+describe('Priority promotes bundles from the higher-priority Source', () => {
+  const RUSH_RATE = 60;
+  const ROUTINE_RATE = 60;
+
+  /**
+   * rush ─┐
+   *       ├─► slow Service ─► Sink
+   * routine ┘
+   *
+   * The Service is deliberately slower than the combined arrival rate, so a
+   * queue forms and the pick order decides who waits.
+   */
+  function twoSourceTwin(discipline: QueueDiscipline, rushPriority: number): Twin {
+    const rush = makeWorkstation({ catalogId: pmlFixtureId('Source'), position: { x: 0, y: 0 } });
+    rush.block = {
+      kind: 'Source',
+      params: { sourceRatePerHr: RUSH_RATE, sourcePriority: rushPriority },
+    };
+    const routine = makeWorkstation({ catalogId: pmlFixtureId('Source'), position: { x: 0, y: 3 } });
+    routine.block = {
+      kind: 'Source',
+      params: { sourceRatePerHr: ROUTINE_RATE, sourcePriority: 5 },
+    };
+    const service = makeWorkstation({ catalogId: pmlFixtureId('Service'), position: { x: 4, y: 1 } });
+    service.block = {
+      kind: 'Service',
+      // 45 s/bundle against 120 bundles/hr offered ⇒ ρ = 1.5, a queue that
+      // keeps growing, which is what makes the discipline observable.
+      params: { cycleS: 45, queueDiscipline: discipline },
+    };
+    const sink = makeWorkstation({ catalogId: pmlFixtureId('Sink'), position: { x: 8, y: 1 } });
+    sink.block = { kind: 'Sink' };
+
+    return {
+      schemaVersion: TWIN_SCHEMA_VERSION,
+      id: newTwinId(),
+      name: 'two-source priority fixture',
+      parentTwinId: null,
+      isCanonical: true,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      modifiedAt: '2026-01-01T00:00:00.000Z',
+      gridW: 16,
+      gridH: 8,
+      lines: [],
+      workstations: [rush, routine, service, sink],
+      connectors: [
+        { id: newConnectorId(), kind: 'flow', fromWsId: rush.id, toWsId: service.id },
+        { id: newConnectorId(), kind: 'flow', fromWsId: routine.id, toWsId: service.id },
+        { id: newConnectorId(), kind: 'flow', fromWsId: service.id, toWsId: sink.id },
+      ],
+      operators: [],
+      assignments: [],
+    };
+  }
+
+  /**
+   * Mean minutes from spawn to sink, split by the Source that released the
+   * bundle. Reconstructed from the flow stream: `spawn` carries the origin
+   * block, `sink` carries the exit time, and `agentId` is stable between them.
+   */
+  function meanLeadBySource(twin: Twin): { rush: number; routine: number } {
+    const out = runPmlSim({
+      twin,
+      durationMin: DURATION,
+      seed: SEED,
+      samplePeriodMin: 0,
+      recordFlow: true,
+    });
+    const [rushWs, routineWs] = twin.workstations;
+    const bornAt = new Map<number, { t: number; wsId: string }>();
+    const leads: Record<string, number[]> = { [rushWs.id]: [], [routineWs.id]: [] };
+    for (const e of out.flow) {
+      if (e.kind === 'spawn') bornAt.set(e.agentId, { t: e.t, wsId: e.wsId });
+      else if (e.kind === 'sink') {
+        const born = bornAt.get(e.agentId);
+        if (born) leads[born.wsId]?.push(e.t - born.t);
+      }
+    }
+    const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
+    return { rush: mean(leads[rushWs.id]), routine: mean(leads[routineWs.id]) };
+  }
+
+  it('serves the rush Source ahead of the routine one', () => {
+    const { rush, routine } = meanLeadBySource(twoSourceTwin('Priority', 1));
+    expect(rush).toBeGreaterThan(0);
+    expect(routine).toBeGreaterThan(0);
+    // The whole point of the discipline: class 1 waits less than class 5.
+    // The real separation is stark — ~1.1 min against ~80 min, because the
+    // rush class never queues behind the routine one — so half is a floor
+    // loose enough to survive retuning the fixture, not a fitted number.
+    expect(rush).toBeLessThan(routine * 0.5);
+  });
+
+  it('treats the two Sources alike under FCFS', () => {
+    // Same graph, same seed, same arrival rates — only the discipline differs.
+    // Without Priority the two classes are indistinguishable, so their mean
+    // lead times track each other closely.
+    const { rush, routine } = meanLeadBySource(twoSourceTwin('FCFS', 1));
+    const spread = Math.abs(rush - routine) / Math.max(rush, routine);
+    expect(spread).toBeLessThan(0.15);
+  });
+
+  it('collapses to FCFS when both Sources share a priority class', () => {
+    // A single-class Priority queue IS FCFS — nothing to reorder. This is the
+    // default every twin gets, so it is the common case, not an edge case.
+    const { rush, routine } = meanLeadBySource(twoSourceTwin('Priority', 5));
+    const spread = Math.abs(rush - routine) / Math.max(rush, routine);
+    expect(spread).toBeLessThan(0.15);
   });
 });

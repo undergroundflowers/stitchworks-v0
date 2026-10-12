@@ -22,12 +22,13 @@
  */
 
 import type { GarmentTemplate, Operation } from '../domain';
-import { TWIN_SCHEMA_VERSION, type Twin, type Workstation } from '../domain/twin';
+import { TWIN_SCHEMA_VERSION, wsBaseFootprint, type Twin, type Workstation } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
+import { stationMark } from '../domain/fixture-registry';
 import { defaultDist, distFromOpNotes, scaleServiceDist } from './distributions';
 import type { ServiceDist } from './distributions';
 import {
@@ -188,7 +189,17 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     const op = ws.operation.opId ? opById.get(ws.operation.opId) : undefined;
     const opCode = op?.code;
     const opName = op?.name ?? ws.name;
-    const machineCode = op?.machineCode ?? 'GENERIC';
+    // Machine type, in falling order of authority: the bound operation's
+    // declared machine, then the one the fixture the user dropped already
+    // implies (`a_snls` IS a single-needle lockstitch whether or not an
+    // operation is bound to it), then a last-resort placeholder.
+    //
+    // That middle step is what stops an unbound Service block from being
+    // labelled GENERIC on the sim floor. The block is a real machine the
+    // user placed; not having picked an operation for it yet says nothing
+    // about what it is.
+    const machineCode =
+      op?.machineCode ?? stationMark(ws.catalogId).code ?? 'GENERIC';
     const params = getBlockParams(ws);
     const smv = op?.smv ?? params.cycleS / 60;
     // ServiceDist resolves in priority order: explicit op.serviceDistribution →
@@ -237,12 +248,17 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
       gy: ws.position.y,
       workersRequested: ws.resources?.workersRequired ?? 1,
     });
+    const fp = wsBaseFootprint(ws);
     twinMetaCells.push({
       wsId: ws.id,
       opId,
       gx: ws.position.x,
       gy: ws.position.y,
       rotation: ws.rotation ?? 0,
+      catalogId: ws.catalogId,
+      w: fp.w,
+      d: fp.d,
+      h: fp.h,
       lineId: ws.lineId,
       name: ws.name,
     });

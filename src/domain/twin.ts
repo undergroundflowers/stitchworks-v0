@@ -92,111 +92,53 @@ export type EntityColorKey =
 // ============================================================================
 
 /**
- * Production system that paces a line. Drives bundle size, WIP norms, and
- * the canvas badge colour. Mirrors the legacy `productionSystem` string on
- * the project-store `Line` so the two models stay aligned.
- */
-export type ProductionSystemKey =
-  | 'PBS'       // Progressive Bundle System
-  | 'modular'   // Modular cell
-  | 'UPS'       // Unit Production System (overhead rail)
-  | 'synchro'   // Synchronised / takt
-  | 'straight'; // Straight line (no batching)
-
-/**
- * System-specific behaviour knobs that live on a SewingLine. Seeded with
- * sensible defaults from `defaultPolicyFor(system)` at line-creation time;
- * the user can override any field in the Inspector. The simulation engine,
- * Builder canvas and Line-Balance modes all read this block to choose
- * dispatch policy, render carriers, and pick the balancing algorithm.
+ * Behaviour knobs that live on a SewingLine. Seeded from `DEFAULT_LINE_POLICY`
+ * at line-creation time; the user overrides any field in the Inspector.
  *
- * Every field is optional so older twins (v8 and earlier) round-trip
- * cleanly — a missing policy means "use the system's defaults at runtime."
+ * Every field is optional so older twins round-trip cleanly — a missing
+ * policy means "use the defaults at runtime".
+ *
+ * ── What used to be here ───────────────────────────────────────────────────
+ * A line carried a `productionSystem` (PBS / modular / UPS / synchro /
+ * straight) and this block was its per-system knob set: `defaultPolicyFor`
+ * returned a different shape per system, and three of the fields — `taktSec`
+ * (synchro only), `conveyorSpeed` (UPS + synchro) and `rotationGroupSize`
+ * (modular) — existed solely to configure a system. Production systems are
+ * out of scope for now, so those three went with them: they are named after
+ * concepts the app no longer models, and nothing read them.
+ *
+ * `helperMode` went too. Who covers a starved station is decided per station,
+ * not per line — the station is what starves, and the app already models the
+ * answer as `Assignment` rows with `role: 'helper' | 'floater'` against a
+ * specific `wsId`. A line-wide enum could only ever restate that coarsely,
+ * and nothing read it.
+ *
+ * What is left is the set that describes any line regardless of how it is
+ * organised — how work is batched and how much may pile up.
  */
 export interface LinePolicy {
-  /** Pieces per bundle when `pieceFlow` is false. PBS/Bundle: typically 20–30.
-   *  Ignored for piece-flow systems. */
+  /** Pieces per bundle when `pieceFlow` is false. Typically 20–30. */
   bundleSize?: number;
-  /** True ⇒ pieces flow one at a time, no bundle batching.
-   *  Default by system: modular/UPS/synchro/straight = true, PBS = false. */
+  /** True ⇒ pieces flow one at a time, no bundle batching. */
   pieceFlow?: boolean;
-  /** Takt time in seconds. Only used when the system is `synchro`. */
-  taktSec?: number;
-  /** Conveyor / overhead-rail speed in cells per minute. Used by UPS, UHS
-   *  and synchro to visualise material movement. */
-  conveyorSpeed?: number;
-  /** Number of stations one rotation group spans. Drives modular/clump
-   *  cell sizing; ignored for fixed-station systems. */
-  rotationGroupSize?: number;
   /** Maximum WIP units allowed at any one station before its upstream
    *  feeder blocks. Implements CONWIP / kanban for piece-flow lines. */
   maxWipPerStation?: number;
-  /** How floater operators are deployed when a station starves.
-   *   • 'none' — no helpers; station idles.
-   *   • 'adjacent' — pull from the operator one station upstream/downstream.
-   *   • 'pool' — pull from the line-level floater pool. */
-  helperMode?: 'none' | 'adjacent' | 'pool';
 }
 
 /**
- * Best-effort defaults for a production system. Used when a line is created
- * (Build-in-Builder seed, palette drop) and when the Inspector renders the
- * policy panel and needs a placeholder for unset fields.
+ * The policy a new line starts on, and the placeholder the Inspector shows
+ * for any field the user has not overridden.
+ *
+ * These are the values the old `defaultPolicyFor('PBS')` returned. PBS was
+ * the app's default system everywhere a line was created, so keeping its
+ * numbers means no existing factory changes behaviour on the way through.
  */
-export function defaultPolicyFor(system: ProductionSystemKey): Required<LinePolicy> {
-  switch (system) {
-    case 'PBS':
-      return {
-        bundleSize: 30,
-        pieceFlow: false,
-        taktSec: 0,
-        conveyorSpeed: 0,
-        rotationGroupSize: 0,
-        maxWipPerStation: 0,
-        helperMode: 'adjacent',
-      };
-    case 'modular':
-      return {
-        bundleSize: 1,
-        pieceFlow: true,
-        taktSec: 0,
-        conveyorSpeed: 0,
-        rotationGroupSize: 6,
-        maxWipPerStation: 2,
-        helperMode: 'pool',
-      };
-    case 'UPS':
-      return {
-        bundleSize: 1,
-        pieceFlow: true,
-        taktSec: 0,
-        conveyorSpeed: 6,
-        rotationGroupSize: 0,
-        maxWipPerStation: 3,
-        helperMode: 'adjacent',
-      };
-    case 'synchro':
-      return {
-        bundleSize: 1,
-        pieceFlow: true,
-        taktSec: 60,
-        conveyorSpeed: 4,
-        rotationGroupSize: 0,
-        maxWipPerStation: 1,
-        helperMode: 'none',
-      };
-    case 'straight':
-      return {
-        bundleSize: 1,
-        pieceFlow: true,
-        taktSec: 0,
-        conveyorSpeed: 0,
-        rotationGroupSize: 0,
-        maxWipPerStation: 2,
-        helperMode: 'none',
-      };
-  }
-}
+export const DEFAULT_LINE_POLICY: Required<LinePolicy> = {
+  bundleSize: 30,
+  pieceFlow: false,
+  maxWipPerStation: 0,
+};
 
 /**
  * A SewingLine is a named group of workstations on the floor — the top-level
@@ -210,23 +152,16 @@ export interface SewingLine {
   id: string;
   name: string;
   /** Production system that paces this line. */
-  productionSystem: ProductionSystemKey;
   /** Garment template id this line is configured to produce. Optional —
-   *  empty during initial set-up. Falls back to the first order's garment
-   *  when an `orderSequence` is present. */
+   *  empty during initial set-up. */
   garmentId?: string;
   /** Accent colour for the canvas band + tree pip. */
   color: EntityColorKey;
   /** Target operator headcount across the line. Informational — the engine
    *  reads `workersRequired` per workstation. */
   operatorTarget?: number;
-  /** Ordered list of `Order.id`s this line will run in a shift. When set,
-   *  the engine emits each order's pieces in sequence, raising a
-   *  CHANGEOVER_BEGIN between consecutive orders whose garmentIds differ.
-   *  Empty / missing ⇒ legacy infinite Source behaviour using `garmentId`. */
-  orderSequence?: string[];
-  /** System-specific behaviour knobs (bundle size, takt, conveyor, helper
-   *  policy, …). Missing ⇒ engine + UI fall back to `defaultPolicyFor`. */
+  /** Line behaviour knobs (bundle size, piece flow, WIP cap). Missing ⇒
+   *  engine + UI fall back to `DEFAULT_LINE_POLICY`. */
   policy?: LinePolicy;
   notes?: string;
 }
@@ -374,7 +309,7 @@ export interface Operator {
   id: string;
   /** Parent sewing line, when the operator is line-resident. Operators
    *  without a `lineId` are factory-level floaters that can be pulled to
-   *  any line whose policy is `helperMode: 'pool'`. */
+   *  any station on any line. */
   lineId?: string;
   /** Display name (e.g. "OPR-01 · Lakshmi"). */
   name: string;
@@ -529,10 +464,6 @@ export interface Twin {
    *  workstation is assumed to be tended by whatever `op_*` tile is
    *  nearest to it (legacy implicit-assignment behaviour). */
   assignments?: Assignment[];
-  /** Production orders this twin can run. Each line's `orderSequence`
-   *  references entries here by id. Empty / missing ⇒ legacy single-
-   *  garment-per-line behaviour. */
-  orders?: Order[];
   notes?: string;
 }
 
@@ -560,6 +491,84 @@ export interface Twin {
  *
  * `lineId === null` means "whole twin" — used by Reports BY SYSTEM cards.
  */
+/**
+ * The cells a workstation occupies on the floor — the one answer every
+ * canvas has to agree on.
+ *
+ * `position` is the top-left corner in world cells; this is the extent that
+ * hangs off it. Per-workstation `size` wins over the catalogue fixture's
+ * defaults, so two SNLS machines can be different sizes. Values are decimal;
+ * nothing rounds to integers.
+ *
+ * `wsBaseFootprint` is the *unrotated* catalogue extent — what a fixture's
+ * `draw()` wants, because it rotates its own geometry on the build plane via
+ * `isoProjR` rather than spinning in screen space. `wsFootprint` is the
+ * *effective* one: at 90° / 270° a 1 × 2 machine lying along Y becomes 2 × 1
+ * along X, and that is the box a selection ring, a hit-test, a centroid or a
+ * plan-view sprite has to use.
+ *
+ * These live here rather than in a page because the Build floor and the Run
+ * floor both draw the same machines, and a machine that covers two cells in
+ * BUILD and 1.4 cells in RUN is not the same machine. Builder used to own
+ * them privately and LiveSim used a hard-coded 0.9 x 1.4 for every station,
+ * which is why the two floors never lined up.
+ */
+export function wsBaseFootprint(ws: {
+  catalogId: string;
+  size?: { w: number; d: number; h: number };
+}): { w: number; d: number; h: number } {
+  const fix = lookupFixture(ws.catalogId);
+  return {
+    w: ws.size?.w ?? fix?.w ?? 1,
+    d: ws.size?.d ?? fix?.d ?? 1,
+    h: ws.size?.h ?? fix?.h ?? 1,
+  };
+}
+
+export function wsFootprint(ws: {
+  catalogId: string;
+  rotation?: number;
+  size?: { w: number; d: number; h: number };
+}): { w: number; d: number; h: number } {
+  const base = wsBaseFootprint(ws);
+  const turned = ws.rotation === 90 || ws.rotation === 270;
+  return turned ? { w: base.d, d: base.w, h: base.h } : base;
+}
+
+/**
+ * How many operators a line actually runs, counted the way the simulation
+ * counts them.
+ *
+ * `SewingLine.operatorTarget` is an authored *target* and is documented above
+ * as informational — the engine bills capacity from per-workstation staffing.
+ * Anything that reports on a run therefore has to count staffing, not the
+ * target, or the headline "N operators" disagrees with the N the replication
+ * was billed for.
+ *
+ * The rule mirrors `operatorsAtWs` in `simulation/model-from-twin.ts`:
+ * distinct non-floater `Assignment` rows for the workstation when the twin
+ * carries any, else `max(1, resources.workersRequired)`. Only workstations
+ * with an assigned `operation.opId` count — infrastructure (racks, tables,
+ * trolleys) is skipped by the builder too.
+ */
+export function staffedOperatorsForLine(twin: Twin, lineId: string): number {
+  const assignedByWs = new Map<string, Set<string>>();
+  for (const a of twin.assignments ?? []) {
+    if (a.role === 'floater') continue;
+    const set = assignedByWs.get(a.wsId) ?? new Set<string>();
+    set.add(a.operatorId);
+    assignedByWs.set(a.wsId, set);
+  }
+  let total = 0;
+  for (const w of twin.workstations) {
+    if (w.lineId !== lineId) continue;
+    if (!w.operation.opId) continue;
+    const assigned = assignedByWs.get(w.id)?.size ?? 0;
+    total += assigned > 0 ? assigned : Math.max(1, w.resources.workersRequired ?? 1);
+  }
+  return total;
+}
+
 export function shareDebtForLine(
   twin: Twin,
   lineId: string | null,
@@ -585,56 +594,24 @@ export function shareDebtForLine(
   return { stations, savings };
 }
 
-export function lineSystemBadge(line: SewingLine, twin: Twin): string {
-  const policy = { ...defaultPolicyFor(line.productionSystem), ...(line.policy ?? {}) };
-  switch (line.productionSystem) {
-    case 'PBS':
-      return `PBS · BUNDLE ${policy.bundleSize}`;
-    case 'modular': {
-      const rotators = (twin.operators ?? []).filter((o) => o.lineId === line.id).length;
-      return rotators > 0
-        ? `TSS · ${rotators} ROTATOR${rotators === 1 ? '' : 'S'}`
-        : `TSS · CELL ${policy.rotationGroupSize || 6}`;
-    }
-    case 'UPS':
-      return 'UPS · HANGER RAIL';
-    case 'synchro':
-      return `SYNCHRO · TAKT ${policy.taktSec}s`;
-    case 'straight':
-      return 'STRAIGHT · PIECE FLOW';
-  }
-}
-
 /**
- * A production order — a quantity of a specific garment to be produced.
- * Lines pick orders up through `SewingLine.orderSequence` (ordered list
- * of order ids); the engine emits each order's pieces in turn and raises
- * a CHANGEOVER_BEGIN whenever consecutive orders have different garments.
+ * One-line description of how a line moves work, for the canvas band and the
+ * Reports table.
  *
- * Schema landed in v8 (P4). Optional on the Twin so v7 saves keep
- * loading cleanly.
+ * This used to name the production system — "PBS · BUNDLE 30", "TSS · 6
+ * ROTATORS", "UPS · HANGER RAIL". With systems out of scope the badge reads
+ * the line's own policy instead, which is the part the user actually set and
+ * the only part that was ever specific to *this* line rather than to a label
+ * chosen once at creation.
  */
-export interface Order {
-  id: string;
-  /** Customer / PO reference. Free-form, e.g. "PO-2026-04-1109". */
-  po?: string;
-  /** Buyer name. Free-form. */
-  client?: string;
-  /** Garment template id this order produces. */
-  garmentId: string;
-  /** Pieces ordered. */
-  quantity: number;
-  /** Optional ISO deadline. */
-  dueDate?: string;
-  /** 1 = highest. When two orders compete for the same line a planner
-   *  surfaces this; the engine itself is order-agnostic and runs the
-   *  declared sequence as-is. */
-  priority?: number;
-  /** Which line is committed to run this order. When set, it should
-   *  appear in that line's `orderSequence`. */
-  assignedLineId?: string;
-  /** ISO timestamp when the order was created in the planner. */
-  createdAt?: string;
+export function lineSystemBadge(line: SewingLine, twin: Twin): string {
+  const policy = { ...DEFAULT_LINE_POLICY, ...(line.policy ?? {}) };
+  if (policy.pieceFlow) {
+    const cap = policy.maxWipPerStation;
+    return cap > 0 ? `PIECE FLOW · MAX WIP ${cap}` : 'PIECE FLOW';
+  }
+  void twin;
+  return `BUNDLE ${policy.bundleSize}`;
 }
 
 // ============================================================================
@@ -672,17 +649,6 @@ export interface ScenarioKpis {
   /** Intrinsic balance ratio ÷ dynamic balance ratio. Near 1 = bulletin is
    *  inherently balanced; < 1 = balance depends on skill flex. */
   intrinsicVsDynamicRatio?: number;
-  /** Minutes lost to changeover during the run; populated in P4. */
-  changeoverMinutes?: number;
-  /** Total changeover minutes summed across every changeover event in
-   *  the run. Identical to changeoverMinutes for single-line shifts;
-   *  diverges for multi-line factories where two lines change over in
-   *  parallel and the accumulator captures both. Populated in P4. */
-  totalChangeoverMinutes?: number;
-  /** Per-order completion time (sim minutes from the order's first piece
-   *  emitted by the Source until the order's last piece reaches the Sink).
-   *  Keyed by Order.id. Populated by P4's order-aware engine. */
-  perOrderCompletionTime?: Record<string, number>;
   std?: {
     producedPieces: number;
     throughputPerHr: number;
@@ -771,9 +737,8 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
       {
         id: lineId,
         name: 'Line 1',
-        productionSystem: 'PBS',
         color: 'blue',
-        policy: defaultPolicyFor('PBS'),
+        policy: { ...DEFAULT_LINE_POLICY },
       },
     ],
     workstations: [],
@@ -809,6 +774,23 @@ export function normalizeTwin(input: unknown): Twin {
     delete rest.deptId;
     return rest as T;
   };
+  /** Keys removed from `SewingLine`: `demandPerDay` (the daily output target)
+   *  and `productionSystem` (PBS / modular / UPS / …). Both are invisible to
+   *  the types but still sit in every twin saved before the removal, and would
+   *  be reloaded on every boot; strip them the way `deptId` is.
+   *
+   *  `policy` is left alone. The four fields dropped from `LinePolicy`
+   *  (`taktSec`, `conveyorSpeed`, `rotationGroupSize`, `helperMode`) are
+   *  harmless on disk, and a line whose policy object is otherwise empty must
+   *  not be rewritten to `undefined` behind the user's back. */
+  const dropRetiredLineKeys = <T extends object>(rec: T): T => {
+    if (!rec || typeof rec !== 'object') return rec;
+    if (!('demandPerDay' in rec) && !('productionSystem' in rec)) return rec;
+    const rest = { ...(rec as T & { demandPerDay?: number; productionSystem?: string }) };
+    delete rest.demandPerDay;
+    delete rest.productionSystem;
+    return rest as T;
+  };
   return {
     schemaVersion: TWIN_SCHEMA_VERSION,
     id: t.id ?? newTwinId(),
@@ -819,12 +801,11 @@ export function normalizeTwin(input: unknown): Twin {
     modifiedAt: t.modifiedAt ?? new Date().toISOString(),
     gridW: t.gridW ?? 36,
     gridH: t.gridH ?? 28,
-    lines: (((t.lines as SewingLine[] | undefined) ?? []).map(dropDept)),
+    lines: (((t.lines as SewingLine[] | undefined) ?? []).map(dropDept).map(dropRetiredLineKeys)),
     workstations: (t.workstations ?? []).map(dropDept).map(relabel),
     connectors: t.connectors ?? [],
     operators: (((t.operators as Operator[] | undefined) ?? []).map(dropDept)),
     assignments: (t.assignments as Assignment[] | undefined) ?? [],
-    orders: t.orders as Order[] | undefined,
     notes: t.notes,
   };
 }
@@ -1165,7 +1146,6 @@ export interface LegacyFactoryShape {
     floorId: string;
     garmentTemplateId: string;
     operators: number;
-    productionSystem: string;
   }>;
 }
 
@@ -1212,20 +1192,19 @@ export function migrateLegacyFactoryToTwin(
     const x = cursorByFloor.get(line.floorId) ?? strip.x + 1;
     const y = strip.y + 1;
 
-    const system: ProductionSystemKey =
-      line.productionSystem === 'modular' ? 'modular' : 'PBS';
     const sewingLine: SewingLine = {
       id: newLineId(),
       name: line.name,
-      productionSystem: system,
       color: 'blue',
-      policy: defaultPolicyFor(system),
+      policy: { ...DEFAULT_LINE_POLICY },
     };
     lines.push(sewingLine);
 
-    // Pick a sensible fixture per production system.
-    const sewFixture =
-      line.productionSystem === 'modular' ? 'mach_over' : 'mach_ssm';
+    // Every migrated line gets a single-needle lockstitch. The fixture used to
+    // be chosen from the legacy `productionSystem` string (overlock for
+    // modular, lockstitch otherwise); there is no system to read it off now,
+    // and the user re-picks machines in Builder after migration anyway.
+    const sewFixture = 'mach_ssm';
 
     workstations.push(
       makeWorkstation({

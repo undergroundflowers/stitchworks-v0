@@ -460,10 +460,9 @@ export function commitFloorImport(
   store: TwinStore,
   _parsed: ImportedFloor,
   placement: LayoutPlacement,
-  options?: { color?: EntityColorKey; productionSystem?: 'PBS' | 'straight' | 'modular' | 'UPS' | 'synchro' },
+  options?: { color?: EntityColorKey },
 ): CommittedFloor {
   const color: EntityColorKey = options?.color ?? 'blue';
-  const productionSystem = options?.productionSystem ?? 'PBS';
 
   // Find an empty patch of the grid for the new department — sit it to
   // the right of everything that already exists, with a 4-cell gutter.
@@ -483,7 +482,6 @@ export function commitFloorImport(
 
   const lineId = store.addLine({
     name: placement.lineName,
-    productionSystem,
     color,
     operatorTarget: placement.stations.length,
   });

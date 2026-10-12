@@ -18,11 +18,10 @@
 
 import { type CSSProperties, type ReactNode } from 'react';
 import { Card } from './Card';
-import { ToggleGroup } from './ToggleGroup';
 import { FieldLabel, Sym } from './Sym';
 import { QueueDisciplineGraphic } from './QueueDisciplineGraphic';
+import { DistPicker } from './DistPicker';
 import {
-  DIST_OPTIONS,
   DISCIPLINE_OPTIONS,
   DistParamInputs,
   NumberField,
@@ -31,7 +30,6 @@ import {
   SubHeader,
   morphDist,
   patchDist,
-  type DistKind,
   type DistParams,
 } from './queueParamFields';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
@@ -177,9 +175,9 @@ export function ServiceQueueParams({ ws }: { ws: Workstation }) {
       {/* Service time */}
       <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <SubHeader>Service time</SubHeader>
-        <ToggleGroup<DistKind>
-          value={dist.kind}
-          options={DIST_OPTIONS}
+        <DistPicker
+          dist={dist}
+          fallbackMean={op.smv}
           onChange={(kind) => patchOp({ serviceDistribution: morphDist(dist, kind, op.smv) })}
         />
         <DistParamInputs

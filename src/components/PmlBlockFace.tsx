@@ -1,9 +1,7 @@
 import type { ReactNode } from 'react';
 import type { PmlIconComponent } from '../assets/pml-icons';
-import { glyphFamilyOf, glyphMark, type GlyphFamily } from '../domain/machine-glyphs';
-import type { MachineCode } from '../domain/machines';
-import { PML_CATEGORY_TINT, SW_COLORS, SW_FONTS } from '../design/tokens';
-import { alpha, contrastInk } from '../design/color-utils';
+import { PML_CATEGORY_TINT, SW_COLORS } from '../design/tokens';
+import { contrastInk } from '../design/color-utils';
 
 /** Canvas size of a block face — the same square `processLayout` seeds. */
 export const PML_FACE_SIZE = 56;
@@ -17,11 +15,8 @@ const ICON_RATIO = 30 / PML_FACE_SIZE;
 export interface PmlBlockFaceProps {
   /** PML category — picks the plate colour. Unknown falls back to a neutral. */
   category: string;
-  /** The kind's PML glyph. Drawn when the station has no machine mark. */
+  /** The kind's PML glyph. Always what the face draws. */
   Icon: PmlIconComponent;
-  /** `stationMark()` result. When it resolves a family, the machine's own mark
-   *  and code replace the PML glyph. */
-  mark?: { code?: MachineCode; family?: GlyphFamily; markCode?: string };
   size?: number;
   /** Drop preview: translucent plate plus a dashed brand outline. */
   ghost?: boolean;
@@ -46,11 +41,18 @@ export interface PmlBlockFaceProps {
  * no transform of its own — the contract `StationGlyph` already uses, so it
  * drops onto an SVG canvas directly and into an HTML button wrapped in a small
  * `<svg>`.
+ *
+ * THE FACE DRAWS THE BLOCK KIND, NEVER THE MACHINE. There used to be a `mark`
+ * prop that swapped the PML glyph for the station's machine mark and type code
+ * whenever `stationMark()` resolved one. It meant the PROCESS canvas — the one
+ * view whose entire subject is the block graph — stopped showing block kinds
+ * the moment the stations were real sewing machines, so a Service and a Delay
+ * were the same picture. Machine identity belongs to the floor and the
+ * STATIONS palette; those still draw `StationGlyph` directly.
  */
 export function PmlBlockFace({
   category,
   Icon,
-  mark,
   size = PML_FACE_SIZE,
   ghost,
 }: PmlBlockFaceProps): ReactNode {
@@ -59,14 +61,6 @@ export function PmlBlockFace({
     stroke: SW_COLORS.line,
   };
   const ink = contrastInk(tint.stroke);
-  const family = mark ? glyphFamilyOf(mark) : undefined;
-  const code = mark?.code ?? mark?.markCode;
-
-  // Below ~44px there is no room for a readable code under the mark, so the
-  // mark alone carries it — the same degradation rule `StationGlyph` uses,
-  // scaled to this face.
-  const showCode = size >= 44 && !!code;
-  const markY = showCode ? size * 0.42 : size / 2;
   const iconSize = size * ICON_RATIO;
 
   return (
@@ -81,32 +75,12 @@ export function PmlBlockFace({
         fillOpacity={ghost ? 0.35 : 1}
       />
 
-      {family ? (
-        <>
-          {glyphMark(family, size / 2, markY, size * 0.5, ink)}
-          {showCode && (
-            <text
-              x={size / 2}
-              y={size - 7}
-              textAnchor="middle"
-              fontFamily={SW_FONTS.mono}
-              fontSize={Math.max(7, Math.min(10, size * 0.18))}
-              fontWeight={800}
-              fill={alpha(ink, 0.75)}
-              style={{ pointerEvents: 'none', letterSpacing: '0.06em' }}
-            >
-              {code}
-            </text>
-          )}
-        </>
-      ) : (
-        <Icon
-          size={iconSize}
-          color={ink}
-          x={(size - iconSize) / 2}
-          y={(size - iconSize) / 2}
-        />
-      )}
+      <Icon
+        size={iconSize}
+        color={ink}
+        x={(size - iconSize) / 2}
+        y={(size - iconSize) / 2}
+      />
 
       {ghost && (
         <rect

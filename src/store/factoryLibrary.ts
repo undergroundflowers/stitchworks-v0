@@ -125,7 +125,7 @@ export function isFactoryNameTaken(
  * unique. Used by archive paths where the user did not pick the name, so
  * collisions should be resolved silently rather than rejected.
  */
-function uniquifyFactoryName(
+export function uniquifyFactoryName(
   name: string,
   opts: { excludeSavedId?: string; includeActive?: boolean } = {},
 ): string {

@@ -101,10 +101,15 @@ export function SettingsPage() {
                 onBlur={commitName}
                 onKeyDown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); }}
                 aria-invalid={nameInvalid || undefined}
+                // Same well the other name fields use. Left unstyled, a text
+                // input falls back to the browser's white ground and black
+                // text, which is legible but reads as a hole in a dark panel.
                 style={{
                   marginTop: 4, width: '100%', padding: '8px 10px',
                   borderRadius: SW_RADIUS.sm,
                   border: `1px solid ${nameInvalid ? SW_COLORS.alarm : SW_COLORS.line}`,
+                  background: SW_COLORS.paperDeep,
+                  color: SW_COLORS.ink,
                   fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700,
                   outline: 'none',
                 }}

@@ -527,6 +527,12 @@ export interface PmlBlockParams {
    *  case where one cut stroke produces N panels in a single emission.
    *  Default 1. */
   piecesPerAgent?: number;
+  /** Source — priority class stamped on every bundle this Source emits.
+   *  1 = highest. Read by stations whose discipline is `Priority`: a bundle
+   *  from a lower-numbered Source is served ahead of one from a higher-
+   *  numbered Source, FIFO within a class. Only bites where two Sources
+   *  feed the same station. Default 1. */
+  sourcePriority?: number;
   /**
    * Service / Queue — per-station queue discipline, the `e` field of
    * Kendall–Lee. Overrides the bound operation's discipline for THIS station
@@ -710,6 +716,8 @@ export interface ResolvedBlockParams {
   batchSize: number;
   /** Source — pieces per generated agent. */
   piecesPerAgent: number;
+  /** Source — priority class stamped on emitted bundles. 1 = highest. */
+  sourcePriority: number;
   /** Service — parallel-server cap at the station. Default 1. */
   servers: number;
   /** Service / Delay / Hold / Conveyor / MoveTo — per-agent cycle distribution
@@ -767,6 +775,11 @@ export function getBlockParams(
   // Pieces per Source-generated agent — explicit > default 1.
   const piecesPerAgent = Math.max(1, Math.round(p.piecesPerAgent ?? 1));
 
+  // Priority class stamped on this Source's bundles — explicit > default 1.
+  // Every Source sharing the default means every bundle ties, and a Priority
+  // station degrades to FCFS, which is the correct single-class answer.
+  const sourcePriority = Math.max(1, Math.round(p.sourcePriority ?? 1));
+
   // Parallel-server cap for Service blocks. Stations are single-server by
   // default (one machine per workstation); reinforced stations bump this.
   const servers = Math.max(1, Math.round(p.servers ?? numProp(fx, 'servers') ?? 1));
@@ -785,6 +798,7 @@ export function getBlockParams(
     queueCapacity,
     batchSize,
     piecesPerAgent,
+    sourcePriority,
     servers,
     cycleDist,
     arrivalDist,
@@ -824,7 +838,7 @@ const FIELD_SOURCE_RATE: ParamFieldSpec = {
   quantity: 'lambda',
   unit: '/hr',
   step: 1,
-  hint: 'Bundles released into the line per hour. 60 = one a minute, on average.',
+  hint: 'How many bundles enter the line each hour. 60 = one a minute.',
   resolveDefault: (r) => r.sourceRatePerHr,
 };
 
@@ -834,7 +848,7 @@ const FIELD_CYCLE_S: ParamFieldSpec = {
   quantity: 'serviceTime',
   unit: 's',
   step: 1,
-  hint: 'Mean seconds one server takes per bundle (1/μ).',
+  hint: 'Seconds one operator spends on one bundle, on average.',
   resolveDefault: (r) => r.cycleS,
 };
 
@@ -843,7 +857,7 @@ const FIELD_PASS_PROB: ParamFieldSpec = {
   label: 'Pass',
   unit: '%',
   step: 0.5,
-  hint: 'Share routed to the pass port; the rest go to fail.',
+  hint: 'Percent that leaves by the pass port. The rest go to fail.',
   resolveDefault: (r) => Math.round(r.passProb * 1000) / 10,
 };
 
@@ -852,7 +866,7 @@ const FIELD_CAPACITY: ParamFieldSpec = {
   label: 'Capacity',
   unit: ' units',
   step: 1,
-  hint: 'Concurrent units this pool provides, such as operators.',
+  hint: 'How many operators this pool can lend out at once.',
   resolveDefault: (r) => r.capacity,
 };
 
@@ -861,7 +875,7 @@ const FIELD_BATCH_SIZE: ParamFieldSpec = {
   label: 'Batch size',
   unit: ' agents',
   step: 1,
-  hint: 'Agents collected before one bundle is emitted.',
+  hint: 'How many pieces are collected before one bundle moves on.',
   resolveDefault: (r) => r.batchSize,
 };
 
@@ -870,8 +884,28 @@ const FIELD_PIECES_PER_AGENT: ParamFieldSpec = {
   label: 'Pieces / agent',
   unit: '',
   step: 1,
-  hint: 'Pieces carried per emission. 50 = one cut → fifty panels.',
+  hint: 'Pieces in each bundle released. 50 = one cut makes fifty panels.',
   resolveDefault: (r) => r.piecesPerAgent,
+};
+
+/**
+ * Priority class for the bundles a Source releases — the knob the `Priority`
+ * discipline actually reads.
+ *
+ * It lives on the Source rather than on the bundle because a bundle has no
+ * authored identity to hang it off: what makes a bundle "rush" is where it
+ * came from. Point a second Source at the same station, set it to 1 and the
+ * first to 2, and that Source's bundles jump the queue.
+ */
+const FIELD_SOURCE_PRIORITY: ParamFieldSpec = {
+  id: 'sourcePriority',
+  label: 'Priority',
+  unit: '',
+  step: 1,
+  hint:
+    'Which work jumps the queue. 1 goes first. Only does anything where two '
+    + 'sources feed one station set to Priority.',
+  resolveDefault: (r) => r.sourcePriority,
 };
 
 /**
@@ -888,9 +922,7 @@ const FIELD_SERVERS: ParamFieldSpec = {
   quantity: 'servers',
   unit: '',
   step: 1,
-  hint:
-    'Operators working this station in parallel. c = 2 is two people on the same '
-    + 'operation — shorter queue, one more operator. This station only.',
+  hint: 'Operators working side by side here. More operators, shorter queue.',
   resolveDefault: (r) => r.servers,
 };
 
@@ -909,14 +941,14 @@ const FIELD_QUEUE_CAPACITY: ParamFieldSpec = {
   unit: ' max at station',
   step: 1,
   hint:
-    'Bundles allowed at the station at once — the cart or rack size. 0 = no limit. '
-    + 'Above 0, arrivals that find it full balk and upstream blocks.',
+    'How many bundles fit at the station — the cart or rack size. 0 = no limit. '
+    + 'When it is full, new work is turned away.',
   resolveDefault: (r) => r.queueCapacity,
 };
 
 /** Per-kind list of authored fields, in the order the Inspector renders. */
 export const PARAM_FIELDS_BY_KIND: Partial<Record<PmlBlockKind, ParamFieldSpec[]>> = {
-  Source: [FIELD_SOURCE_RATE, FIELD_PIECES_PER_AGENT],
+  Source: [FIELD_SOURCE_RATE, FIELD_PIECES_PER_AGENT, FIELD_SOURCE_PRIORITY],
   Service: [FIELD_CYCLE_S, FIELD_SERVERS, FIELD_QUEUE_CAPACITY],
   // A Queue has no servers, but it does have a capacity, and the engine
   // enforces it (`canAcceptAt`). It previously had no fields at all.

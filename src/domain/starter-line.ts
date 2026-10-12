@@ -16,8 +16,7 @@
  * that (and drift from it).
  *
  * On top of the graph this adds the people and the demand: one Operator record
- * per station with a primary Assignment, and a production order wired into the
- * line's `orderSequence`.
+ * per station with a primary Assignment, and a daily output target on the line.
  */
 
 import { GARMENT_TEMPLATES } from './garments';
@@ -27,29 +26,12 @@ import {
   newOperatorId,
   type Assignment,
   type Operator,
-  type Order,
   type Twin,
 } from './twin';
 import { getBlockKind } from './pml';
 
 /** Garment the starter line runs. 27 operations, 8.41 min total SMV. */
 const STARTER_GARMENT_ID = 'tshirt';
-
-/**
- * Pieces on the seeded order — a realistic bulk apparel PO, and deliberately
- * far larger than one shift.
- *
- * A Source running an `orderSequence` STOPS once the sequence is exhausted, and
- * an idle line has no steady state: ρ, L̄q and Ŵq all collapse toward zero
- * because the observation window fills with dead time. The line's bottleneck
- * operation is 0.70 min, so it caps near 86 pcs/hr and is offered ~73 pcs/hr —
- * meaning a 1,200-piece order would run dry around minute 990 and every
- * analysis longer than that would silently report an idle factory.
- *
- * 25,000 pieces is both an ordinary knit-tee PO and about 340 machine-hours of
- * work, so the line stays loaded for any run length a user will ask for.
- */
-const STARTER_ORDER_QTY = 25_000;
 
 export function buildStarterLine(name: string = 'Starter Factory'): Twin {
   const garment = GARMENT_TEMPLATES[STARTER_GARMENT_ID];
@@ -93,24 +75,12 @@ export function buildStarterLine(name: string = 'Starter Factory'): Twin {
     });
   });
 
-  const order: Order = {
-    id: 'ord-starter-1',
-    po: 'PO-0001',
-    client: 'Sample Buyer',
-    garmentId: garment.id,
-    quantity: STARTER_ORDER_QTY,
-    priority: 1,
-    assignedLineId: line.id,
-    createdAt: twin.createdAt,
-  };
-
   return {
     ...twin,
     name,
-    lines: [{ ...line, orderSequence: [order.id] }],
+    lines: [line],
     operators,
     assignments,
-    orders: [order],
     notes:
       `Starter line — ${garment.name}, ${serviceStations.length} stations, `
       + `total SMV ${garment.totalSmv.toFixed(2)} min, ${operators.length} operators. `

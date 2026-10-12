@@ -157,6 +157,24 @@ export function shiftProgressPct(
   return Math.min(100, (inShift / Math.max(1, shiftDurationMin)) * 100);
 }
 
+/**
+ * Plain-language elapsed duration — "45 s", "5 min", "1h 20m".
+ *
+ * `fmtModelTime` writes the same instant as "t = 5.0 min", which is how a
+ * modelling text writes it and not how anyone says it. This is the form for
+ * surfaces read at a glance while the run is moving.
+ */
+export function fmtElapsed(t: number, unit: ModelTimeUnit): string {
+  if (!Number.isFinite(t)) return '—';
+  const secs = t * SECONDS_PER[unit];
+  if (secs < 60) return `${Math.round(secs)} s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h} h` : `${h}h ${m}m`;
+}
+
 /** Parse "HH:MM" into total minutes-of-day. Returns 0 on malformed input. */
 export function parseHHMM(s: string): number {
   const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
@@ -173,17 +191,3 @@ export function fmtMinutesAsHHMM(min: number): string {
   return `${pad2(h)}:${pad2(m)}`;
 }
 
-/** Tooltip glossary — one terse line per time kind. */
-export const TIME_GLOSSARY = {
-  MODEL:
-    "Model time — the simulation's internal clock. " +
-    '"t = 83 min" means 83 simulated minutes have elapsed. ' +
-    'Independent of your device clock.',
-  CAL:
-    'Calendar time — model time projected onto a real date, using the ' +
-    "project's start date and shift-start. Use this to read 'what " +
-    "date/time would this be on the floor?'.",
-  WALL:
-    'Wall time — the actual clock on this device. Shown on saves, exports ' +
-    "and CSV filenames. Not the simulation's time.",
-} as const;

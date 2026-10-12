@@ -1,8 +1,8 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, EmptyState, useConfirm } from '../components';
+import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, EmptyState, NewGarmentTemplateDialog, NumberInput, useConfirm } from '../components';
 import { useRef, useState, useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ALL_WORKER_ARCHETYPES,
   WORKER_ARCHETYPES,
@@ -43,13 +43,18 @@ import {
  * once the project file format and roster scheduler land.
  */
 export function ResourcesPage() {
-  // ?tab=operations&garment=<id> lets pages like Orders deep-link straight to
-  // the operations editor for a specific garment.
+  // ?tab=operations&garment=<id> lets other surfaces deep-link straight to the
+  // operations editor for a specific garment, and `&new=1` opens the
+  // new-garment dialog on arrival — the Builder links in with both, because
+  // "edit this garment's bulletin" and "add a garment" are asked from there
+  // and this page is the only place either can be done.
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const initialTab = (searchParams.get('tab') as
     | 'operators' | 'machines' | 'skills' | 'operations'
     | null) ?? 'operators';
   const initialGarment = searchParams.get('garment') ?? undefined;
+  const openNewGarment = searchParams.get('new') === '1';
   const [tab, setTab] = useState<'operators' | 'machines' | 'skills' | 'operations'>(initialTab);
   const project = useProject();
   const garments = useGarments();
@@ -132,7 +137,13 @@ export function ResourcesPage() {
         <SectionHeader kicker="Resources" title="People & machines"
           sub="Manage your factory's workforce and equipment. Operators and machines are seeded from the apparel domain catalog."
           right={
-            <Button variant="primary" size="sm" icon="+">Add new</Button>
+            /* Back to the floor this library feeds. It replaces an "+ Add new"
+               primary that had no handler at all — the loudest control on the
+               page did nothing, while the real add buttons live inside each
+               tab, where what is being added is unambiguous. */
+            <Button variant="secondary" size="sm" onClick={() => navigate('/line')}>
+              ← Back to Builder
+            </Button>
           }/>
         <div style={{ marginTop: 8 }}>
           <ToggleGroup value={tab} onChange={setTab} options={[
@@ -297,7 +308,7 @@ export function ResourcesPage() {
         )}
 
         {tab==='operations' && (
-          <OperationsPanel garments={garments} initialGarmentId={initialGarment}/>
+          <OperationsPanel garments={garments} initialGarmentId={initialGarment} openNewGarment={openNewGarment}/>
         )}
 
         {tab==='skills' && (
@@ -335,17 +346,20 @@ const ALL_OPERATION_CATEGORIES: OperationCategory[] = [
 interface OperationsPanelProps {
   garments: EffectiveGarments;
   /** Optional deep-link target — when set, the panel opens with this garment
-   *  pre-selected (e.g. from Orders ?garment=<id>). */
+   *  pre-selected (e.g. from the Builder inspector's ?garment=<id>). */
   initialGarmentId?: string;
+  /** Open the new-garment dialog on mount — the landing state for a
+   *  "+ New garment" link arriving from another surface. */
+  openNewGarment?: boolean;
 }
 
 /**
  * Operation library editor — pick a garment, edit / add / reorder / delete
  * its operations. Edits are stored in `project.garmentEdits` (built-in or
  * custom) and flow through `useGarments()` so every read site (LiveSim,
- * Yamazumi, Twin run-line, etc.) picks them up immediately.
+ * Line Balance, Twin run-line, etc.) picks them up immediately.
  */
-function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
+function OperationsPanel({ garments, initialGarmentId, openNewGarment }: OperationsPanelProps) {
   const project = useProject();
   const confirm = useConfirm();
   const [garmentId, setGarmentId] = useState<string>(
@@ -367,6 +381,7 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importSummary, setImportSummary] = useState<string | null>(null);
+  const [newGarmentOpen, setNewGarmentOpen] = useState(!!openNewGarment);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleImportPick = (files: FileList | null) => {
@@ -510,23 +525,16 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
     project.addOperation(garmentId, builtIn, newOp);
   }
 
-  function newCustomGarment() {
-    const name = prompt('New garment name', 'Custom garment');
-    if (!name) return;
-    const id = `custom-${Date.now().toString(36)}`;
-    const blank: GarmentTemplate = {
-      id,
-      name,
-      class: 'top',
-      description: 'User-defined garment.',
-      operations: [],
-      defaultBundleSize: 20,
-      totalSmv: 0,
-      hourlyTarget100: 0,
-      bestFor: '',
-    };
-    project.setGarmentEdit(id, blank);
-    setGarmentId(id);
+  /** Persist a garment authored in the new-template dialog and select it.
+   *
+   *  This replaced a `prompt()` that produced a garment with zero operations —
+   *  a template you then had to build row by row before it could be run. The
+   *  dialog parses a whole bulletin at once, so a new garment arrives usable.
+   */
+  function createGarment(g: GarmentTemplate) {
+    project.setGarmentEdit(g.id, g);
+    setGarmentId(g.id);
+    setNewGarmentOpen(false);
   }
 
   return (
@@ -547,7 +555,7 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
             }))}
           />
           <div style={{ flex: 1 }}/>
-          <Button variant="secondary" size="sm" icon="+" onClick={newCustomGarment}>New garment</Button>
+          <Button variant="secondary" size="sm" icon="+" onClick={() => setNewGarmentOpen(true)}>New garment</Button>
           {/* Import from Excel — feeds an industry operation-breakdown sheet
               (Modelama / Brandix / generic ERP export) through
               `parseGarmentXlsx` and previews the result in a confirm modal.
@@ -649,12 +657,15 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Name</div>
               <input value={garment.name} onChange={(e) => patch({ name: e.target.value })}
-                style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700 }}/>
+                aria-label="Garment name"
+                style={headerField}/>
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Description</div>
               <input value={garment.description} onChange={(e) => patch({ description: e.target.value })}
-                style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink }}/>
+                aria-label="Garment description"
+                placeholder="What is this garment?"
+                style={headerField}/>
             </div>
           </div>
           {/* Bundle size + Total SAM share one card — they're both "size of a
@@ -670,13 +681,29 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
           }}>
             <label style={{ padding: '6px 10px', borderRight: `1px solid ${SW_COLORS.line}`, display: 'block', cursor: 'text' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Default bundle size</div>
-              <input type="number" min={1} max={500} value={garment.defaultBundleSize}
-                onChange={(e) => patch({ defaultBundleSize: Math.max(1, parseInt(e.target.value) || 1) })}
-                style={{ width: '100%', padding: 0, border: 'none', background: 'transparent', fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700, outline: 'none' }}/>
+              {/* Borderless on purpose — the surrounding `<label>` cell is the
+                  well and the whole cell is the click target, so a second
+                  border inside it would read as a box in a box. It still needs
+                  `color` + `colorScheme`: transparent over `paperDeep` left the
+                  UA's dark `fieldtext` on a dark ground. */}
+              <NumberInput value={garment.defaultBundleSize} min={1} max={500}
+                aria-label="Default bundle size"
+                onChange={(v) => { if (v !== undefined) patch({ defaultBundleSize: v }); }}
+                style={{
+                  ...headerField,
+                  padding: 0,
+                  border: 'none',
+                  borderRadius: 0,
+                  background: 'transparent',
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 14,
+                }}/>
             </label>
             <div style={{ padding: '6px 10px' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Total SAM</div>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}>
+              {/* Ink, not brand — this one is summed from the operations table,
+                  so it is the derived half of the pair. */}
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700, color: SW_COLORS.ink }}>
                 {garment.totalSmv.toFixed(3)} min
                 <span style={{ color: SW_COLORS.muted, fontWeight: 600, marginLeft: 6, fontSize: 11 }}>· {garment.operations.length} ops</span>
               </div>
@@ -718,8 +745,9 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
                   />
                 </td>
                 <td style={{ padding: '6px 6px' }}>
-                  <input type="number" step={0.01} min={0.001} value={op.smv}
-                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { smv: Math.max(0.001, parseFloat(e.target.value) || 0.001) })}
+                  <NumberInput value={op.smv} step={0.01} min={0.001}
+                    aria-label={`SMV for ${op.name}`}
+                    onChange={(v) => { if (v !== undefined) project.updateOperation(garmentId, builtIn, op.id, { smv: v }); }}
                     style={{ ...cellInput(72), fontFamily: SW_FONTS.mono, fontWeight: 700 }}
                   />
                 </td>
@@ -783,7 +811,7 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
       </Card>
 
       <div style={{ padding: 12, background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-        Edits flow live to <strong style={{ color: SW_COLORS.ink }}>LiveSim</strong>, the <strong style={{ color: SW_COLORS.ink }}>Yamazumi chart</strong> on Reports, the
+        Edits flow live to <strong style={{ color: SW_COLORS.ink }}>LiveSim</strong>, the <strong style={{ color: SW_COLORS.ink }}>Line Balance</strong> tab on Reports, the
         <strong style={{ color: SW_COLORS.ink }}> Factory Twin's run-line</strong>, and the <strong style={{ color: SW_COLORS.ink }}>skill matrix</strong>. Total SAM auto-recomputes on every change.
         Built-in garments restore their defaults via <em>Reset to built-in</em>; custom garments live entirely in your project file.
       </div>
@@ -868,6 +896,12 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
           onConfirm={commitImport}
           onSkip={skipImport}
           onConfirmAll={importBatch.length > 1 ? commitAllImports : undefined}
+        />
+      )}
+      {newGarmentOpen && (
+        <NewGarmentTemplateDialog
+          onCancel={() => setNewGarmentOpen(false)}
+          onCreate={createGarment}
         />
       )}
     </div>
@@ -1305,6 +1339,46 @@ function cellInput(width: number): React.CSSProperties {
   };
 }
 
+/**
+ * The garment header's three editable fields — Name, Description, Default
+ * bundle size.
+ *
+ * These were the last inputs in the app still carrying hand-rolled styles, and
+ * all three were unreadable for the same reason: an `<input>` left without a
+ * `background` falls back to the UA's light `field` ground, and left without a
+ * `color` to the UA's dark `fieldtext`. Name got UA-on-UA (legible, but a white
+ * hole punched in a dark panel); Description set `color: ink` and kept the
+ * white ground, so near-white text sat on near-white; bundle size set
+ * `background: transparent` over the `paperDeep` well and kept UA text, so
+ * near-black sat on near-black. Two of the three were invisible.
+ *
+ * `colorScheme: 'dark'` is what actually fixes the class of bug rather than
+ * these three instances: it moves the UA's own `field`/`fieldtext`/caret
+ * defaults to their dark variants, so the fallbacks are dark-correct even
+ * where a style is later overridden.
+ *
+ * The typed value reads in `brand`, not `ink`: everything in this header is
+ * authored by the user, and the header sits directly above an operations table
+ * whose numbers are computed from it (Total SAM, the SMV column). Orange for
+ * "you typed this", ink for "the app derived this" — 6.8:1 on `paper` and
+ * 6.2:1 on `paperDeep`, so both clear AA.
+ */
+const HEADER_FIELD_TEXT = SW_COLORS.brand;
+
+const headerField: React.CSSProperties = {
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: SW_RADIUS.sm,
+  border: `1px solid ${SW_COLORS.line}`,
+  background: SW_COLORS.paper,
+  color: HEADER_FIELD_TEXT,
+  colorScheme: 'dark',
+  fontFamily: SW_FONTS.body,
+  fontSize: 13,
+  fontWeight: 700,
+  outline: 'none',
+};
+
 // ── Skill matrix ────────────────────────────────────────────────────────────
 
 interface SkillMatrixPanelProps {
@@ -1403,12 +1477,10 @@ function SkillMatrixPanel({
                   const eff = effFor(op, operation);
                   return (
                     <td key={operation.id} style={{ padding: 1, textAlign: 'center', background: cellColor(eff) }}>
-                      <input
-                        type="number" min={0} max={120} step={5} value={Math.round(eff * 100)}
-                        onChange={(e) => {
-                          const v = Math.max(0, Math.min(120, parseInt(e.target.value) || 0));
-                          setSkill(op.id, operation.id, v / 100);
-                        }}
+                      <NumberInput
+                        min={0} max={120} step={5} value={Math.round(eff * 100)}
+                        aria-label={`Skill %`}
+                        onChange={(v) => { if (v !== undefined) setSkill(op.id, operation.id, v / 100); }}
                         style={{
                           width: '100%', padding: '4px 0', textAlign: 'center',
                           background: 'transparent', border: 'none',

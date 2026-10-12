@@ -150,7 +150,7 @@ function mmcChainTwin(opts: {
       { id: deptId, name: 'Sewing Floor', kind: 'Sewing', color: 'blue', bounds: { x: 0, y: 0, w: chain.length + 2, h: 4 } },
     ],
     lines: [
-      { id: lineId, deptId, name: 'Line 1', productionSystem: 'PBS', color: 'blue' },
+      { id: lineId, deptId, name: 'Line 1', color: 'blue' },
     ],
     workstations: chain,
     connectors: connectors as Twin['connectors'],

@@ -51,14 +51,6 @@ describe('the starter line', () => {
     }
   });
 
-  it('carries an order committed to the line', () => {
-    expect(twin.orders?.length).toBe(1);
-    const order = twin.orders![0];
-    expect(order.garmentId).toBe(garment.id);
-    expect(order.assignedLineId).toBe(twin.lines[0].id);
-    expect(twin.lines[0].orderSequence).toEqual([order.id]);
-  });
-
   it('passes the engine pre-flight with no errors', () => {
     const issues = validatePmlGraph(twin);
     expect(issues.filter((i) => i.level === 'error')).toHaveLength(0);
@@ -113,15 +105,22 @@ describe('the starter line', () => {
     expect(peakLq).toBeLessThan(200);
   });
 
-  it('does not run its order dry inside a long analysis run', () => {
-    // A Source on an exhausted orderSequence stops emitting, and an idle line
-    // has no steady state — every observable decays toward zero as dead time
-    // fills the window. The seeded order is sized so this can't happen at any
-    // run length a user will ask for.
-    const r = runPmlSim({ twin, durationMin: 10_000, seed: 3, samplePeriodMin: 0 });
+  it('keeps the line loaded for the whole of a long analysis run', () => {
+    // An idle line has no steady state — every observable decays toward zero
+    // as dead time fills the observation window. This used to be a real risk:
+    // the Source ran a finite order sequence and stopped once it was
+    // exhausted. Sources are unbounded now, so the guarantee is structural,
+    // and this pins it: emission must scale with run length rather than
+    // plateauing partway through.
     const source = twin.workstations.find((ws) => getBlockKind(ws) === 'Source')!;
-    const emitted = r.blocks.get(source.id)!.produced;
-    expect(emitted).toBeLessThan(twin.orders![0].quantity);
+    const short = runPmlSim({ twin, durationMin: 1_000, seed: 3, samplePeriodMin: 0 });
+    const long = runPmlSim({ twin, durationMin: 10_000, seed: 3, samplePeriodMin: 0 });
+    const shortEmitted = short.blocks.get(source.id)!.produced;
+    const longEmitted = long.blocks.get(source.id)!.produced;
+    expect(shortEmitted).toBeGreaterThan(0);
+    // 10× the run should emit close to 10× the pieces. Allow slack for
+    // back-pressure, but a Source that quit early would fall far short.
+    expect(longEmitted).toBeGreaterThan(shortEmitted * 8);
   });
 
   it('gives the operator pool enough units not to be the constraint', () => {

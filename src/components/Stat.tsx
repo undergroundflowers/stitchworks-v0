@@ -22,6 +22,16 @@ interface StatProps {
   big?: boolean;
   /** When provided, renders an ⓘ button next to the label that opens a click-popover explaining how the metric is calculated. */
   info?: ReactNode;
+  /**
+   * Makes the whole tile a button, for grids where a tile discloses something
+   * below it (the Lab's derivations). Never pass this together with `info`:
+   * the ⓘ is itself a button and cannot nest inside one.
+   */
+  onClick?: () => void;
+  /** Open state of whatever `onClick` discloses — drives the brand edge and `aria-expanded`. */
+  expanded?: boolean;
+  /** Native tooltip for the tile as a whole. */
+  title?: string;
 }
 
 export function Stat({
@@ -34,18 +44,21 @@ export function Stat({
   color = SW_COLORS.ink,
   big,
   info,
+  onClick,
+  expanded,
+  title,
 }: StatProps) {
-  return (
-    <div
-      style={{
-        background: SW_COLORS.paper,
-        border: `1px solid ${SW_COLORS.line}`,
-        borderRadius: SW_RADIUS.md,
-        padding: big ? 18 : 14,
-        position: 'relative',
-        overflow: 'visible',
-      }}
-    >
+  const shell: React.CSSProperties = {
+    background: SW_COLORS.paper,
+    border: `1px solid ${expanded ? SW_COLORS.brandEdge : SW_COLORS.line}`,
+    borderRadius: SW_RADIUS.md,
+    padding: big ? 18 : 14,
+    position: 'relative',
+    overflow: 'visible',
+  };
+
+  const body = (
+    <>
       <div
         style={{
           display: 'flex',
@@ -100,6 +113,33 @@ export function Stat({
           {delta > 0 ? '▲' : '▼'} {Math.abs(delta)}
         </div>
       )}
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-expanded={expanded}
+        title={title}
+        style={{
+          ...shell,
+          display: 'block',
+          width: '100%',
+          textAlign: 'left',
+          font: 'inherit',
+          cursor: 'pointer',
+        }}
+      >
+        {body}
+      </button>
+    );
+  }
+
+  return (
+    <div style={shell} title={title}>
+      {body}
     </div>
   );
 }
@@ -143,9 +183,12 @@ function InfoButton({ label, children }: { label: string; children: ReactNode })
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: open ? SW_COLORS.ink : 'transparent',
-          color: open ? '#fff' : SW_COLORS.muted,
-          border: `1px solid ${open ? SW_COLORS.ink : SW_COLORS.line}`,
+          // Open state is a brand fill, not `ink`: an ink chip on this ground
+          // is a near-white dot, and it used to carry near-white `#fff` glyphs
+          // — the "i" vanished exactly when it was active.
+          background: open ? SW_COLORS.brand : 'transparent',
+          color: open ? SW_COLORS.paper : SW_COLORS.muted,
+          border: `1px solid ${open ? SW_COLORS.brand : SW_COLORS.line}`,
           borderRadius: 999,
           fontSize: 9,
           fontWeight: 900,

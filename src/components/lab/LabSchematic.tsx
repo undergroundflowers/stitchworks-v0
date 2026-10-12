@@ -13,7 +13,7 @@
  * read as returns rather than as another forward step.
  */
 
-import { type CSSProperties } from 'react';
+import { type CSSProperties, type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../../design/tokens';
 import { alpha } from '../../design/color-utils';
 import { Sym } from '../Sym';
@@ -459,25 +459,151 @@ function Stage({
   );
 }
 
-/** Legend for the schematic, in the app's caption voice. */
+/**
+ * Legend for the schematic.
+ *
+ * Each entry draws the mark it is naming, at the size and colour the
+ * schematic draws it. It used to be a line of prose — "squares are the
+ * waiting room · circles are servers" — which asked the reader to hold a
+ * description in their head and go matching it against the picture. A legend
+ * whose left-hand column is not the actual mark is a sentence, not a key.
+ *
+ * The swatches are drawn with the same geometry constants `<Stage>` uses, so
+ * a change to the schematic's slot or server shape cannot leave the key
+ * describing the old one.
+ */
+function LegendItem({ swatch, children }: { swatch: ReactNode; children: ReactNode }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <svg width={26} height={14} viewBox="0 0 26 14" style={{ display: 'block', flex: 'none' }}>
+        {swatch}
+      </svg>
+      {children}
+    </span>
+  );
+}
+
 export function LabSchematicLegend({ style }: { style?: CSSProperties }) {
   return (
     <div
       style={{
         display: 'flex',
-        gap: 16,
+        gap: 14,
+        rowGap: 6,
         flexWrap: 'wrap',
+        alignItems: 'center',
         fontFamily: SW_FONTS.mono,
         fontSize: 10,
         color: SW_COLORS.muted,
         ...style,
       }}
     >
-      <span>
-        <Sym quantity="lambda" /> in · squares are the waiting room · circles are servers
-      </span>
-      <span>number at the corner is <Sym quantity="rho" /></span>
-      <span style={{ color: SW_COLORS.warn }}>dashed = work sent back</span>
+      <LegendItem
+        swatch={
+          <>
+            <line
+              x1={0} y1={7} x2={20} y2={7}
+              stroke={SW_COLORS.muted} strokeWidth={1.5}
+              markerEnd="url(#lab-arrow)"
+            />
+          </>
+        }
+      >
+        <span>
+          work in, <Sym quantity="lambda" /> per hour
+        </span>
+      </LegendItem>
+
+      <LegendItem
+        swatch={
+          <>
+            {[0, 1, 2].map((i) => (
+              <rect
+                key={i}
+                x={1 + i * 8.5} y={2} width={6} height={10} rx={2}
+                fill={i === 0 ? alpha(SW_COLORS.ok, 0.55) : 'none'}
+                stroke={SW_COLORS.line} strokeWidth={1}
+              />
+            ))}
+          </>
+        }
+      >
+        <span>
+          waiting room — filled slots track <Sym quantity="Lq" />
+        </span>
+      </LegendItem>
+
+      <LegendItem
+        swatch={
+          <>
+            <circle
+              cx={8} cy={7} r={5}
+              fill={alpha(SW_COLORS.ok, 0.9)} stroke={SW_COLORS.ok} strokeWidth={1}
+            />
+            <circle
+              cx={19} cy={7} r={5}
+              fill={alpha(SW_COLORS.ok, 0.9)} stroke={SW_COLORS.ok} strokeWidth={1}
+            />
+          </>
+        }
+      >
+        <span>
+          servers, <Sym quantity="servers" /> of them
+        </span>
+      </LegendItem>
+
+      <LegendItem
+        swatch={
+          <>
+            <rect x={1} y={2} width={24} height={10} rx={2} fill="none" stroke={SW_COLORS.line} />
+            <text
+              x={23} y={10} textAnchor="end"
+              fill={SW_COLORS.ok} fontFamily={SW_FONTS.mono} fontSize={7} fontWeight={700}
+            >
+              0.72
+            </text>
+          </>
+        }
+      >
+        <span>
+          corner figure is <Sym quantity="rho" /> — green under 85%, amber to
+          100%, red at or past it
+        </span>
+      </LegendItem>
+
+      <LegendItem
+        swatch={
+          <>
+            <path
+              d="M 1 3 C 6 13, 16 13, 21 4"
+              fill="none" stroke={SW_COLORS.warn} strokeWidth={1.5} strokeDasharray="4 3"
+              markerEnd="url(#lab-arrow-back)"
+            />
+          </>
+        }
+      >
+        <span style={{ color: SW_COLORS.warn }}>work sent back — rework</span>
+      </LegendItem>
+
+      {/* The arrowheads above are `<marker>` refs, and a marker only resolves
+          inside a document that defines it. The schematic's own `<defs>` live
+          in its `<svg>`, so the legend carries a zero-sized copy of them. */}
+      <svg width={0} height={0} aria-hidden style={{ position: 'absolute' }}>
+        <defs>
+          <marker
+            id="lab-arrow" viewBox="0 0 8 8" refX="7" refY="4"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse"
+          >
+            <path d="M0 0 L8 4 L0 8 z" fill={SW_COLORS.muted} />
+          </marker>
+          <marker
+            id="lab-arrow-back" viewBox="0 0 8 8" refX="7" refY="4"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse"
+          >
+            <path d="M0 0 L8 4 L0 8 z" fill={SW_COLORS.warn} />
+          </marker>
+        </defs>
+      </svg>
     </div>
   );
 }
